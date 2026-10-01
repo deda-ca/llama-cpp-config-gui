@@ -1,0 +1,66 @@
+{
+  "name": "llama-cpp-config-gui",
+  "version": "0.3.0",
+  "description": "A desktop-style web app for configuring and launching llama.cpp inference, with a live GPU & system monitoring dashboard.",
+  "keywords": [
+    "llama.cpp",
+    "llama-server",
+    "llm",
+    "inference",
+    "gpu",
+    "nvidia",
+    "config",
+    "gui",
+    "vue",
+    "typescript"
+  ],
+  "author": {
+    "name": "Chabel Choueiri",
+    "url": "https://github.com/deda-ca",
+    "email": "charbel.choueiri@gmail.com"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/deda-ca/llama-cpp-config-gui.git"
+  },
+  "homepage": "https://github.com/deda-ca/llama-cpp-config-gui#readme",
+  "bugs": {
+    "url": "https://github.com/deda-ca/llama-cpp-config-gui/issues"
+  },
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:client": "vite",
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
+    "start": "node dist/server/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "release": "bun run scripts/build-release.ts",
+    "release:start": "./release/llama-cpp-config-gui"
+  },
+  "dependencies": {
+    "express": "^5.2.1"
+  },
+  "devDependencies": {
+    "@semantic-release/changelog": "^7.0.0",
+    "@semantic-release/git": "^11.0.1",
+    "@semantic-release/npm": "^13.2.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.3",
+    "@types/supertest": "^7.2.1",
+    "@vitejs/plugin-vue": "^6.0.9",
+    "concurrently": "^10.0.5",
+    "semantic-release": "^25.0.9",
+    "supertest": "^7.3.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2",
+    "vitest": "^5.0.3",
+    "vue": "^3.5.43"
+  }
+}

@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Semantic Release
+        id: semantic
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx semantic-release 2>&1 | tee release-output.log
+          # Extract the released version (empty if no release was made)
+          VERSION=$(grep -oP 'The next release version is \K[0-9]+\.[0-9]+\.[0-9]+' release-output.log || true)
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Build binary (if released)
+        if: steps.semantic.outputs.version != ''
+        run: |
+          npm run release
+
+      - name: Upload binary to GitHub Release
+        if: steps.semantic.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.semantic.outputs.version }}"
+          ZIP_NAME="llama-cpp-config-gui-v${VERSION}-linux-x64.zip"
+          cd release
+          zip "${ZIP_NAME}" llama-cpp-config-gui
+          cd ..
+          gh release upload "v${VERSION}" "${ZIP_NAME}" --clobber
