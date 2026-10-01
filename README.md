@@ -87,7 +87,11 @@ Each model config maps to a router **alias** and holds an ordered set of paramet
 - **Speculative decoding** — `--spec-type`, `--spec-draft-n-max`, `--model-draft`
 - **Other** — `--mmproj`, `--jinja`, `--parallel`, `--port`, `--alias`, plus any unknown flags (kept as raw key/value pairs)
 
-Unknown or experimental flags are preserved verbatim, so newer llama.cpp options keep working.
+Unknown or experimental flags are preserved verbatim, so newer llama.cpp options keep working. The picker below shows the searchable parameter list grouped by category, with per-parameter ON/OFF toggles and an **UNKNOWN** section (amber) for custom flags like `load-mode` and `cache-ram`.
+
+<p align="center">
+  <img src="images/config-editor-custom.png" alt="Parameter editor with picker showing known categories and unknown custom parameters" width="900"/>
+</p>
 
 ## Project structure
 
