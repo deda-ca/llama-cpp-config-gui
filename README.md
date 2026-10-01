@@ -22,9 +22,14 @@ A desktop-style web app for configuring and launching [llama.cpp](https://github
 - **Live monitoring** — per-GPU VRAM, temperature, utilization and power (via `nvidia-smi`), plus CPU, RAM and disk usage.
 - **Logs & metrics** — live process log stream with parsed prefill / generation tokens-per-second and a model status panel.
 - **Environment config** — set the llama.cpp build folder, models folder, host/port, API key and per-launch environment variables (e.g. `CUDA_VISIBLE_DEVICES`).
+- **Compact mode** — toggle a minimal monitor-only view (◫) to keep GPU/system stats visible in a narrow window while you work elsewhere.
 
 <p align="center">
   <img src="images/config-editor.png" alt="Config editor" width="900"/>
+</p>
+
+<p align="center">
+  <img src="images/compact-mode.png" alt="Compact mode: GPU, system and model status monitors in a narrow window" width="450"/>
 </p>
 
 ## Requirements
