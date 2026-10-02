@@ -117,6 +117,22 @@ describe('Model Config API', () => {
     expect(res.body.alias).toContain('Test Model');
   });
 
+  it('PUT /api/models/configs/reorder persists a config order', async () => {
+    const list = await request(app).get('/api/models');
+    const ids = list.body.configs.map((c: any) => c.id);
+    const reversed = [...ids].reverse();
+
+    const res = await request(app)
+      .put('/api/models/configs/reorder')
+      .send({ configOrder: reversed });
+
+    expect(res.status).toBe(200);
+    expect(res.body.configOrder).toEqual(reversed);
+
+    const after = await request(app).get('/api/models');
+    expect(after.body.configOrder).toEqual(reversed);
+  });
+
   it('DELETE /api/models/configs/:id removes a config', async () => {
     const list = await request(app).get('/api/models');
     const cfg = list.body.configs.find((c: any) => c.alias === 'Test Model');

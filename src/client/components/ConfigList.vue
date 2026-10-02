@@ -27,6 +27,9 @@ const editing = ref(false); // false = view mode (list only), true = editor open
 const showNewModal = ref(false);
 const newAlias = ref('');
 const newTemplateId = ref('');
+const dragId = ref<string | null>(null);
+const dropTargetId = ref<string | null>(null);
+const dragEnabledId = ref<string | null>(null);
 
 const selectedConfig = computed(() => configs.value.find((c) => c.id === selectedId.value) || null);
 
@@ -158,11 +161,17 @@ async function loadData() {
     ]);
     if (modelsRes.ok) {
       const data = await modelsRes.json();
-      configs.value = data.configs;
+      const orderedIds = Array.isArray(data.configOrder) ? data.configOrder : data.configs.map((c: ModelConfig) => c.id);
+      const byId = new Map((data.configs || []).map((c: ModelConfig) => [c.id, c]));
+      configs.value = orderedIds
+        .map((id: string) => byId.get(id))
+        .filter(Boolean) as ModelConfig[];
+      const leftover = (data.configs || []).filter((c: ModelConfig) => !orderedIds.includes(c.id));
+      configs.value.push(...leftover);
       templates.value = data.templates;
       // Restore persisted launch selection
       selectedForLaunch.value = new Set(
-        data.configs.filter((c: ModelConfig) => c.includeInLaunch).map((c: ModelConfig) => c.id),
+        configs.value.filter((c: ModelConfig) => c.includeInLaunch).map((c: ModelConfig) => c.id),
       );
       // Auto-select default config
       if (data.defaultConfigId) {
@@ -229,6 +238,73 @@ async function onConfigSaved(updated: ModelConfig) {
   const idx = configs.value.findIndex((c) => c.id === updated.id);
   if (idx !== -1) configs.value[idx] = updated;
 }
+
+async function persistConfigOrder() {
+  const order = configs.value.map((cfg) => cfg.id);
+  try {
+    await fetch('/api/models/configs/reorder', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ configOrder: order }),
+    });
+  } catch {
+    // non-fatal; the UI still reflects the local reorder during the session
+  }
+}
+
+function onGlobalMouseup() {
+  dragEnabledId.value = null;
+}
+
+function onConfigDragStart(id: string, e: DragEvent) {
+  dragId.value = id;
+  e.dataTransfer?.setData('text/plain', id);
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+}
+
+function onConfigDragOver(id: string, e: DragEvent) {
+  e.preventDefault();
+  if (!dragId.value || dragId.value === id) return;
+  dropTargetId.value = id;
+}
+
+function onConfigDrop(targetId: string, e: DragEvent) {
+  e.preventDefault();
+  const srcId = dragId.value;
+  clearConfigDrag();
+  if (!srcId || srcId === targetId) return;
+
+  const sourceIndex = configs.value.findIndex((cfg) => cfg.id === srcId);
+  const targetIndex = configs.value.findIndex((cfg) => cfg.id === targetId);
+  if (sourceIndex === -1 || targetIndex === -1) return;
+
+  const next = [...configs.value];
+  const [moved] = next.splice(sourceIndex, 1);
+  let insertIndex = targetIndex + 1;
+  if (sourceIndex < insertIndex) insertIndex -= 1;
+  next.splice(insertIndex, 0, moved);
+  configs.value = next;
+  persistConfigOrder();
+}
+
+function clearConfigDrag() {
+  dragId.value = null;
+  dropTargetId.value = null;
+  dragEnabledId.value = null;
+}
+
+function configDropClass(id: string): string {
+  if (!dragId.value || dragId.value === id) return '';
+  return dropTargetId.value === id ? 'drop-after' : '';
+}
+
+onMounted(() => {
+  window.addEventListener('mouseup', onGlobalMouseup);
+});
+
+onUnmounted(() => {
+  window.removeEventListener('mouseup', onGlobalMouseup);
+});
 
 function startEditing(id?: string) {
   if (id) selectedId.value = id;
@@ -304,10 +380,22 @@ async function exportIni() {
         v-for="cfg in configs"
         :key="cfg.id"
         class="config-item"
-        :class="{ active: cfg.id === selectedId }"
+        :class="[{ active: cfg.id === selectedId }, configDropClass(cfg.id)]"
+        :draggable="dragEnabledId === cfg.id"
         @click="selectedId = cfg.id"
+        @dragstart="onConfigDragStart(cfg.id, $event)"
+        @dragover="onConfigDragOver(cfg.id, $event)"
+        @drop="onConfigDrop(cfg.id, $event)"
+        @dragend="clearConfigDrag"
       >
         <div class="config-item-main">
+          <button
+            class="drag-handle"
+            title="Drag to reorder"
+            tabindex="-1"
+            @mousedown="dragEnabledId = cfg.id"
+            @click.stop
+          >⋮</button>
           <input
             type="checkbox"
             class="launch-check"
@@ -464,8 +552,10 @@ async function exportIni() {
   transition: background 0.1s;
 }
 
+.config-item[draggable] { cursor: grab; }
 .config-item:hover { background: #21262d; }
 .config-item.active { background: #1f6feb22; border-color: #1f6feb55; }
+.config-item.drop-after { border-bottom-color: #58a6ff; box-shadow: inset 0 -2px 0 #58a6ff; }
 
 .config-item-main {
   display: flex;
@@ -473,6 +563,21 @@ async function exportIni() {
   gap: 8px;
   min-width: 0;
 }
+
+.drag-handle {
+  appearance: none;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  background: #0d1117;
+  color: #8b949e;
+  font-size: 0.7rem;
+  line-height: 1;
+  padding: 3px 5px;
+  cursor: grab;
+  flex-shrink: 0;
+}
+
+.drag-handle:hover { border-color: #58a6ff; color: #e1e4e8; }
 
 .launch-check {
   accent-color: #1f6feb;

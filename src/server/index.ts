@@ -411,9 +411,43 @@ app.post('/api/models/configs', (req, res) => {
     isDefault: false,
   };
   data.configs.push(newConfig);
+  data.configOrder = data.configs.map((cfg) => cfg.id);
   if (!data.defaultConfigId) data.defaultConfigId = newConfig.id;
   saveModels(data);
   res.json(newConfig);
+});
+
+app.put('/api/models/configs/reorder', (req, res) => {
+  const data = loadModels();
+  const orderedIds = Array.isArray(req.body?.configOrder)
+    ? req.body.configOrder.filter((id: unknown) => typeof id === 'string')
+    : [];
+
+  const byId = new Map(data.configs.map((cfg) => [cfg.id, cfg]));
+  const orderedConfigs: ModelConfig[] = [];
+  const seen = new Set<string>();
+
+  for (const id of orderedIds) {
+    const cfg = byId.get(id);
+    if (cfg && !seen.has(id)) {
+      orderedConfigs.push(cfg);
+      seen.add(id);
+    }
+  }
+  for (const cfg of data.configs) {
+    if (!seen.has(cfg.id)) {
+      orderedConfigs.push(cfg);
+      seen.add(cfg.id);
+    }
+  }
+
+  data.configs = orderedConfigs;
+  data.configOrder = orderedConfigs.map((cfg) => cfg.id);
+  if (data.defaultConfigId && !orderedConfigs.some((cfg) => cfg.id === data.defaultConfigId)) {
+    data.defaultConfigId = orderedConfigs[0]?.id || null;
+  }
+  saveModels(data);
+  res.json({ configOrder: data.configOrder, configs: data.configs });
 });
 
 app.put('/api/models/configs/:id', (req, res) => {
@@ -450,6 +484,7 @@ app.put('/api/models/configs/:id/launch-include', (req, res) => {
 app.delete('/api/models/configs/:id', (req, res) => {
   const data = loadModels();
   data.configs = data.configs.filter((c) => c.id !== req.params.id);
+  data.configOrder = data.configs.map((cfg) => cfg.id);
   if (data.defaultConfigId === req.params.id) {
     data.defaultConfigId = data.configs[0]?.id || null;
     if (data.configs[0]) data.configs[0].isDefault = true;
@@ -473,6 +508,7 @@ app.post('/api/models/configs/:id/clone', (req, res) => {
     isDefault: false,
   };
   data.configs.push(clone);
+  data.configOrder = data.configs.map((cfg) => cfg.id);
   saveModels(data);
   res.json(clone);
 });
@@ -543,6 +579,7 @@ app.post('/api/models/import-ini', (req, res) => {
       data.configs.push(cfg);
     }
   }
+  data.configOrder = data.configs.map((cfg) => cfg.id);
   if (!data.defaultConfigId && data.configs.length > 0) {
     data.defaultConfigId = data.configs[0].id;
     data.configs[0].isDefault = true;

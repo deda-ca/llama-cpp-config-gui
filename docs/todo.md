@@ -274,6 +274,11 @@ Fields: `[PID] timestamp LEVEL component function : message`
 - The launch-check and config editing actions continue to work normally.
 - No config data is lost or mutated except for the display order of the top-level list.
 
+**Test plan:**
+- Add a server-side regression test covering persisted model ordering: after reordering the configs array, the saved data contains the new config order and reloads into that same sequence.
+- Add a client-side interaction test (if Vue test utilities are used) that verifies a drag/drop reorder changes the list order without breaking selection or launch checkboxes.
+- Run the focused model-ordering tests first, then the full suite (`npm run test`) and the client/server build checks before the feature is considered complete.
+
 **Notes for implementation:**
 - Prefer server-backed persistence over browser-only localStorage so the order is treated as part of the config state rather than ephemeral UI state.
 - Keep the change minimal and scoped to the model-list ordering feature; avoid changing route logic or launch behavior.
