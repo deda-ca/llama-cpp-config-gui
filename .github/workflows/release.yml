@@ -55,7 +55,5 @@ jobs:
         run: |
           VERSION="${{ steps.semantic.outputs.version }}"
           ZIP_NAME="llama-cpp-config-gui-v${VERSION}-linux-x64.zip"
-          cd release
-          zip "${ZIP_NAME}" llama-cpp-config-gui
-          cd ..
-          gh release upload "v${VERSION}" "${ZIP_NAME}" --clobber
+          zip "release/${ZIP_NAME}" release/llama-cpp-config-gui
+          gh release upload "v${VERSION}" "release/${ZIP_NAME}" --clobber
