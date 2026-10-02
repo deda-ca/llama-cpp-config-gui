@@ -20,22 +20,21 @@
 4. **Show** — Screenshot or terminal output for user review. For UI: launch a real process if needed to generate live data.
 5. **Commit** — Only after explicit user approval. Use conventional commit messages (`feat:`, `fix:`, `chore:`).
 
-## Release Process
+## Release Process (automated)
 
-1. Bump version in `package.json` (patch for fixes, minor for features).
-2. Run `npm run release` — this:
-   - Generates `src/server/version.ts` from package.json
-   - Builds the client with Vite → `dist/client`
-   - Compiles a single executable with `bun build --compile --asset dist/client`
-3. **Verify standalone:** Run the binary from `/tmp` (no project files present):
-   ```bash
-   cd /tmp && PORT=3199 NO_BROWSER=1 ./release/llama-cpp-config-gui &
-   curl -s -o /dev/null -w "%{http_code}" http://localhost:3199/          # expect 200
-   curl -s http://localhost:3199/api/app-version                          # expect {"version":"X.Y.Z"}
-   # Also verify a JS asset returns 200 with correct content-type
-   kill %1
-   ```
-4. Commit `package.json` version bump. Optionally add a git tag (`vX.Y.Z`).
+Releases are fully automated via **semantic-release** on push to `main`:
+
+1. **Use Conventional Commits in PR titles.** GitHub squash-merges use the PR title as the commit message, so the title must be conventional:
+   - `feat: ...` → minor bump (e.g. 0.3.0 → 0.4.0)
+   - `fix: ...` → patch bump (e.g. 0.3.0 → 0.3.1)
+   - `feat!: ...` or `BREAKING CHANGE:` footer → major bump
+2. **Merge to `main`.** The Release workflow (`.github/workflows/release.yml`) then:
+   - Runs `semantic-release` (Node 24) which analyzes commits since the last tag
+   - Bumps `package.json` + lockfile, updates `CHANGELOG.md`, creates a `vX.Y.Z` tag and GitHub Release
+   - Builds the single-file executable (`npm run release` → Bun compile with embedded client)
+   - Uploads the binary as a ZIP asset to the GitHub Release
+3. **No manual version bump needed.** The baseline tag is `v0.3.0`. Each subsequent conventional commit merged to `main` triggers the next release automatically.
+4. **Local build (for testing):** `npm run release` still works standalone — it reads the current `package.json` version, builds the client, and compiles the executable into `release/llama-cpp-config-gui`.
 
 ## Testing Philosophy
 

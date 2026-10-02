@@ -131,7 +131,7 @@ npm run build        # build client (Vite) + compile server (tsc)
 npm run release      # produce the single-file executable in release/
 ```
 
-The dev Vite server proxies `/api` to the backend on `localhost:3001`. Real-time updates (GPU stats, logs, metrics, process status) are streamed over **SSE** (`GET /api/events`).
+The dev Vite server proxies `/api` to the backend on `localhost:3000`. Real-time updates (GPU stats, logs, metrics, process status) are streamed over **SSE** (`GET /api/events`).
 
 ## License
 
