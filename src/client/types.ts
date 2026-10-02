@@ -40,6 +40,7 @@ export interface ModelsFile {
   configs: ModelConfig[];
   templates: ConfigTemplate[];
   defaultConfigId: string | null;
+  configOrder?: string[];
 }
 
 export interface SystemStats {

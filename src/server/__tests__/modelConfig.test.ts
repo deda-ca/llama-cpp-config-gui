@@ -15,7 +15,7 @@ vi.mock('fs', () => ({
 import { loadModels, saveModels, loadParams, saveParams, generateId } from '../modelConfig.js';
 import type { ModelsFile, ParamDef } from '../modelConfig.js';
 
-const emptyModels: ModelsFile = { configs: [], templates: [], defaultConfigId: null };
+const emptyModels: ModelsFile = { configs: [], templates: [], defaultConfigId: null, configOrder: [] };
 
 describe('loadModels / saveModels', () => {
   beforeEach(() => vi.clearAllMocks());
@@ -30,6 +30,7 @@ describe('loadModels / saveModels', () => {
       configs: [{ id: 'a', alias: 'A', displayName: 'A', notes: '', modelPath: '/a.gguf', params: {}, paramOrder: [], isDefault: true }],
       templates: [],
       defaultConfigId: 'a',
+      configOrder: ['a'],
     };
     readFileSync.mockReturnValue(JSON.stringify(data));
     expect(loadModels()).toEqual(data);
@@ -37,6 +38,22 @@ describe('loadModels / saveModels', () => {
     saveModels(data);
     const written = JSON.parse(writeFileSync.mock.calls[0][1] as string);
     expect(written).toEqual(data);
+  });
+
+  it('persists config ordering metadata', () => {
+    const data: any = {
+      configs: [
+        { id: 'b', alias: 'B', displayName: 'B', notes: '', modelPath: '/b.gguf', params: {}, paramOrder: [], isDefault: false },
+        { id: 'a', alias: 'A', displayName: 'A', notes: '', modelPath: '/a.gguf', params: {}, paramOrder: [], isDefault: true },
+      ],
+      templates: [],
+      defaultConfigId: 'a',
+    };
+
+    saveModels(data);
+    const written = JSON.parse(writeFileSync.mock.calls[0][1] as string);
+    expect(written.configOrder).toEqual(['b', 'a']);
+    expect(written.configs.map((c: any) => c.id)).toEqual(['b', 'a']);
   });
 
   it('returns empty state on corrupt file', () => {

@@ -12,10 +12,10 @@ export default defineConfig({
   server: {
     port: 5173,
     proxy: {
-      // Must match the server's PORT (src/server/index.ts defaults to 3001).
+      // Must match the server's PORT (src/server/index.ts defaults to 3000).
       // SSE streams over /api/events, so no separate /ws proxy is needed.
       '/api': {
-        target: 'http://localhost:3001',
+        target: 'http://localhost:3000',
         changeOrigin: true,
       },
     },
