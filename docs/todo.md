@@ -18,6 +18,7 @@
 13. ~~Auto launch browser with the correct url when the application is launched from an executable.~~ ✅
 14. ~~Create a collapsed mode, fix the title tool bar scaling, maybe move the versions somewhere else.~~ ✅
 15. Add metrics / llama.cpp log parsing and some data extractions. Perhaps add coloring to identify error and warnings.
+16. Add the ability to order the model configs list. Order is persistent and stored within the settings.
 
 ---
 
@@ -138,6 +139,12 @@ interface SystemStats {
 
 ## 10. Add the 'temperature' argument along with 'load-mode' with the dropdown options.
 
+**Plan:**
+- Confirm the default param catalog includes `--temp`/`temperature` and the missing `--load-mode` flag with a typed dropdown so the config editor can render it correctly.
+- Add a server-side regression test that checks `DEFAULT_PARAMS` exposes the expected keys and option list.
+- Update `src/server/params-default.ts` with the missing load-mode values and preserve the existing `temp` preset defaults.
+- Verify the relevant tests and project builds still pass.
+
 ## 11. Add the ability to point to different llama.cpp builds for each model or when running.
 
 ## 12. Add the ability to run multiple llama.cpp instances for different models and builds (need review).
@@ -249,3 +256,27 @@ Fields: `[PID] timestamp LEVEL component function : message`
 - When no model is running or no data yet: all values show dimmed "—".
 
 **Verification after each step:** user reviews output before proceeding to next.
+
+## 16. Add the ability to order the model configs list. Order is persistent and stored within the settings.
+
+**Implementation plan:**
+- Add a persisted model-order field alongside the existing saved model data in the server-side models file so list ordering survives reloads and app restarts.
+- Update the config loading path to restore the saved order before rendering the list, and keep the default selection aligned with the ordered array.
+- Add a simple UI control in each model row (arrow buttons or drag handle) that reorders the list in place without changing nested config values.
+- Save the reordered array immediately after each move so the order is durable and consistent with the rest of the model settings.
+- Add a focused regression test to confirm reordering is persisted and restores correctly from disk.
+- After implementation, capture a screenshot of the ordered list in the app and confirm the saved order still exists after a page refresh.
+- If browser tooling is available, record a brief interaction video showing the list reorder and persistence behavior.
+
+**Expected UX:**
+- The model list shows in the selected order.
+- Reordering is persistent across refreshes.
+- The launch-check and config editing actions continue to work normally.
+- No config data is lost or mutated except for the display order of the top-level list.
+
+**Notes for implementation:**
+- Prefer server-backed persistence over browser-only localStorage so the order is treated as part of the config state rather than ephemeral UI state.
+- Keep the change minimal and scoped to the model-list ordering feature; avoid changing route logic or launch behavior.
+- The app already stores config metadata centrally, so the cleanest approach is to extend that existing saved objects model rather than bolt on a separate ordering store.
+- For the client UI, reuse the same native HTML5 drag-and-drop ordering pattern already used for config arguments in `ConfigEditor.vue`: drag from a handle only, drop beneath a target row, and reorder with a splice-based move. This keeps the interaction consistent with the rest of the app instead of introducing a different control style.
+- The model list should persist the final order back through the same server save path used for model data so reloads restore the exact sequence.
