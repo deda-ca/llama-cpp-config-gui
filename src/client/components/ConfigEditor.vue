@@ -383,27 +383,40 @@ const previewIni = computed(() => {
   if (cfg.chatTemplateFile) { lines.push(`chat-template-file = ${cfg.chatTemplateFile}`); written.add('chat-template-file'); }
 
   const disabledSet = new Set(cfg.disabledParams || []);
+  const categoryOrder = ['gpu', 'context', 'sampling', 'reasoning', 'speculative', 'other'];
+
+  // Group params by category, preserving paramOrder within each group
+  const grouped: Record<string, string[]> = {};
   for (const key of cfg.paramOrder) {
     if (written.has(key)) continue;
     const value = cfg.params[key];
     if (value === undefined || value === '') continue;
-    const category = keyToCategory.get(key) || 'other';
-    writeHeader(category);
-    if (value === 'off' && !disabledSet.has(key)) {
-      lines.push(`# ${key} = off`);
-    } else if (disabledSet.has(key)) {
-      lines.push(`# ${key} = ${value}`);
-    } else {
-      lines.push(`${key} = ${value}`);
-    }
-    written.add(key);
+    const cat = keyToCategory.get(key) || 'other';
+    if (!grouped[cat]) grouped[cat] = [];
+    grouped[cat].push(key);
   }
 
+  // Catch any params not in paramOrder
   for (const [key, value] of Object.entries(cfg.params)) {
     if (!written.has(key) && value !== '') {
-      const category = keyToCategory.get(key) || 'other';
-      writeHeader(category);
-      lines.push(`${key} = ${value}`);
+      const cat = keyToCategory.get(key) || 'other';
+      if (!grouped[cat]) grouped[cat] = [];
+      if (!grouped[cat].includes(key)) grouped[cat].push(key);
+    }
+  }
+
+  for (const cat of categoryOrder) {
+    const keys = grouped[cat];
+    if (!keys || !keys.length) continue;
+    writeHeader(cat);
+    for (const key of keys) {
+      const value = cfg.params[key];
+      if (disabledSet.has(key)) {
+        lines.push(`# ${key} = ${value}`);
+      } else {
+        lines.push(`${key} = ${value}`);
+      }
+      written.add(key);
     }
   }
 
@@ -437,7 +450,7 @@ const exportCommand = computed(() => {
     if (disabledSet.has(key)) return null;
     const def = keyToDef.get(key);
     if (def?.inputType === 'toggle') {
-      return (value === 'on' || value === 'true') ? `--${key}` : null;
+      return (value === 'on' || value === 'true') ? `--${key}` : `--${key} off`;
     }
     return `--${key} "${value}"`;
   }

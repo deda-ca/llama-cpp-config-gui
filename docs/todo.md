@@ -20,6 +20,10 @@
 15. Add metrics / llama.cpp log parsing and some data extractions. Perhaps add coloring to identify error and warnings.
 16. Add the ability to order the model configs list. Order is persistent and stored within the settings.
 
+17. Add information about the model such as size, etc.
+18. when selecting models preload them from the model's folder and allow user to to auto complete when selecting.
+19. ~~When a boolean (toggle) argument is unchecked, set it to `off` in the preview and export instead of commenting it out.~~ ✅
+
 ---
 
 ## 1. Move 'ENVIRONMENT' side bar to a dialog box ✅
@@ -285,3 +289,18 @@ Fields: `[PID] timestamp LEVEL component function : message`
 - The app already stores config metadata centrally, so the cleanest approach is to extend that existing saved objects model rather than bolt on a separate ordering store.
 - For the client UI, reuse the same native HTML5 drag-and-drop ordering pattern already used for config arguments in `ConfigEditor.vue`: drag from a handle only, drop beneath a target row, and reorder with a splice-based move. This keeps the interaction consistent with the rest of the app instead of introducing a different control style.
 - The model list should persist the final order back through the same server save path used for model data so reloads restore the exact sequence.
+
+## 19. When a boolean (toggle) argument is unchecked, set it to `off` in the preview and export instead of commenting it out. ✅
+
+**Previous behavior**
+- In `exportRouterIni` (`src/server/routerIni.ts`) and the client-side `previewIni` computed (`ConfigEditor.vue`), when a param value was `'off'` and not in `disabledParams`, it was written as a comment: `# key = off`.
+- The export command omitted off-toggles entirely (returned `null`).
+
+**Fixed behavior**
+- Unchecked toggles now appear as active `key = off` lines in both the INI preview/export and the CLI export command (`--key off`).
+- Only params explicitly disabled by the user (in `disabledParams`) are written as comments.
+
+**Changes made**
+1. `src/server/routerIni.ts` — removed the special-case branch that wrote `# key = off`; now falls through to the normal `key = value` path.
+2. `src/client/components/ConfigEditor.vue` — same fix in `previewIni` computed; `exportCommand` now emits `--key off` instead of omitting.
+3. `src/server/__tests__/routerIni.test.ts` — updated test to assert `load-on-startup = off` is present (not commented).

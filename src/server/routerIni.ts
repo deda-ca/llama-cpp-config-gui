@@ -163,37 +163,41 @@ export function exportRouterIni(configs: ModelConfig[], params: ParamDef[]): str
       written.add('chat-template-file');
     }
 
-    // Write remaining params in paramOrder, grouped by category
+    // Write remaining params grouped by category (each header appears once)
     const disabledSet = new Set(config.disabledParams || []);
+    const categoryOrder = ['gpu', 'context', 'sampling', 'reasoning', 'speculative', 'other'];
+
+    const grouped: Record<string, string[]> = {};
     for (const key of config.paramOrder) {
       if (written.has(key)) continue;
       const value = config.params[key];
       if (value === undefined || value === '') continue;
-
-      const category = keyToCategory.get(key) || 'other';
-      writeHeader(category);
-
-      // Toggles that are off: write as a comment (a bare "key = off" line
-      // would still be truthy to llama.cpp's preset parser, e.g. load-on-startup)
-      if (value === 'off' && !disabledSet.has(key)) {
-        lines.push(`# ${key} = off`);
-        written.add(key);
-        continue;
-      }
-      if (disabledSet.has(key)) {
-        lines.push(`# ${key} = ${value}`);
-      } else {
-        lines.push(`${key} = ${value}`);
-      }
-      written.add(key);
+      const cat = keyToCategory.get(key) || 'other';
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(key);
     }
 
     // Catch any params not in paramOrder
     for (const [key, value] of Object.entries(config.params)) {
       if (!written.has(key) && value !== '') {
-        const category = keyToCategory.get(key) || 'other';
-        writeHeader(category);
-        lines.push(`${key} = ${value}`);
+        const cat = keyToCategory.get(key) || 'other';
+        if (!grouped[cat]) grouped[cat] = [];
+        if (!grouped[cat].includes(key)) grouped[cat].push(key);
+      }
+    }
+
+    for (const cat of categoryOrder) {
+      const keys = grouped[cat];
+      if (!keys || !keys.length) continue;
+      writeHeader(cat);
+      for (const key of keys) {
+        const value = config.params[key];
+        if (disabledSet.has(key)) {
+          lines.push(`# ${key} = ${value}`);
+        } else {
+          lines.push(`${key} = ${value}`);
+        }
+        written.add(key);
       }
     }
 

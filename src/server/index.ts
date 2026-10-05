@@ -46,7 +46,7 @@ const embeddedClient = new Map<string, EmbeddedFile>();
   }
 }
 
-const PORT = parseInt(process.env.PORT ?? '3000', 10);
+const PORT = parseInt(process.env.PORT ?? '3001', 10);
 
 export const app = express();
 app.use(express.json());

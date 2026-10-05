@@ -166,10 +166,21 @@ describe('exportRouterIni', () => {
     expect(ini).not.toContain('\nflash-attn = on');
   });
 
-  it('exports off-toggles as comments', () => {
+  it('exports unchecked toggles as key = off', () => {
     const config = makeConfig({
       params: { 'load-on-startup': 'off' },
       paramOrder: ['model', 'load-on-startup'],
+    });
+    const ini = exportRouterIni([config], testParams);
+    expect(ini).toContain('load-on-startup = off');
+    expect(ini).not.toContain('# load-on-startup = off');
+  });
+
+  it('still exports disabled off-toggles as comments', () => {
+    const config = makeConfig({
+      params: { 'load-on-startup': 'off' },
+      paramOrder: ['model', 'load-on-startup'],
+      disabledParams: ['load-on-startup'],
     });
     const ini = exportRouterIni([config], testParams);
     expect(ini).toContain('# load-on-startup = off');
