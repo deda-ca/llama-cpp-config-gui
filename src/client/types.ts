@@ -84,3 +84,77 @@ export interface ModelStatusData {
   totalTimeMs: number | null;        // total time in ms
   totalTokens: number | null;        // total tokens (prompt + gen)
 }
+
+/** Proxy gateway settings (mirrors src/server/proxy/types.ts). */
+export type ProxyBackendKind = 'llamacpp' | 'audio' | 'sdiffusion' | 'custom';
+
+export interface ProxyBackend {
+  id: string;
+  name: string;
+  kind: ProxyBackendKind;
+  baseUrl: string;
+  enabled: boolean;
+  apiKey?: string;
+  /** Model ids discovered from the upstream's GET /v1/models (via Refresh). */
+  models?: string[];
+  modelsFetchedAt?: string;
+}
+
+export interface ProxySettings {
+  enabled: boolean;
+  autoStart: boolean;
+  host: string;
+  port: number;
+  apiKey: string;
+  usageRetentionDays: number;
+  backends: ProxyBackend[];
+  models: ProxyModelRoute[];
+}
+
+export interface ProxyModelRoute {
+  model: string;
+  backend: string;
+  backendModel?: string;
+  enabled: boolean;
+  auto?: boolean;
+}
+
+/** One proxied request, as recorded by the usage store. */
+export interface UsageRecord {
+  id?: number;
+  requestId: string;
+  timestamp: string;
+  model: string;
+  backend: string;
+  endpoint: string;
+  stream: boolean;
+  status: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  tokensEstimated: boolean;
+  totalDurationMs: number;
+  ttfbMs: number | null;
+  tokensPerSec: number | null;
+  clientIp: string;
+  errorMessage: string | null;
+  meta: Record<string, unknown> | null;
+}
+
+export interface UsageSummaryRow {
+  model: string;
+  backend: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  avgTokensPerSec: number | null;
+  avgTtfbMs: number | null;
+  lastUsed: string | null;
+}
+
+export interface ProxyStatus {
+  running: boolean;
+  url: string;
+  /** backend id -> healthy */
+  backends: Record<string, boolean>;
+  models: ProxyModelRoute[];
+}

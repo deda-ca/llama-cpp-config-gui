@@ -5,8 +5,10 @@ import SystemMonitor from './components/SystemMonitor.vue';
 import ModelStatus from './components/ModelStatus.vue';
 import ConfigList from './components/ConfigList.vue';
 import LogView from './components/LogView.vue';
+import ProxyPanel from './components/ProxyPanel.vue';
+import ProxyUsagePanel from './components/ProxyUsagePanel.vue';
 import EnvironmentConfig from './components/EnvironmentConfig.vue';
-import type { SystemStats, LogEntry, ModelStatusData } from './types';
+import type { SystemStats, LogEntry, ModelStatusData, UsageRecord } from './types';
 
 const gpus = ref<any[]>([]);
 const systemStats = ref<SystemStats | null>(null);
@@ -18,6 +20,23 @@ const processStatus = ref('stopped');
 const modelStatusData = ref<ModelStatusData | null>(null);
 const appVersion = ref<string | null>(null);
 const showEnv = ref(false);
+// Right-column tab selection, persisted across refreshes
+const TAB_KEY = 'llama-gui:right-tab';
+const rightTab = ref<'models' | 'proxy'>((localStorage.getItem(TAB_KEY) === 'proxy' ? 'proxy' : 'models'));
+function setRightTab(tab: 'models' | 'proxy') {
+  rightTab.value = tab;
+  localStorage.setItem(TAB_KEY, tab);
+}
+// Proxy log stream + latest usage event (fed by SSE)
+const proxyLogLines = ref<LogEntry[]>([]);
+const liveUsage = ref<UsageRecord | null>(null);
+// Proxy Usage panel collapsed state, persisted across refreshes
+const PROXY_USAGE_COLLAPSED_KEY = 'llama-gui:proxy-usage-collapsed';
+const proxyUsageCollapsed = ref(localStorage.getItem(PROXY_USAGE_COLLAPSED_KEY) === '1');
+function toggleProxyUsageCollapsed() {
+  proxyUsageCollapsed.value = !proxyUsageCollapsed.value;
+  localStorage.setItem(PROXY_USAGE_COLLAPSED_KEY, proxyUsageCollapsed.value ? '1' : '0');
+}
 // Logs & Metrics collapsed state, persisted across refreshes
 const LOGS_COLLAPSED_KEY = 'llama-gui:logs-collapsed';
 const logsCollapsed = ref(localStorage.getItem(LOGS_COLLAPSED_KEY) === '1');
@@ -58,6 +77,16 @@ function connect() {
   });
   es.addEventListener('model-status', (e) => {
     modelStatusData.value = JSON.parse(e.data);
+  });
+  es.addEventListener('proxy-log', (e) => {
+    proxyLogLines.value.push(JSON.parse(e.data));
+    if (proxyLogLines.value.length > 2000) proxyLogLines.value.shift();
+  });
+  es.addEventListener('proxy-log-history', (e) => {
+    proxyLogLines.value = JSON.parse(e.data);
+  });
+  es.addEventListener('proxy-usage', (e) => {
+    liveUsage.value = JSON.parse(e.data);
   });
 }
 
@@ -142,20 +171,43 @@ onUnmounted(() => {
         </section>
       </div>
 
-      <!-- Right: Config List + Editor, with Logs & Metrics below -->
+      <!-- Right: tabbed — Models (config list + logs) or Proxy (settings, usage, logs) -->
       <div class="right-col">
-        <section class="panel config-section">
-          <ConfigList :model-metrics="modelMetrics" @open-env="showEnv = true" />
-        </section>
-        <section class="panel log-panel" :class="{ collapsed: logsCollapsed }">
-          <LogView
-            :lines="logLines"
-            :metrics="metrics"
-            :collapsed="logsCollapsed"
-            @toggle-collapse="toggleLogsCollapsed"
-            @clear-logs="logLines = []"
-          />
-        </section>
+        <nav class="tab-bar">
+          <button class="tab" :class="{ active: rightTab === 'models' }" @click="setRightTab('models')">
+            <span class="tab-icon">▤</span> Models
+          </button>
+          <button class="tab" :class="{ active: rightTab === 'proxy' }" @click="setRightTab('proxy')">
+            <span class="tab-icon">⇄</span> Proxy
+          </button>
+        </nav>
+
+        <template v-if="rightTab === 'models'">
+          <section class="panel config-section">
+            <ConfigList :model-metrics="modelMetrics" @open-env="showEnv = true" />
+          </section>
+          <section class="panel log-panel" :class="{ collapsed: logsCollapsed }">
+            <LogView
+              :lines="logLines"
+              :metrics="metrics"
+              :collapsed="logsCollapsed"
+              @toggle-collapse="toggleLogsCollapsed"
+              @clear-logs="logLines = []"
+            />
+          </section>
+        </template>
+        <template v-else>
+          <section class="panel proxy-section">
+            <ProxyPanel :lines="proxyLogLines" />
+          </section>
+          <section class="panel proxy-usage-section" :class="{ collapsed: proxyUsageCollapsed }">
+            <ProxyUsagePanel
+              :live-usage="liveUsage"
+              :collapsed="proxyUsageCollapsed"
+              @toggle-collapse="toggleProxyUsageCollapsed"
+            />
+          </section>
+        </template>
       </div>
     </main>
 
@@ -326,6 +378,67 @@ body {
   overflow: hidden;
   min-height: 0;
   min-width: 0;
+}
+
+.proxy-section {
+  flex: 1 1 60%;
+  overflow: hidden;
+  min-height: 0;
+  min-width: 0;
+}
+
+.proxy-usage-section {
+  flex: 1 1 40%;
+  overflow: hidden;
+  min-height: 0;
+  min-width: 0;
+}
+
+.proxy-usage-section.collapsed {
+  flex: 0 0 auto;
+}
+
+/* Right-column tab bar */
+.tab-bar {
+  display: flex;
+  gap: 4px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 4px;
+  flex: 0 0 auto;
+}
+
+.tab {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: #8b949e;
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  padding: 7px 12px;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: #e1e4e8;
+  background: #21262d;
+}
+
+.tab.active {
+  background: #21262d;
+  color: #e1e4e8;
+  box-shadow: inset 0 -2px 0 #58a6ff;
+}
+
+.tab-icon {
+  font-size: 0.9rem;
 }
 
 </style>
