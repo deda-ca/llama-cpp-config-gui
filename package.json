@@ -1,6 +1,6 @@
 {
   "name": "llama-cpp-config-gui",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "A desktop-style web app for configuring and launching llama.cpp inference, with a live GPU & system monitoring dashboard.",
   "keywords": [
     "llama.cpp",

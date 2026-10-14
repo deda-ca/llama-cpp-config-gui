@@ -1,3 +1,10 @@
+# [0.5.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.4.0...v0.5.0) (2026-10-14)
+
+
+### Features
+
+* proxy usage cached tokens and per-model pricing with cost estimates ([03dce9c](https://github.com/deda-ca/llama-cpp-config-gui/commit/03dce9cf836a8db26117c7d2c26d65cd893d67e6))
+
 # [0.4.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.3.2...v0.4.0) (2026-10-14)
 
 
