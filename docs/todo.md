@@ -304,3 +304,58 @@ Fields: `[PID] timestamp LEVEL component function : message`
 1. `src/server/routerIni.ts` — removed the special-case branch that wrote `# key = off`; now falls through to the normal `key = value` path.
 2. `src/client/components/ConfigEditor.vue` — same fix in `previewIni` computed; `exportCommand` now emits `--key off` instead of omitting.
 3. `src/server/__tests__/routerIni.test.ts` — updated test to assert `load-on-startup = off` is present (not commented).
+
+## 20. OpenAI-compatible proxy server with model routing and usage tracking 🚧
+
+Full specification: [docs/proxy-server.md](./proxy-server.md)
+
+**Goal:** A lightweight OpenAI-compatible reverse proxy in front of llama.cpp (router mode),
+audio.ccp, and stable-diffusion.cpp. Routes requests by the `model` field to the right
+backend and records per-request input/output tokens, timing (total, TTFB, tokens/sec), and
+timestamp into SQLite.
+
+**Progress (branch `feat/proxy-server`):**
+
+- ✅ Phase 1 — Usage store: `src/server/proxy/usageDb.ts` (node:sqlite, WAL, `user_version`
+  migrations, insert/query/summary/purge) + `usageDb.test.ts` (6 tests).
+- ✅ Phase 2 — Proxy core: `src/server/proxy/index.ts` (Express app on its own port,
+  `/health`, `GET /v1/models`, passthrough forwarding via `node:http` piping, optional
+  Bearer auth, `X-Proxy-Request-Id`), `router.ts` (exact/prefix/path-fallback resolution),
+  `recorder.ts` (t0/TTFB/end timing, `stream_options.include_usage` injection, buffer-safe
+  SSE usage scanner, JSON `usage` extraction, estimated-token fallback), `tokenCount.ts`.
+  Tests: `proxyRouter.test.ts` (8), `proxyRecorder.test.ts` (11), `proxy.test.ts` (12,
+  supertest against a real stub upstream replaying realistic llama.cpp responses).
+- ✅ Phase 3 — Settings & wiring: `ProxySettings` embedded in `LlamaConfig`
+  (`.config/settings.json`), registry rebuilt on every model-config change, daily retention
+  purge, SSE `proxy-usage` / `proxy-log` broadcast events. Management API:
+  `GET/PUT /api/proxy/settings`, `POST /api/proxy/start|stop|restart`,
+  `GET /api/proxy/status` (per-backend health probes),
+  `GET /api/proxy/usage` (+ `/summary`, `/export` CSV), `POST/PUT/DELETE /api/proxy/models`,
+  `POST/PUT/DELETE /api/proxy/backends`. Tests: `proxyApi.test.ts` (14).
+- ✅ Dynamic backends: `backends` is now a user-managed list (`ProxyBackend[]` with
+  id/name/kind/baseUrl/enabled/apiKey) — llama.cpp is a regular entry, custom upstreams
+  supported; legacy fixed-key shape auto-migrates. `backends.ts` helpers, router resolves
+  by backend id, disabled backends block their routes and fallbacks.
+- ✅ Model discovery: per-proxy ⟳ Refresh button probes upstream `GET /v1/models`
+  (`POST /api/proxy/backends/:id/refresh`), lists discovered models as chips under the row,
+  and registers them as auto routes — multiple llama.cpp instances route by model name
+  (declared routes/aliases win on conflicts). Tests cover discovery routing + endpoint.
+- ✅ GUI (Proxy tab): header with Start/Stop/Restart + status badge, settings row
+  (Port/Host/API Key/Retention + Auto-start), proxy list with enable checkboxes, edit
+  dialogs (name/type/url/upstream key/enabled) and delete, collapsible Proxy Logs panel,
+  and a bottom Usage panel (`ProxyPanel.vue`, `ProxyUsagePanel.vue`) styled like Logs & Metrics.
+- ✅ E2E smoke (manual): real proxy + real upstream over HTTP — streaming passthrough is
+  byte-identical, usage rows land in SQLite, summary aggregates correctly.
+
+**Remaining:**
+- [ ] Phase 0 — Spike audio.ccp and stable-diffusion.cpp HTTP APIs; capture real fixtures
+      under `src/server/__tests__/fixtures/proxy/` (open questions §13 of the spec).
+- [ ] Phase 4 — stable-diffusion.cpp translator (`/v1/images/generations` is routed and
+      recorded already; upstream translation pending the Phase 0 spike).
+- [ ] Phase 5 — audio.ccp translators (`/v1/audio/*` passthrough pending spike).
+- [ ] Phase 6 extras — usage export pagination for >1000 rows.
+- [x] ~~Phase 7 — GUI "Proxy & Usage" panel~~ — shipped as the Proxy tab (see above).
+- [ ] Verify `node:sqlite` works in the Bun-compiled release binary (spec §13.4).
+
+**Verification so far:** `npx vitest run` 156/156, `npx tsc -p tsconfig.server.json --noEmit`
+clean, `npx vite build` clean.

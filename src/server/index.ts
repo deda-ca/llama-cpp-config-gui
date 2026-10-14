@@ -11,6 +11,11 @@ import type { WsMessage, LlamaConfig, GpuInfo, LlamaDevice, GpuSortMode, SystemS
 import { loadModels, saveModels, loadParams, saveParams, generateId, type ModelConfig, type ConfigTemplate, type ParamDef } from './modelConfig.js';
 import { DEFAULT_PARAMS } from './params-default.js';
 import { parseRouterIni, exportRouterIni } from './routerIni.js';
+import { createProxyApp } from './proxy/index.js';
+import { ModelRouter } from './proxy/router.js';
+import { UsageDb } from './proxy/usageDb.js';
+import { DEFAULT_PROXY_SETTINGS, normalizeProxySettings, type ProxyBackend, type ProxySettings, type UsageQuery, type UsageRecord } from './proxy/types.js';
+import { isBackendKind, makeBackendId } from './proxy/backends.js';
 import { toLogEntry, parseLogLine, parseTimingMessage, type LogEntry, type TimingData } from './logParser.js';
 import { ModelMetricsPoller } from './metricsPoller.js';
 import { APP_VERSION } from './version.js';
@@ -54,6 +59,183 @@ app.use(express.json());
 // --- State ---
 let config = loadConfig();
 const llama = new LlamaProcessManager();
+
+// --- Proxy gateway (docs/proxy-server.md) ---
+const proxyRouter = new ModelRouter();
+let proxyDb: UsageDb | null = null;
+let proxyServer: http.Server | null = null;
+let proxySettings: ProxySettings = normalizeProxySettings(config.proxy);
+
+// Proxy log stream: startup/errors + one line per proxied request
+const PROXY_LOG_CACHE_SIZE = 1024;
+const proxyLogCache: LogEntry[] = [];
+
+function proxyLog(level: 'I' | 'W' | 'E', message: string): void {
+  const entry = toLogEntry(`[proxy] ${new Date().toISOString().slice(11, 23)} ${level} ${message}`);
+  proxyLogCache.push(entry);
+  if (proxyLogCache.length > PROXY_LOG_CACHE_SIZE) proxyLogCache.shift();
+  broadcast({ type: 'proxy-log', payload: entry });
+}
+
+function proxyRequestLog(rec: UsageRecord): void {
+  const tok = rec.inputTokens !== null || rec.outputTokens !== null
+    ? ` ${rec.inputTokens ?? '?'}->${rec.outputTokens ?? '?'} tok` : '';
+  const tps = rec.tokensPerSec !== null ? ` ${rec.tokensPerSec.toFixed(1)} t/s` : '';
+  const est = rec.tokensEstimated ? ' (est)' : '';
+  const level: 'I' | 'W' | 'E' = rec.status >= 500 ? 'E' : rec.status >= 400 ? 'W' : 'I';
+  proxyLog(level, `${rec.backend.padEnd(10)} ${rec.model.padEnd(20)} ${rec.endpoint} ${rec.stream ? 'stream' : 'json'} ${rec.status} ${rec.totalDurationMs}ms${tok}${tps}${est}`);
+}
+
+function proxyLlamaAliases(): string[] {
+  return loadModels().configs
+    .filter((c) => c.includeInLaunch !== false && c.alias)
+    .map((c) => c.alias);
+}
+
+function proxyLlamaBaseUrl(): string {
+  const host = config.host === '0.0.0.0' ? '127.0.0.1' : (config.host || '127.0.0.1');
+  return `http://${host}:${config.port}`;
+}
+
+function rebuildProxyRegistry(): void {
+  proxyRouter.rebuild(proxySettings, proxyLlamaAliases());
+}
+
+function stopProxy(log = true): void {
+  if (proxyServer) {
+    proxyServer.close();
+    proxyServer = null;
+    if (log) proxyLog('I', 'proxy stopped');
+  }
+  if (proxyDb) {
+    proxyDb.close();
+    proxyDb = null;
+  }
+  if (proxySettings.enabled) {
+    proxySettings = { ...proxySettings, enabled: false };
+    saveProxySettings();
+  }
+}
+
+function startProxy(): void {
+  stopProxy(false);
+  proxySettings = { ...proxySettings, enabled: true };
+  saveProxySettings();
+  const dbPath = path.join(path.resolve(process.cwd(), '.config'), 'usage.db');
+  try {
+    proxyDb = new UsageDb(dbPath);
+  } catch (e) {
+    proxyLog('E', `failed to open usage db: ${e}`);
+    return;
+  }
+  rebuildProxyRegistry();
+  const proxyApp = createProxyApp({
+    getSettings: () => proxySettings,
+    router: proxyRouter,
+    db: proxyDb,
+    onUsage: (rec) => {
+      broadcast({ type: 'proxy-usage', payload: rec });
+      proxyRequestLog(rec);
+    },
+    onRecordError: (e) => proxyLog('E', `usage record failed: ${e}`),
+  });
+  proxyServer = http.createServer(proxyApp);
+  proxyServer.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      proxyLog('E', `port ${proxySettings.port} is already in use; proxy not started`);
+    } else {
+      proxyLog('E', `server error: ${err.message}`);
+    }
+    proxyServer = null;
+  });
+  proxyServer.listen(proxySettings.port, proxySettings.host, () => {
+    proxyLog('I', `OpenAI-compatible proxy listening on http://${proxySettings.host}:${proxySettings.port}`);
+  });
+}
+
+function saveProxySettings(): void {
+  config = { ...config, proxy: proxySettings };
+  saveConfig(config);
+}
+
+// Daily retention purge of old usage rows
+setInterval(() => {
+  if (proxyDb) proxyDb.purge(proxySettings.usageRetentionDays);
+}, 24 * 3600_000).unref();
+
+function parseUsageQuery(req: express.Request): UsageQuery {
+  const q: UsageQuery = {};
+  if (typeof req.query.model === 'string') q.model = req.query.model;
+  if (typeof req.query.backend === 'string') q.backend = req.query.backend as UsageQuery['backend'];
+  if (typeof req.query.from === 'string') q.from = req.query.from;
+  if (typeof req.query.to === 'string') q.to = req.query.to;
+  if (typeof req.query.limit === 'string') q.limit = parseInt(req.query.limit, 10) || undefined;
+  if (typeof req.query.offset === 'string') q.offset = parseInt(req.query.offset, 10) || undefined;
+  return q;
+}
+
+function validateProxySettings(p: ProxySettings): string | null {
+  if (p.port === PORT) return `Proxy port ${p.port} conflicts with the GUI server port ${PORT}`;
+  if (p.port === config.port) return `Proxy port ${p.port} conflicts with llama-server port ${config.port}`;
+  for (const b of p.backends) {
+    if (b.baseUrl) {
+      try { new URL(b.baseUrl); } catch { return `Invalid URL for backend "${b.name}"`; }
+    }
+  }
+  const backendIds = new Set(p.backends.map((b) => b.id));
+  if (backendIds.size !== p.backends.length) return 'Backend ids must be unique';
+  const aliases = new Set(proxyLlamaAliases());
+  const seen = new Set<string>();
+  for (const m of p.models) {
+    if (aliases.has(m.model) || seen.has(m.model)) return `Duplicate model alias "${m.model}"`;
+    seen.add(m.model);
+  }
+  return null;
+}
+
+/** Fetch the upstream's GET /v1/models list (OpenAI-compatible). */
+function proxyFetchModels(baseUrl: string, apiKey?: string): Promise<string[]> {
+  return new Promise((resolve, reject) => {
+    let target: URL;
+    try { target = new URL('/v1/models', baseUrl); } catch { return reject(new Error('invalid baseUrl')); }
+    const req = http.get(target, {
+      timeout: 4000,
+      headers: apiKey ? { authorization: `Bearer ${apiKey}` } : {},
+    }, (res) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      res.on('data', (c: Buffer) => { chunks.push(c); size += c.length; if (size > 1024 * 1024) req.destroy(); });
+      res.on('end', () => {
+        if ((res.statusCode ?? 0) >= 400) return reject(new Error(`HTTP ${res.statusCode}`));
+        try {
+          const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          const ids = Array.isArray(data?.data) ? data.data.map((m: { id?: unknown }) => m?.id).filter((x: unknown): x is string => typeof x === 'string') : [];
+          resolve(ids);
+        } catch { reject(new Error('invalid models response')); }
+      });
+    });
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.on('error', (e) => reject(e));
+  });
+}
+
+function proxyHealthProbe(baseUrl: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!baseUrl) return resolve(false);
+    let settled = false;
+    const done = (v: boolean) => { if (!settled) { settled = true; resolve(v); } };
+    try {
+      const req = http.get(baseUrl, { timeout: 1500 }, (res) => {
+        res.resume();
+        done((res.statusCode ?? 0) < 500);
+      });
+      req.on('timeout', () => { req.destroy(); done(false); });
+      req.on('error', () => done(false));
+    } catch {
+      done(false);
+    }
+  });
+}
 let gpuIntervalMs = config.gpuIntervalMs || 2000;
 
 // In-memory cache of recent log entries, replayed to clients on (re)connect
@@ -74,6 +256,9 @@ app.get('/api/events', (req, res) => {
   // Replay log history on connect
   if (logCache.length > 0) {
     res.write(`event: log-history\ndata: ${JSON.stringify([...logCache])}\n\n`);
+  }
+  if (proxyLogCache.length > 0) {
+    res.write(`event: proxy-log-history\ndata: ${JSON.stringify([...proxyLogCache])}\n\n`);
   }
   sseClients.add(res);
   req.on('close', () => sseClients.delete(res));
@@ -414,6 +599,7 @@ app.post('/api/models/configs', (req, res) => {
   data.configOrder = data.configs.map((cfg) => cfg.id);
   if (!data.defaultConfigId) data.defaultConfigId = newConfig.id;
   saveModels(data);
+  rebuildProxyRegistry();
   res.json(newConfig);
 });
 
@@ -447,6 +633,7 @@ app.put('/api/models/configs/reorder', (req, res) => {
     data.defaultConfigId = orderedConfigs[0]?.id || null;
   }
   saveModels(data);
+  rebuildProxyRegistry();
   res.json({ configOrder: data.configOrder, configs: data.configs });
 });
 
@@ -465,6 +652,7 @@ app.put('/api/models/configs/:id', (req, res) => {
     data.defaultConfigId = updated.id;
   }
   saveModels(data);
+  rebuildProxyRegistry();
   res.json(updated);
 });
 
@@ -478,6 +666,7 @@ app.put('/api/models/configs/:id/launch-include', (req, res) => {
   }
   cfg.includeInLaunch = !!req.body?.include;
   saveModels(data);
+  rebuildProxyRegistry();
   res.json(cfg);
 });
 
@@ -490,6 +679,7 @@ app.delete('/api/models/configs/:id', (req, res) => {
     if (data.configs[0]) data.configs[0].isDefault = true;
   }
   saveModels(data);
+  rebuildProxyRegistry();
   res.json({ ok: true });
 });
 
@@ -510,6 +700,7 @@ app.post('/api/models/configs/:id/clone', (req, res) => {
   data.configs.push(clone);
   data.configOrder = data.configs.map((cfg) => cfg.id);
   saveModels(data);
+  rebuildProxyRegistry();
   res.json(clone);
 });
 
@@ -530,6 +721,7 @@ app.post('/api/models/templates', (req, res) => {
   };
   data.templates.push(tpl);
   saveModels(data);
+  rebuildProxyRegistry();
   res.json(tpl);
 });
 
@@ -537,6 +729,7 @@ app.delete('/api/models/templates/:id', (req, res) => {
   const data = loadModels();
   data.templates = data.templates.filter((t) => t.id !== req.params.id);
   saveModels(data);
+  rebuildProxyRegistry();
   res.json({ ok: true });
 });
 
@@ -585,6 +778,7 @@ app.post('/api/models/import-ini', (req, res) => {
     data.configs[0].isDefault = true;
   }
   saveModels(data);
+  rebuildProxyRegistry();
   res.json({ imported: imported.length, total: data.configs.length });
 });
 
@@ -592,6 +786,248 @@ app.get('/api/models/export-ini', (_req, res) => {
   const data = loadModels();
   const ini = exportRouterIni(data.configs, loadParams());
   res.type('text/plain').send(ini);
+});
+
+// --- Proxy management API (docs/proxy-server.md §7) ---
+
+app.post('/api/proxy/logs/clear', (_req, res) => {
+  proxyLogCache.length = 0;
+  res.json({ status: 'cleared' });
+});
+
+app.post('/api/proxy/start', (_req, res) => {
+  if (proxyServer) {
+    res.json({ running: true, note: 'already running' });
+    return;
+  }
+  startProxy();
+  res.json({ running: proxyServer !== null });
+});
+
+app.post('/api/proxy/stop', (_req, res) => {
+  stopProxy();
+  res.json({ running: proxyServer !== null });
+});
+
+app.post('/api/proxy/restart', (_req, res) => {
+  startProxy();
+  res.json({ running: proxyServer !== null });
+});
+
+app.post('/api/proxy/backends', (req, res) => {
+  const body = req.body as { name?: string; kind?: string; baseUrl?: string; apiKey?: string; enabled?: boolean };
+  const name = typeof body?.name === 'string' ? body.name.trim() : '';
+  if (!name) {
+    res.status(400).json({ error: 'name is required' });
+    return;
+  }
+  if (!isBackendKind(body.kind)) {
+    res.status(400).json({ error: 'kind must be one of llamacpp|audio|sdiffusion|custom' });
+    return;
+  }
+  if (typeof body.baseUrl !== 'string' || !body.baseUrl) {
+    res.status(400).json({ error: 'baseUrl is required' });
+    return;
+  }
+  try { new URL(body.baseUrl); } catch {
+    res.status(400).json({ error: 'baseUrl is not a valid URL' });
+    return;
+  }
+  const backend: ProxyBackend = {
+    id: makeBackendId(name, proxySettings.backends),
+    name,
+    kind: body.kind,
+    baseUrl: body.baseUrl,
+    enabled: body.enabled !== false,
+    ...(typeof body.apiKey === 'string' && body.apiKey ? { apiKey: body.apiKey } : {}),
+  };
+  proxySettings.backends.push(backend);
+  saveProxySettings();
+  rebuildProxyRegistry();
+  res.json(backend);
+});
+
+app.post('/api/proxy/backends/:id/refresh', async (req, res) => {
+  const b = proxySettings.backends.find((x) => x.id === req.params.id);
+  if (!b) {
+    res.status(404).json({ error: `Backend "${req.params.id}" not found` });
+    return;
+  }
+  try {
+    const models = await proxyFetchModels(b.baseUrl, b.apiKey);
+    b.models = models;
+    b.modelsFetchedAt = new Date().toISOString();
+    saveProxySettings();
+    rebuildProxyRegistry();
+    proxyLog('I', `models refreshed for "${b.name}": ${models.length} model(s)`);
+    res.json({ models, modelsFetchedAt: b.modelsFetchedAt });
+  } catch (e) {
+    res.status(502).json({ error: `Failed to fetch models from ${b.baseUrl}: ${e instanceof Error ? e.message : e}` });
+  }
+});
+
+app.put('/api/proxy/backends/:id', (req, res) => {
+  const b = proxySettings.backends.find((x) => x.id === req.params.id);
+  if (!b) {
+    res.status(404).json({ error: `Backend "${req.params.id}" not found` });
+    return;
+  }
+  const body = req.body as { name?: string; kind?: string; baseUrl?: string; apiKey?: string; enabled?: boolean };
+  if (typeof body.name === 'string' && body.name.trim()) b.name = body.name.trim();
+  if (body.kind !== undefined) {
+    if (!isBackendKind(body.kind)) {
+      res.status(400).json({ error: 'kind must be one of llamacpp|audio|sdiffusion|custom' });
+      return;
+    }
+    b.kind = body.kind;
+  }
+  if (typeof body.baseUrl === 'string' && body.baseUrl) {
+    try { new URL(body.baseUrl); } catch {
+      res.status(400).json({ error: 'baseUrl is not a valid URL' });
+      return;
+    }
+    b.baseUrl = body.baseUrl;
+  }
+  if (typeof body.apiKey === 'string') {
+    if (body.apiKey) b.apiKey = body.apiKey;
+    else delete b.apiKey;
+  }
+  if (typeof body.enabled === 'boolean') b.enabled = body.enabled;
+  saveProxySettings();
+  rebuildProxyRegistry();
+  res.json(b);
+});
+
+app.delete('/api/proxy/backends/:id', (req, res) => {
+  const idx = proxySettings.backends.findIndex((x) => x.id === req.params.id);
+  if (idx < 0) {
+    res.status(404).json({ error: `Backend "${req.params.id}" not found` });
+    return;
+  }
+  const [removed] = proxySettings.backends.splice(idx, 1);
+  // Routes pointing at the removed backend become unroutable; drop them too.
+  proxySettings.models = proxySettings.models.filter((m) => m.backend !== removed.id);
+  saveProxySettings();
+  rebuildProxyRegistry();
+  res.json({ status: 'deleted' });
+});
+
+app.get('/api/proxy/settings', (_req, res) => {
+  res.json(proxySettings);
+});
+
+app.put('/api/proxy/settings', (req, res) => {
+  const next = normalizeProxySettings({ ...proxySettings, ...(req.body as Partial<ProxySettings>) });
+  const err = validateProxySettings(next);
+  if (err) {
+    res.status(400).json({ error: err });
+    return;
+  }
+  const wasRunning = proxyServer !== null;
+  const portChanged = next.port !== proxySettings.port || next.host !== proxySettings.host;
+  proxySettings = next;
+  saveProxySettings();
+  rebuildProxyRegistry();
+  if (wasRunning && portChanged) startProxy();
+  res.json(proxySettings);
+});
+
+app.get('/api/proxy/status', async (_req, res) => {
+  const health: Record<string, boolean> = {};
+  await Promise.all(
+    proxySettings.backends.map(async (b) => {
+      health[b.id] = b.enabled ? await proxyHealthProbe(b.baseUrl) : false;
+    }),
+  );
+  res.json({
+    running: proxyServer !== null,
+    url: `http://${proxySettings.host}:${proxySettings.port}`,
+    backends: health,
+    models: proxyRouter.listRoutes(),
+  });
+});
+
+app.get('/api/proxy/usage', (req, res) => {
+  if (!proxyDb) {
+    res.json({ rows: [], note: 'proxy usage db not open' });
+    return;
+  }
+  res.json({ rows: proxyDb.query(parseUsageQuery(req)) });
+});
+
+app.get('/api/proxy/usage/summary', (req, res) => {
+  if (!proxyDb) {
+    res.json({ rows: [] });
+    return;
+  }
+  const q = parseUsageQuery(req);
+  res.json({ rows: proxyDb.summary({ from: q.from, to: q.to }) });
+});
+
+app.get('/api/proxy/usage/export', (req, res) => {
+  if (!proxyDb) {
+    res.status(404).json({ error: 'usage db not open' });
+    return;
+  }
+  const rows = proxyDb.query({ ...parseUsageQuery(req), limit: 1000, offset: 0 });
+  const esc = (v: unknown): string => {
+    const s = v === null || v === undefined ? '' : String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const header = 'request_id,timestamp,model,backend,endpoint,stream,status,input_tokens,output_tokens,tokens_estimated,total_ms,ttfb_ms,tokens_per_sec,client_ip,error';
+  const lines = rows.map((r: UsageRecord) => [
+    r.requestId, r.timestamp, r.model, r.backend, r.endpoint, r.stream ? 1 : 0, r.status,
+    r.inputTokens, r.outputTokens, r.tokensEstimated ? 1 : 0, r.totalDurationMs,
+    r.ttfbMs, r.tokensPerSec, r.clientIp, r.errorMessage,
+  ].map(esc).join(','));
+  res.type('text/csv').send([header, ...lines].join('\n'));
+});
+
+app.post('/api/proxy/models', (req, res) => {
+  const body = req.body as { model?: string; backend?: string; backendModel?: string; enabled?: boolean };
+  if (!body?.model || !proxySettings.backends.some((b) => b.id === body.backend)) {
+    res.status(400).json({ error: 'model and a valid backend id are required' });
+    return;
+  }
+  if (proxySettings.models.some((m) => m.model === body.model) || proxyLlamaAliases().includes(body.model)) {
+    res.status(409).json({ error: `Model alias "${body.model}" already exists` });
+    return;
+  }
+  proxySettings.models.push({
+    model: body.model,
+    backend: body.backend!,
+    backendModel: body.backendModel,
+    enabled: body.enabled !== false,
+  });
+  saveProxySettings();
+  rebuildProxyRegistry();
+  res.json(proxySettings.models);
+});
+
+app.put('/api/proxy/models/:model', (req, res) => {
+  const m = proxySettings.models.find((x) => x.model === req.params.model);
+  if (!m) {
+    res.status(404).json({ error: `Model "${req.params.model}" not found` });
+    return;
+  }
+  const body = req.body as { backendModel?: string; enabled?: boolean };
+  if (typeof body.backendModel === 'string') m.backendModel = body.backendModel;
+  if (typeof body.enabled === 'boolean') m.enabled = body.enabled;
+  saveProxySettings();
+  rebuildProxyRegistry();
+  res.json(m);
+});
+
+app.delete('/api/proxy/models/:model', (req, res) => {
+  const idx = proxySettings.models.findIndex((x) => x.model === req.params.model);
+  if (idx < 0) {
+    res.status(404).json({ error: `Model "${req.params.model}" not found` });
+    return;
+  }
+  proxySettings.models.splice(idx, 1);
+  saveProxySettings();
+  rebuildProxyRegistry();
+  res.json({ status: 'deleted' });
 });
 
 // Serve the built frontend (after all API routes).
@@ -671,6 +1107,7 @@ function openBrowser(url: string): void {
 server.listen(PORT, () => {
   const url = `http://localhost:${PORT}`;
   console.log(`[server] llama.cpp Config GUI v${APP_VERSION} — listening on ${url}`);
+  if (proxySettings.autoStart) startProxy();
 
   // Auto-launch browser only in release mode (compiled binary) and when NO_BROWSER is not set
   if (embeddedClient.size > 0 && !process.env.NO_BROWSER) {

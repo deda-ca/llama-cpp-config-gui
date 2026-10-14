@@ -47,6 +47,8 @@ export interface LlamaConfig {
   gpuIntervalMs: number;
   gpuSort: GpuSortMode;
   gpuOrder: number[]; // manual order of SMI indices; empty = use sort mode
+  /** OpenAI-compatible proxy gateway settings (docs/proxy-server.md) */
+  proxy?: import('./proxy/types.js').ProxySettings;
 }
 
 export interface PerfMetrics {
@@ -84,6 +86,6 @@ export interface SystemStats {
 }
 
 export interface WsMessage {
-  type: 'gpu-stats' | 'log-line' | 'log-history' | 'metrics' | 'process-status' | 'model-metrics' | 'system-stats' | 'model-status';
+  type: 'gpu-stats' | 'log-line' | 'log-history' | 'metrics' | 'process-status' | 'model-metrics' | 'system-stats' | 'model-status' | 'proxy-usage' | 'proxy-log' | 'proxy-log-history';
   payload: unknown;
 }
