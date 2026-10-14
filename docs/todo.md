@@ -340,6 +340,12 @@ timestamp into SQLite.
   (`POST /api/proxy/backends/:id/refresh`), lists discovered models as chips under the row,
   and registers them as auto routes — multiple llama.cpp instances route by model name
   (declared routes/aliases win on conflicts). Tests cover discovery routing + endpoint.
+- ✅ Cached tokens & cost: captures `usage.prompt_tokens_details.cached_tokens` (JSON + SSE)
+  into a `cached_tokens` column (usage.db v2, auto `ALTER TABLE` migration from v1); summary
+  and CSV export include it. `ProxySettings.modelPricing` stores USD per 1M tokens
+  (input/cached/output) per model; Usage panel shows Cache + Cost columns, a total Cost
+  metric, and a 💵 Pricing dialog. Cost = `((in − cached)·inPrice + cached·cachedPrice +
+  out·outPrice) / 1e6`.
 - ✅ GUI (Proxy tab): header with Start/Stop/Restart + status badge, settings row
   (Port/Host/API Key/Retention + Auto-start), proxy list with enable checkboxes, edit
   dialogs (name/type/url/upstream key/enabled) and delete, collapsible Proxy Logs panel,
@@ -357,5 +363,6 @@ timestamp into SQLite.
 - [x] ~~Phase 7 — GUI "Proxy & Usage" panel~~ — shipped as the Proxy tab (see above).
 - [ ] Verify `node:sqlite` works in the Bun-compiled release binary (spec §13.4).
 
-**Verification so far:** `npx vitest run` 156/156, `npx tsc -p tsconfig.server.json --noEmit`
-clean, `npx vite build` clean.
+**Verification so far:** `npx vitest run` 170/170, `npx tsc -p tsconfig.server.json --noEmit`
+clean, `npx vite build` clean. Shipped in v0.4.0 (proxy feature) and v0.5.0 (cached tokens,
+pricing & cost).
