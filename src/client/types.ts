@@ -100,6 +100,13 @@ export interface ProxyBackend {
   modelsFetchedAt?: string;
 }
 
+/** USD price per 1M tokens. */
+export interface ModelPricing {
+  input: number;
+  cached: number;
+  output: number;
+}
+
 export interface ProxySettings {
   enabled: boolean;
   autoStart: boolean;
@@ -109,6 +116,8 @@ export interface ProxySettings {
   usageRetentionDays: number;
   backends: ProxyBackend[];
   models: ProxyModelRoute[];
+  /** USD price per 1M tokens keyed by model name. */
+  modelPricing: Record<string, ModelPricing>;
 }
 
 export interface ProxyModelRoute {
@@ -131,6 +140,7 @@ export interface UsageRecord {
   status: number;
   inputTokens: number | null;
   outputTokens: number | null;
+  cachedTokens: number | null;
   tokensEstimated: boolean;
   totalDurationMs: number;
   ttfbMs: number | null;
@@ -146,6 +156,7 @@ export interface UsageSummaryRow {
   requests: number;
   inputTokens: number;
   outputTokens: number;
+  cachedTokens: number;
   avgTokensPerSec: number | null;
   avgTtfbMs: number | null;
   lastUsed: string | null;

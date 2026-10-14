@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { DatabaseSync } from 'node:sqlite';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -16,6 +17,7 @@ function makeRecord(overrides: Partial<UsageRecord> = {}): UsageRecord {
     status: 200,
     inputTokens: 100,
     outputTokens: 42,
+    cachedTokens: null,
     tokensEstimated: false,
     totalDurationMs: 1500,
     ttfbMs: 200,
@@ -92,8 +94,8 @@ describe('UsageDb', () => {
   });
 
   it('summary aggregates per model', () => {
-    db.insert(makeRecord({ inputTokens: 100, outputTokens: 10, tokensPerSec: 20, ttfbMs: 100 }));
-    db.insert(makeRecord({ inputTokens: 50, outputTokens: 30, tokensPerSec: 40, ttfbMs: 300 }));
+    db.insert(makeRecord({ inputTokens: 100, outputTokens: 10, cachedTokens: 80, tokensPerSec: 20, ttfbMs: 100 }));
+    db.insert(makeRecord({ inputTokens: 50, outputTokens: 30, cachedTokens: 10, tokensPerSec: 40, ttfbMs: 300 }));
     db.insert(makeRecord({ model: 'sd-xl', backend: 'sdiffusion', inputTokens: null, outputTokens: null, tokensPerSec: null, ttfbMs: null }));
 
     const rows = db.summary();
@@ -102,6 +104,7 @@ describe('UsageDb', () => {
     expect(qwen.requests).toBe(2);
     expect(qwen.inputTokens).toBe(150);
     expect(qwen.outputTokens).toBe(40);
+    expect(qwen.cachedTokens).toBe(90);
     expect(qwen.avgTokensPerSec).toBeCloseTo(30);
     expect(qwen.avgTtfbMs).toBeCloseTo(200);
     const sd = rows.find((r) => r.model === 'sd-xl')!;
@@ -118,5 +121,34 @@ describe('UsageDb', () => {
     const rows = db.query({});
     expect(rows).toHaveLength(1);
     expect(rows[0].requestId).toBe('fresh');
+  });
+
+  it('migrates a v1 database by adding cached_tokens', () => {
+    const file = path.join(dir, 'v1.db');
+    const raw = new DatabaseSync(file);
+    raw.exec(`
+      CREATE TABLE usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        request_id TEXT NOT NULL, ts TEXT NOT NULL, model TEXT NOT NULL,
+        backend TEXT NOT NULL, endpoint TEXT NOT NULL,
+        stream INTEGER NOT NULL DEFAULT 0, status INTEGER NOT NULL,
+        input_tokens INTEGER, output_tokens INTEGER,
+        tokens_estimated INTEGER NOT NULL DEFAULT 0,
+        total_ms INTEGER NOT NULL, ttfb_ms INTEGER,
+        tokens_per_sec REAL, client_ip TEXT, error TEXT, meta TEXT
+      );
+      INSERT INTO usage (request_id, ts, model, backend, endpoint, status, total_ms)
+      VALUES ('legacy', '2026-01-01T00:00:00Z', 'm', 'llamacpp', '/v1/chat/completions', 200, 10);
+      PRAGMA user_version = 1;
+    `);
+    raw.close();
+
+    const migrated = new UsageDb(file);
+    const rows = migrated.query({});
+    expect(rows).toHaveLength(1);
+    expect(rows[0].cachedTokens).toBeNull();
+    migrated.insert(makeRecord({ requestId: 'new', cachedTokens: 42 }));
+    expect(migrated.query({}).find((r) => r.requestId === 'new')!.cachedTokens).toBe(42);
+    migrated.close();
   });
 });

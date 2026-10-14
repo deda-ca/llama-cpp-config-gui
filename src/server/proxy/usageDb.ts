@@ -8,7 +8,7 @@ import fs from 'fs';
 import path from 'path';
 import type { UsageQuery, UsageRecord, UsageSummaryRow } from './types.js';
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const CREATE_SQL = `
 CREATE TABLE IF NOT EXISTS usage (
@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS usage (
   status INTEGER NOT NULL,
   input_tokens INTEGER,
   output_tokens INTEGER,
+  cached_tokens INTEGER,
   tokens_estimated INTEGER NOT NULL DEFAULT 0,
   total_ms INTEGER NOT NULL,
   ttfb_ms INTEGER,
@@ -49,6 +50,11 @@ export class UsageDb {
       this.db.exec('BEGIN');
       try {
         this.db.exec(CREATE_SQL);
+        // v1 databases lack cached_tokens; CREATE above is IF NOT EXISTS so add it here.
+        const cols = this.db.prepare("PRAGMA table_info(usage)").all() as { name: string }[];
+        if (!cols.some((c) => c.name === 'cached_tokens')) {
+          this.db.exec('ALTER TABLE usage ADD COLUMN cached_tokens INTEGER');
+        }
         this.db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
         this.db.exec('COMMIT');
       } catch (e) {
@@ -66,13 +72,13 @@ export class UsageDb {
   insert(rec: UsageRecord): void {
     this.db.prepare(`
       INSERT INTO usage (request_id, ts, model, backend, endpoint, stream, status,
-        input_tokens, output_tokens, tokens_estimated, total_ms, ttfb_ms,
+        input_tokens, output_tokens, cached_tokens, tokens_estimated, total_ms, ttfb_ms,
         tokens_per_sec, client_ip, error, meta)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       rec.requestId, rec.timestamp, rec.model, rec.backend, rec.endpoint,
       rec.stream ? 1 : 0, rec.status,
-      rec.inputTokens, rec.outputTokens, rec.tokensEstimated ? 1 : 0,
+      rec.inputTokens, rec.outputTokens, rec.cachedTokens, rec.tokensEstimated ? 1 : 0,
       rec.totalDurationMs, rec.ttfbMs, rec.tokensPerSec,
       rec.clientIp, rec.errorMessage, rec.meta ? JSON.stringify(rec.meta) : null,
     );
@@ -107,6 +113,7 @@ export class UsageDb {
         COUNT(*) AS requests,
         COALESCE(SUM(input_tokens), 0) AS input_tokens,
         COALESCE(SUM(output_tokens), 0) AS output_tokens,
+        COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
         AVG(tokens_per_sec) AS avg_tps,
         AVG(ttfb_ms) AS avg_ttfb,
         MAX(ts) AS last_used
@@ -122,6 +129,7 @@ export class UsageDb {
       requests: Number(r.requests),
       inputTokens: Number(r.input_tokens),
       outputTokens: Number(r.output_tokens),
+      cachedTokens: Number(r.cached_tokens),
       avgTokensPerSec: r.avg_tps === null ? null : Number(r.avg_tps),
       avgTtfbMs: r.avg_ttfb === null ? null : Number(r.avg_ttfb),
       lastUsed: r.last_used,
@@ -144,6 +152,7 @@ interface DbRow {
   id: number; request_id: string; ts: string; model: string; backend: string;
   endpoint: string; stream: number; status: number;
   input_tokens: number | null; output_tokens: number | null;
+  cached_tokens: number | null;
   tokens_estimated: number; total_ms: number; ttfb_ms: number | null;
   tokens_per_sec: number | null; client_ip: string | null; error: string | null;
   meta: string | null;
@@ -165,6 +174,7 @@ function rowToRecord(r: DbRow): UsageRecord {
     status: Number(r.status),
     inputTokens: r.input_tokens === null ? null : Number(r.input_tokens),
     outputTokens: r.output_tokens === null ? null : Number(r.output_tokens),
+    cachedTokens: r.cached_tokens === null || r.cached_tokens === undefined ? null : Number(r.cached_tokens),
     tokensEstimated: r.tokens_estimated === 1,
     totalDurationMs: Number(r.total_ms),
     ttfbMs: r.ttfb_ms === null ? null : Number(r.ttfb_ms),
@@ -178,5 +188,6 @@ function rowToRecord(r: DbRow): UsageRecord {
 interface SummaryRow {
   model: string; backend: string; requests: number | string;
   input_tokens: number | string; output_tokens: number | string;
+  cached_tokens: number | string;
   avg_tps: number | null; avg_ttfb: number | null; last_used: string | null;
 }

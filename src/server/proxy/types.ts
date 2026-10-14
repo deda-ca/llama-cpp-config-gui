@@ -34,6 +34,13 @@ export interface ProxyModelRoute {
   auto?: boolean;
 }
 
+/** USD price per 1M tokens. */
+export interface ModelPricing {
+  input: number;
+  cached: number;
+  output: number;
+}
+
 export interface ProxySettings {
   /** Runtime switch: true while the proxy listener is running. */
   enabled: boolean;
@@ -47,6 +54,8 @@ export interface ProxySettings {
   backends: ProxyBackend[];
   /** Declared audio/SD/custom routes; llama alias routes are derived from model configs. */
   models: ProxyModelRoute[];
+  /** USD price per 1M tokens keyed by model name (for Usage panel cost estimates). */
+  modelPricing: Record<string, ModelPricing>;
 }
 
 export const DEFAULT_PROXY_SETTINGS: ProxySettings = {
@@ -62,7 +71,21 @@ export const DEFAULT_PROXY_SETTINGS: ProxySettings = {
     { id: 'sdiffusion', name: 'stable-diffusion.cpp', kind: 'sdiffusion', baseUrl: 'http://127.0.0.1:7860', enabled: true },
   ],
   models: [],
+  modelPricing: {},
 };
+
+/** Validate/normalize a pricing object; returns null if not a valid pricing. */
+export function normalizePricing(raw: unknown): ModelPricing | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const p = raw as Partial<ModelPricing>;
+  const num = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+  const input = num(p.input);
+  const cached = num(p.cached);
+  const output = num(p.output);
+  if (input === null && cached === null && output === null) return null;
+  return { input: input ?? 0, cached: cached ?? 0, output: output ?? 0 };
+}
 
 function normalizeBackend(raw: unknown, fallbackId: string, fallbackKind: ProxyBackendKind, fallbackName: string): ProxyBackend | null {
   const b = (raw ?? {}) as Partial<ProxyBackend>;
@@ -124,6 +147,16 @@ export function normalizeProxySettings(partial: unknown): ProxySettings {
     models: Array.isArray(p.models)
       ? p.models.filter((m) => m && typeof m.model === 'string' && typeof m.backend === 'string')
       : [],
+    modelPricing: (() => {
+      const out: Record<string, ModelPricing> = {};
+      if (p.modelPricing && typeof p.modelPricing === 'object') {
+        for (const [model, raw] of Object.entries(p.modelPricing)) {
+          const pricing = normalizePricing(raw);
+          if (pricing) out[model] = pricing;
+        }
+      }
+      return out;
+    })(),
   };
 }
 
@@ -140,6 +173,8 @@ export interface UsageRecord {
   status: number;
   inputTokens: number | null;
   outputTokens: number | null;
+  /** KV-cache hit tokens within inputTokens (when upstream reports them). */
+  cachedTokens: number | null;
   /** True when token counts were estimated heuristically. */
   tokensEstimated: boolean;
   totalDurationMs: number;
@@ -168,6 +203,7 @@ export interface UsageSummaryRow {
   requests: number;
   inputTokens: number;
   outputTokens: number;
+  cachedTokens: number;
   avgTokensPerSec: number | null;
   avgTtfbMs: number | null;
   lastUsed: string | null;

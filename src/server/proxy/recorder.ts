@@ -9,12 +9,21 @@ import { Transform, type TransformCallback } from 'stream';
 import type { UsageRecord } from './types.js';
 import type { UsageDb } from './usageDb.js';
 
+export interface ExtractedUsage {
+  input: number | null;
+  output: number | null;
+  /** KV-cache hits within prompt_tokens (usage.prompt_tokens_details.cached_tokens). */
+  cached: number | null;
+}
+
 /** Extract `usage` from a full non-streaming OpenAI-style JSON body. */
-export function extractJsonUsage(body: unknown): { input: number | null; output: number | null } {
+export function extractJsonUsage(body: unknown): ExtractedUsage {
   const u = (body as any)?.usage;
+  const cached = u?.prompt_tokens_details?.cached_tokens;
   return {
     input: Number.isFinite(u?.prompt_tokens) ? u.prompt_tokens : null,
     output: Number.isFinite(u?.completion_tokens) ? u.completion_tokens : null,
+    cached: Number.isFinite(cached) ? cached : null,
   };
 }
 
@@ -24,12 +33,20 @@ export function extractJsonUsage(body: unknown): { input: number | null; output:
  * stream_options.include_usage is set). Buffer-safe across chunk boundaries.
  */
 export class SseUsageScanner extends Transform {
-  usage: { input: number | null; output: number | null } = { input: null, output: null };
+  usage: ExtractedUsage = { input: null, output: null, cached: null };
   firstContentAt: number | null = null;
   private buf = '';
 
   constructor() {
     super();
+  }
+
+  private applyUsage(u: any): void {
+    if (!u) return;
+    if (Number.isFinite(u.prompt_tokens)) this.usage.input = u.prompt_tokens;
+    if (Number.isFinite(u.completion_tokens)) this.usage.output = u.completion_tokens;
+    const cached = u.prompt_tokens_details?.cached_tokens;
+    if (Number.isFinite(cached)) this.usage.cached = cached;
   }
 
   _transform(chunk: Buffer, _enc: string, cb: TransformCallback): void {
@@ -44,12 +61,7 @@ export class SseUsageScanner extends Transform {
       const payload = line.slice(5).trim();
       if (!payload || payload === '[DONE]') continue;
       try {
-        const obj = JSON.parse(payload);
-        const u = obj?.usage;
-        if (u) {
-          if (Number.isFinite(u.prompt_tokens)) this.usage.input = u.prompt_tokens;
-          if (Number.isFinite(u.completion_tokens)) this.usage.output = u.completion_tokens;
-        }
+        this.applyUsage(JSON.parse(payload)?.usage);
       } catch {
         // partial/invalid line: ignore, more chunks will follow
       }
@@ -63,12 +75,7 @@ export class SseUsageScanner extends Transform {
     const line = this.buf.trim();
     if (line.startsWith('data:')) {
       try {
-        const obj = JSON.parse(line.slice(5).trim());
-        const u = obj?.usage;
-        if (u) {
-          if (Number.isFinite(u.prompt_tokens)) this.usage.input = u.prompt_tokens;
-          if (Number.isFinite(u.completion_tokens)) this.usage.output = u.completion_tokens;
-        }
+        this.applyUsage(JSON.parse(line.slice(5).trim())?.usage);
       } catch { /* ignore */ }
     }
     this.buf = '';
@@ -91,7 +98,7 @@ export class RequestRecorder {
   readonly requestId = randomUUID();
   readonly t0 = Date.now();
   ttfbMs: number | null = null;
-  private usage: { input: number | null; output: number | null } = { input: null, output: null };
+  private usage: ExtractedUsage = { input: null, output: null, cached: null };
   private firstContentAt: number | null = null;
 
   constructor(private ctx: RecorderContext) {}
@@ -100,9 +107,10 @@ export class RequestRecorder {
     if (this.ttfbMs === null) this.ttfbMs = Date.now() - this.t0;
   }
 
-  setUsage(input: number | null, output: number | null): void {
+  setUsage(input: number | null, output: number | null, cached: number | null = null): void {
     if (input !== null) this.usage.input = input;
     if (output !== null) this.usage.output = output;
+    if (cached !== null) this.usage.cached = cached;
   }
 
   adoptScanner(scanner: SseUsageScanner): void {
@@ -135,6 +143,7 @@ export class RequestRecorder {
       status,
       inputTokens: input,
       outputTokens: output,
+      cachedTokens: this.usage.cached,
       tokensEstimated: estimated,
       totalDurationMs: tEnd - this.t0,
       ttfbMs: this.ttfbMs,

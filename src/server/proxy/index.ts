@@ -236,7 +236,7 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
             const buf = Buffer.concat(chunks);
             try {
               const usage = extractJsonUsage(JSON.parse(buf.toString('utf8')));
-              rec.setUsage(usage.input, usage.output);
+              rec.setUsage(usage.input, usage.output, usage.cached);
             } catch { /* non-parseable JSON: leave usage null */ }
             finalize(rec, statusCode);
             res.end(buf);

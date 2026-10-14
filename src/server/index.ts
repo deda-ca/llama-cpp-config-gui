@@ -974,10 +974,10 @@ app.get('/api/proxy/usage/export', (req, res) => {
     const s = v === null || v === undefined ? '' : String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const header = 'request_id,timestamp,model,backend,endpoint,stream,status,input_tokens,output_tokens,tokens_estimated,total_ms,ttfb_ms,tokens_per_sec,client_ip,error';
+  const header = 'request_id,timestamp,model,backend,endpoint,stream,status,input_tokens,output_tokens,cached_tokens,tokens_estimated,total_ms,ttfb_ms,tokens_per_sec,client_ip,error';
   const lines = rows.map((r: UsageRecord) => [
     r.requestId, r.timestamp, r.model, r.backend, r.endpoint, r.stream ? 1 : 0, r.status,
-    r.inputTokens, r.outputTokens, r.tokensEstimated ? 1 : 0, r.totalDurationMs,
+    r.inputTokens, r.outputTokens, r.cachedTokens, r.tokensEstimated ? 1 : 0, r.totalDurationMs,
     r.ttfbMs, r.tokensPerSec, r.clientIp, r.errorMessage,
   ].map(esc).join(','));
   res.type('text/csv').send([header, ...lines].join('\n'));

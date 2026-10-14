@@ -99,6 +99,22 @@ describe('GET/PUT /api/proxy/settings', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('URL');
   });
+
+  it('persists model pricing and drops invalid entries', async () => {
+    const res = await request(app).put('/api/proxy/settings').send({
+      modelPricing: {
+        'qwen2.5-14b': { input: 0.5, cached: 0.1, output: 2 },
+        bad: { input: -3 },
+        alsoBad: 'nope',
+      },
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.modelPricing['qwen2.5-14b']).toEqual({ input: 0.5, cached: 0.1, output: 2 });
+    expect(res.body.modelPricing.bad).toBeUndefined();
+    expect(res.body.modelPricing.alsoBad).toBeUndefined();
+    const get = await request(app).get('/api/proxy/settings');
+    expect(get.body.modelPricing['qwen2.5-14b'].output).toBe(2);
+  });
 });
 
 describe('/api/proxy/models CRUD', () => {

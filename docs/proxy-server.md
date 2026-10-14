@@ -153,6 +153,7 @@ interface UsageRecord {
   status: number;              // upstream HTTP status
   inputTokens: number | null;
   outputTokens: number | null;
+  cachedTokens: number | null; // KV-cache hits within inputTokens (upstream prompt_tokens_details.cached_tokens)
   tokensEstimated: boolean;    // true when counted heuristically
   totalDurationMs: number;     // t0 -> response fully sent
   ttfbMs: number | null;       // t0 -> first upstream byte/chunk
@@ -226,6 +227,18 @@ CREATE INDEX IF NOT EXISTS idx_usage_model ON usage(model, ts);
 
 - Retention: configurable `usageRetentionDays` (default 90); a daily task deletes old rows.
 - Backup: none automatic; the file is small (one row per request).
+
+### 6.1 Cost estimation
+
+`ProxySettings.modelPricing` maps model name -> `{ input, cached, output }` USD price per
+1M tokens. The Usage panel computes per-model and total cost as:
+
+```
+cost = ((inputTokens - cachedTokens) * input + cachedTokens * cached + outputTokens * output) / 1e6
+```
+
+Models without pricing show `--`. Pricing is edited via the 💵 Pricing dialog in the Usage
+panel and persisted through `PUT /api/proxy/settings`.
 
 ## 7. Proxy management API (GUI server, `/api/proxy/*`)
 

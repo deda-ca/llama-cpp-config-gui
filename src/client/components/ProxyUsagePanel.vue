@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue';
-import type { UsageRecord, UsageSummaryRow } from '../types';
+import { ref, computed, onMounted, watch } from 'vue';
+import Dialog from './ui/Dialog.vue';
+import type { ModelPricing, UsageRecord, UsageSummaryRow } from '../types';
 
 const props = defineProps<{
   /** Latest completed request, streamed over SSE (event: proxy-usage) */
@@ -12,17 +13,95 @@ const emit = defineEmits(['toggle-collapse']);
 
 const summary = ref<UsageSummaryRow[]>([]);
 const recent = ref<UsageRecord[]>([]);
+const pricing = ref<Record<string, ModelPricing>>({});
+
+// --- Pricing dialog ---
+const pricingOpen = ref(false);
+const pricingDraft = ref<Record<string, { input: string; cached: string; output: string }>>({});
 
 async function loadUsage() {
   try {
-    const [sumRes, rowsRes] = await Promise.all([
+    const [sumRes, rowsRes, priceRes] = await Promise.all([
       fetch('/api/proxy/usage/summary'),
       fetch('/api/proxy/usage?limit=15'),
+      fetch('/api/proxy/settings'),
     ]);
     if (sumRes.ok) summary.value = (await sumRes.json()).rows;
     if (rowsRes.ok) recent.value = (await rowsRes.json()).rows;
+    if (priceRes.ok) pricing.value = (await priceRes.json()).modelPricing ?? {};
   } catch { /* usage is best-effort */ }
 }
+
+function openPricing() {
+  const draft: Record<string, { input: string; cached: string; output: string }> = {};
+  for (const r of summary.value) {
+    if (!draft[r.model]) {
+      const p = pricing.value[r.model];
+      draft[r.model] = {
+        input: p ? String(p.input) : '',
+        cached: p ? String(p.cached) : '',
+        output: p ? String(p.output) : '',
+      };
+    }
+  }
+  // Keep models that have pricing but no usage yet
+  for (const [model, p] of Object.entries(pricing.value)) {
+    if (!draft[model]) draft[model] = { input: String(p.input), cached: String(p.cached), output: String(p.output) };
+  }
+  pricingDraft.value = draft;
+  pricingOpen.value = true;
+}
+
+async function savePricing() {
+  const next: Record<string, ModelPricing> = {};
+  for (const [model, v] of Object.entries(pricingDraft.value)) {
+    const input = Number(v.input);
+    const cached = Number(v.cached);
+    const output = Number(v.output);
+    if (!Number.isFinite(input) && !Number.isFinite(cached) && !Number.isFinite(output)) continue;
+    if (input === 0 && cached === 0 && output === 0) continue;
+    next[model] = {
+      input: Number.isFinite(input) && input >= 0 ? input : 0,
+      cached: Number.isFinite(cached) && cached >= 0 ? cached : 0,
+      output: Number.isFinite(output) && output >= 0 ? output : 0,
+    };
+  }
+  try {
+    const res = await fetch('/api/proxy/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ modelPricing: next }),
+    });
+    if (res.ok) {
+      pricing.value = (await res.json()).modelPricing ?? {};
+      pricingOpen.value = false;
+    }
+  } catch { /* handled by next load */ }
+}
+
+function costOf(model: string, inputTokens: number, cachedTokens: number, outputTokens: number): number | null {
+  const p = pricing.value[model];
+  if (!p) return null;
+  const fresh = Math.max(0, inputTokens - cachedTokens);
+  return (fresh * p.input + cachedTokens * p.cached + outputTokens * p.output) / 1_000_000;
+}
+
+function fmtCost(v: number | null): string {
+  if (v === null) return '--';
+  if (v === 0) return '$0';
+  if (v < 0.01) return `$${v.toFixed(4)}`;
+  return `$${v.toFixed(2)}`;
+}
+
+const totalCost = computed(() => {
+  let sum = 0;
+  let any = false;
+  for (const r of summary.value) {
+    const c = costOf(r.model, r.inputTokens, r.cachedTokens, r.outputTokens);
+    if (c !== null) { sum += c; any = true; }
+  }
+  return any ? sum : null;
+});
 
 // Live rows: prepend each completed request and refresh aggregates (debounced)
 let usageTimer: ReturnType<typeof setTimeout> | null = null;
@@ -65,8 +144,13 @@ function fmtAgo(iso: string | null): string {
           <span class="metric-label">Tokens</span>
           <span class="metric-value highlight">{{ fmtTok(summary.reduce((a, r) => a + r.inputTokens + r.outputTokens, 0)) }}</span>
         </div>
+        <div class="metric" v-if="totalCost !== null">
+          <span class="metric-label">Cost</span>
+          <span class="metric-value cost">{{ fmtCost(totalCost) }}</span>
+        </div>
       </div>
       <div class="usage-actions">
+        <button v-if="!props.collapsed" class="collapse-btn" @click="openPricing" title="Set per-model pricing (USD per 1M tokens)">💵 Pricing</button>
         <a v-if="!props.collapsed" class="collapse-btn" href="/api/proxy/usage/export" title="Download usage as CSV">⬇ CSV</a>
         <button class="collapse-btn" @click="emit('toggle-collapse')" :title="props.collapsed ? 'Expand usage' : 'Collapse usage'">
           {{ props.collapsed ? '▸ Expand' : '▾ Collapse' }}
@@ -77,7 +161,7 @@ function fmtAgo(iso: string | null): string {
     <div v-if="!props.collapsed" class="usage-body">
       <table class="usage-table" v-if="summary.length > 0">
         <thead>
-          <tr><th>Model</th><th>Backend</th><th>Reqs</th><th>In</th><th>Out</th><th>t/s</th><th>TTFB</th><th>Last used</th></tr>
+          <tr><th>Model</th><th>Backend</th><th>Reqs</th><th>In</th><th>Cache</th><th>Out</th><th>Cost</th><th>t/s</th><th>TTFB</th><th>Last used</th></tr>
         </thead>
         <tbody>
           <tr v-for="r in summary" :key="r.model + r.backend">
@@ -85,7 +169,9 @@ function fmtAgo(iso: string | null): string {
             <td>{{ r.backend }}</td>
             <td>{{ r.requests }}</td>
             <td>{{ fmtTok(r.inputTokens) }}</td>
+            <td>{{ r.cachedTokens > 0 ? fmtTok(r.cachedTokens) : '--' }}</td>
             <td>{{ fmtTok(r.outputTokens) }}</td>
+            <td>{{ fmtCost(costOf(r.model, r.inputTokens, r.cachedTokens, r.outputTokens)) }}</td>
             <td>{{ r.avgTokensPerSec !== null ? r.avgTokensPerSec.toFixed(1) : '--' }}</td>
             <td>{{ r.avgTtfbMs !== null ? Math.round(r.avgTtfbMs) + 'ms' : '--' }}</td>
             <td>{{ fmtAgo(r.lastUsed) }}</td>
@@ -94,11 +180,32 @@ function fmtAgo(iso: string | null): string {
       </table>
       <div class="recent-list" v-if="recent.length > 0">
         <div v-for="r in recent" :key="r.requestId" class="recent-row">
-          {{ r.timestamp.slice(11, 19) }} · {{ r.backend }} · {{ r.model }} · {{ r.endpoint }} · {{ r.stream ? 'stream' : 'json' }} · {{ r.status }} · {{ r.totalDurationMs }}ms<template v-if="r.inputTokens !== null || r.outputTokens !== null"> · {{ r.inputTokens ?? '?' }}→{{ r.outputTokens ?? '?' }} tok</template><template v-if="r.tokensPerSec !== null"> · {{ r.tokensPerSec.toFixed(1) }} t/s</template><template v-if="r.tokensEstimated"> (est)</template>
+          {{ r.timestamp.slice(11, 19) }} · {{ r.backend }} · {{ r.model }} · {{ r.endpoint }} · {{ r.stream ? 'stream' : 'json' }} · {{ r.status }} · {{ r.totalDurationMs }}ms<template v-if="r.inputTokens !== null || r.outputTokens !== null"> · {{ r.inputTokens ?? '?' }}→{{ r.outputTokens ?? '?' }} tok<template v-if="r.cachedTokens"> ({{ r.cachedTokens }} cached)</template></template><template v-if="r.tokensPerSec !== null"> · {{ r.tokensPerSec.toFixed(1) }} t/s</template><template v-if="r.tokensEstimated"> (est)</template>
         </div>
       </div>
       <pre v-if="summary.length === 0 && recent.length === 0" class="empty">No usage recorded yet. Start the proxy and send a request.</pre>
     </div>
+
+    <Dialog v-if="pricingOpen" title="Model pricing (USD per 1M tokens)" :width="560" @close="pricingOpen = false">
+      <table class="pricing-table" v-if="Object.keys(pricingDraft).length > 0">
+        <thead>
+          <tr><th>Model</th><th>Input</th><th>Cached input</th><th>Output</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="(p, model) in pricingDraft" :key="model">
+            <td>{{ model }}</td>
+            <td><input v-model="p.input" type="number" min="0" step="0.01" placeholder="0" /></td>
+            <td><input v-model="p.cached" type="number" min="0" step="0.01" placeholder="0" /></td>
+            <td><input v-model="p.output" type="number" min="0" step="0.01" placeholder="0" /></td>
+          </tr>
+        </tbody>
+      </table>
+      <pre v-else class="empty">No models seen yet. Send a request through the proxy first.</pre>
+      <template #footer>
+        <button class="collapse-btn" @click="pricingOpen = false">Cancel</button>
+        <button class="collapse-btn save" @click="savePricing">Save pricing</button>
+      </template>
+    </Dialog>
   </div>
 </template>
 
@@ -153,6 +260,46 @@ function fmtAgo(iso: string | null): string {
 }
 
 .metric-value.highlight {
+  color: #3fb950;
+}
+
+.metric-value.cost {
+  color: #d29922;
+}
+
+.pricing-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+.pricing-table th {
+  text-align: left;
+  color: #8b949e;
+  font-weight: 600;
+  padding: 4px 8px;
+  border-bottom: 1px solid #30363d;
+  text-transform: uppercase;
+  font-size: 0.68rem;
+}
+
+.pricing-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid #21262d;
+}
+
+.pricing-table input {
+  width: 90px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #c9d1d9;
+  padding: 4px 6px;
+  font-size: 0.8rem;
+}
+
+.collapse-btn.save {
+  border-color: #238636;
   color: #3fb950;
 }
 

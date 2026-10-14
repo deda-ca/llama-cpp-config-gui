@@ -32,19 +32,19 @@ async function runScanner(chunks: string[]): Promise<SseUsageScanner> {
 describe('SseUsageScanner', () => {
   it('extracts usage from a whole-stream write', async () => {
     const s = await runScanner([SSE_STREAM]);
-    expect(s.usage).toEqual({ input: 123, output: 2 });
+    expect(s.usage).toEqual({ input: 123, output: 2, cached: null });
     expect(s.firstContentAt).not.toBeNull();
   });
 
   it('extracts usage when chunks split mid-line', async () => {
     const mid = SSE_STREAM.indexOf('"prompt_tokens"');
     const s = await runScanner([SSE_STREAM.slice(0, mid), SSE_STREAM.slice(mid)]);
-    expect(s.usage).toEqual({ input: 123, output: 2 });
+    expect(s.usage).toEqual({ input: 123, output: 2, cached: null });
   });
 
   it('extracts usage when split byte-by-byte', async () => {
     const s = await runScanner([...SSE_STREAM].map((ch) => ch));
-    expect(s.usage).toEqual({ input: 123, output: 2 });
+    expect(s.usage).toEqual({ input: 123, output: 2, cached: null });
   });
 
   it('handles streams with no usage chunk', async () => {
@@ -55,22 +55,27 @@ describe('SseUsageScanner', () => {
     scanner.write(Buffer.from(noUsage));
     scanner.end();
     await done;
-    expect(scanner.usage).toEqual({ input: null, output: null });
+    expect(scanner.usage).toEqual({ input: null, output: null, cached: null });
   });
 
   it('handles usage on a final line without trailing newline', async () => {
     const s = await runScanner([SSE_STREAM.replace(/\n$/, '')]);
-    expect(s.usage).toEqual({ input: 123, output: 2 });
+    expect(s.usage).toEqual({ input: 123, output: 2, cached: null });
   });
 });
 
 describe('extractJsonUsage', () => {
   it('extracts prompt/completion tokens', () => {
     expect(extractJsonUsage({ usage: { prompt_tokens: 10, completion_tokens: 5 } }))
-      .toEqual({ input: 10, output: 5 });
+      .toEqual({ input: 10, output: 5, cached: null });
   });
   it('returns nulls when usage missing', () => {
-    expect(extractJsonUsage({ choices: [] })).toEqual({ input: null, output: null });
+    expect(extractJsonUsage({ choices: [] })).toEqual({ input: null, output: null, cached: null });
+  });
+  it('extracts cached_tokens from prompt_tokens_details', () => {
+    expect(extractJsonUsage({
+      usage: { prompt_tokens: 1000, completion_tokens: 50, prompt_tokens_details: { cached_tokens: 800 } },
+    })).toEqual({ input: 1000, output: 50, cached: 800 });
   });
 });
 
@@ -85,9 +90,18 @@ describe('RequestRecorder', () => {
     expect(r.status).toBe(200);
     expect(r.inputTokens).toBe(100);
     expect(r.outputTokens).toBe(50);
+    expect(r.cachedTokens).toBeNull();
     expect(r.tokensEstimated).toBe(false);
     expect(r.totalDurationMs).toBeGreaterThanOrEqual(0);
     expect(r.requestId).toMatch(/[0-9a-f-]{36}/);
+  });
+
+  it('records cached tokens when provided', () => {
+    const rec = new RequestRecorder(ctx);
+    rec.markTtfb();
+    rec.setUsage(1000, 50, 800);
+    const r = rec.build(200);
+    expect(r.cachedTokens).toBe(800);
   });
 
   it('falls back to estimated input tokens and flags them', () => {
