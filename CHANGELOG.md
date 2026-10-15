@@ -1,3 +1,10 @@
+# [0.6.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.5.0...v0.6.0) (2026-10-15)
+
+
+### Features
+
+* show current PCIe link per GPU and drag-to-reorder GPU cards ([1cf679d](https://github.com/deda-ca/llama-cpp-config-gui/commit/1cf679db1a8d7b1bd571f0f98532f900acf7f5b6))
+
 # [0.5.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.4.0...v0.5.0) (2026-10-14)
 
 
