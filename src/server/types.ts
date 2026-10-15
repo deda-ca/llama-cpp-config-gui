@@ -6,6 +6,8 @@ export interface GpuInfo {
   temperatureC: number;
   utilizationPct: number;
   powerDrawW: number | null;
+  pcieGen: number | null;      // current PCIe generation (e.g. 4 => PCIe 4.0)
+  pcieWidth: number | null;    // current PCIe lane width (e.g. 16 => x16)
   cudaIndex: number | null; // matched CUDA device index from llama-cli, if available
 }
 

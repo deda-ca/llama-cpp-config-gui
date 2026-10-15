@@ -2,10 +2,17 @@ import { execFile } from 'child_process';
 import type { GpuInfo } from './types.js';
 
 const QUERY =
-  'index,name,memory.used,memory.total,temperature.gpu,utilization.gpu,power.draw';
+  'index,name,memory.used,memory.total,temperature.gpu,utilization.gpu,power.draw,' +
+  'pcie.link.gen.current,pcie.link.width.current';
 
 function parseCsvLine(line: string): string[] {
   return line.split(',').map((s) => s.trim());
+}
+
+function parseNum(s: string | undefined): number | null {
+  if (!s || s === '[N/A]') return null;
+  const n = parseFloat(s);
+  return Number.isNaN(n) ? null : n;
 }
 
 export function queryGpus(): Promise<GpuInfo[]> {
@@ -22,7 +29,7 @@ export function queryGpus(): Promise<GpuInfo[]> {
         const gpus: GpuInfo[] = [];
         for (const line of stdout.trim().split('\n')) {
           if (!line.trim()) continue;
-          const [index, name, memUsed, memTotal, temp, util, power] = parseCsvLine(line);
+          const [index, name, memUsed, memTotal, temp, util, power, genCur, widthCur] = parseCsvLine(line);
           gpus.push({
             index: parseInt(index, 10),
             name,
@@ -31,6 +38,8 @@ export function queryGpus(): Promise<GpuInfo[]> {
             temperatureC: parseFloat(temp),
             utilizationPct: parseFloat(util),
             powerDrawW: power === '[N/A]' ? null : parseFloat(power),
+            pcieGen: parseNum(genCur),
+            pcieWidth: parseNum(widthCur),
             cudaIndex: null, // filled in by the server after matching
           });
         }

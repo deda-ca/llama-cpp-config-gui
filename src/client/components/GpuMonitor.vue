@@ -42,6 +42,11 @@ const sortedGpus = computed(() => {
 });
 
 onMounted(async () => {
+  // Release drag eligibility if the user clicks the handle without dragging
+  window.addEventListener('mouseup', () => {
+    if (draggingIndex.value === null) handlePressed.value = null;
+  });
+
   try {
     const res = await fetch('/api/gpu-interval');
     if (res.ok) {
@@ -75,13 +80,43 @@ function onSortChange() {
   persistOrder();
 }
 
-function moveGpu(smiIndex: number, direction: -1 | 1) {
-  // Switch to manual mode and build order from current display
+// Drag & drop reordering (initiated from the grip handle on each card).
+// The card is only draggable while its handle is held down, so drags start
+// from the handle but the whole card follows.
+const draggingIndex = ref<number | null>(null);
+const dropTargetIndex = ref<number | null>(null);
+const handlePressed = ref<number | null>(null);
+
+function onDragStart(smiIndex: number) {
+  draggingIndex.value = smiIndex;
+}
+
+function onDragOver(targetIndex: number) {
+  if (draggingIndex.value !== null && draggingIndex.value !== targetIndex) {
+    dropTargetIndex.value = targetIndex;
+  }
+}
+
+function onDragLeave(targetIndex: number) {
+  if (dropTargetIndex.value === targetIndex) dropTargetIndex.value = null;
+}
+
+function onDragEnd() {
+  draggingIndex.value = null;
+  dropTargetIndex.value = null;
+  handlePressed.value = null;
+}
+
+function onDrop(targetIndex: number) {
+  const source = draggingIndex.value;
+  draggingIndex.value = null;
+  dropTargetIndex.value = null;
+  if (source === null || source === targetIndex) return;
   const currentOrder = sortedGpus.value.map((g) => g.index);
-  const pos = currentOrder.indexOf(smiIndex);
-  const target = pos + direction;
-  if (target < 0 || target >= currentOrder.length) return;
-  [currentOrder[pos], currentOrder[target]] = [currentOrder[target], currentOrder[pos]];
+  const from = currentOrder.indexOf(source);
+  const to = currentOrder.indexOf(targetIndex);
+  if (from === -1 || to === -1) return;
+  currentOrder.splice(to, 0, ...currentOrder.splice(from, 1));
   sortMode.value = 'manual';
   manualOrder.value = currentOrder;
   persistOrder();
@@ -102,6 +137,14 @@ function formatMb(mb: number): string {
 
 function memPct(used: number, total: number): number {
   return total > 0 ? Math.round((used / total) * 100) : 0;
+}
+
+function formatPcie(gpu: any): string | null {
+  if (gpu.pcieGen == null && gpu.pcieWidth == null) return null;
+  let s = '';
+  if (gpu.pcieGen != null) s += gpu.pcieGen + '.0';
+  if (gpu.pcieWidth != null) s += (s ? ' ' : '') + 'x' + gpu.pcieWidth;
+  return s;
 }
 </script>
 
@@ -144,13 +187,29 @@ function memPct(used: number, total: number): number {
     </div>
 
     <div v-else class="gpu-grid">
-      <div v-for="(gpu, gi) in sortedGpus" :key="gpu.index" class="gpu-card">
+      <div
+        v-for="gpu in sortedGpus"
+        :key="gpu.index"
+        class="gpu-card"
+        :draggable="handlePressed === gpu.index"
+        :class="{ 'gpu-card-dragging': draggingIndex === gpu.index, 'gpu-card-drop-target': dropTargetIndex === gpu.index && draggingIndex !== null && draggingIndex !== gpu.index }"
+        @dragstart="onDragStart(gpu.index)"
+        @dragend="onDragEnd"
+        @dragover.prevent="onDragOver(gpu.index)"
+        @dragleave="onDragLeave(gpu.index)"
+        @drop="onDrop(gpu.index)"
+      >
         <div class="gpu-name-row">
-          <span class="gpu-name">{{ gpu.name }}</span>
+          <span class="gpu-name-group">
+            <span
+              class="drag-handle"
+              @mousedown="handlePressed = gpu.index"
+              title="Drag to reorder"
+            >&#8942;&#8942;</span>
+            <span class="gpu-name">{{ gpu.name }}</span>
+          </span>
           <div class="gpu-card-actions">
             <span v-if="gpu.cudaIndex !== null" class="cuda-badge">CUDA{{ gpu.cudaIndex }}</span>
-            <button class="arrow-btn" :disabled="gi === 0" @click="moveGpu(gpu.index, -1)" title="Move up">&#9650;</button>
-            <button class="arrow-btn" :disabled="gi === sortedGpus.length - 1" @click="moveGpu(gpu.index, 1)" title="Move down">&#9660;</button>
           </div>
         </div>
 
@@ -189,6 +248,11 @@ function memPct(used: number, total: number): number {
           <div class="gpu-stat" v-if="gpu.powerDrawW != null">
             <span class="label">Power</span>
             <span class="value">{{ gpu.powerDrawW.toFixed(0) }} W</span>
+          </div>
+
+          <div class="gpu-stat" v-if="formatPcie(gpu)">
+            <span class="label">PCIe</span>
+            <span class="value">{{ formatPcie(gpu) }}</span>
           </div>
         </div>
       </div>
@@ -285,25 +349,33 @@ function memPct(used: number, total: number): number {
   gap: 6px;
 }
 
-.arrow-btn {
-  background: none;
-  border: 1px solid #30363d;
-  border-radius: 3px;
+.drag-handle {
   color: #8b949e;
-  font-size: 0.6rem;
-  padding: 2px 5px;
-  cursor: pointer;
-  line-height: 1;
+  font-size: 0.8rem;
+  letter-spacing: -2px;
+  cursor: grab;
+  user-select: none;
+  padding: 2px 4px;
+  margin-right: 6px;
+  border-radius: 3px;
 }
 
-.arrow-btn:hover:not(:disabled) {
-  border-color: #58a6ff;
+.drag-handle:hover {
   color: #58a6ff;
+  background: #1f6feb22;
 }
 
-.arrow-btn:disabled {
-  opacity: 0.3;
-  cursor: not-allowed;
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+.gpu-card-dragging {
+  opacity: 0.4;
+}
+
+.gpu-card-drop-target {
+  border-color: #58a6ff;
+  box-shadow: 0 0 0 1px #58a6ff44;
 }
 
 .no-gpu {
@@ -333,6 +405,12 @@ function memPct(used: number, total: number): number {
   margin-bottom: 10px;
 }
 
+.gpu-name-group {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
 .gpu-name {
   font-weight: 600;
   font-size: 0.95rem;
@@ -348,6 +426,7 @@ function memPct(used: number, total: number): number {
   font-weight: 700;
   letter-spacing: 0.5px;
 }
+
 
 .gpu-stat {
   display: flex;

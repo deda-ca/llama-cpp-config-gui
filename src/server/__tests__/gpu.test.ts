@@ -19,7 +19,7 @@ describe('queryGpus', () => {
   });
 
   it('parses a single GPU row', async () => {
-    mockExecFile('0, NVIDIA GeForce RTX 5070 Ti, 1234, 16384, 55, 78, 245.5');
+    mockExecFile('0, NVIDIA GeForce RTX 5070 Ti, 1234, 16384, 55, 78, 245.5, 4, 16');
     const gpus = await queryGpus();
     expect(gpus).toHaveLength(1);
     expect(gpus[0]).toMatchObject({
@@ -30,13 +30,15 @@ describe('queryGpus', () => {
       temperatureC: 55,
       utilizationPct: 78,
       powerDrawW: 245.5,
+      pcieGen: 4,
+      pcieWidth: 16,
     });
   });
 
   it('parses multiple GPU rows', async () => {
     mockExecFile(
-      '0, NVIDIA GeForce RTX 5070 Ti, 1234, 16384, 55, 78, 245.5\n' +
-      '1, NVIDIA GeForce RTX 3050, 512, 6144, 42, 12, 89.0',
+      '0, NVIDIA GeForce RTX 5070 Ti, 1234, 16384, 55, 78, 245.5, 4, 16\n' +
+      '1, NVIDIA GeForce RTX 3050, 512, 6144, 42, 12, 89.0, 3, 8',
     );
     const gpus = await queryGpus();
     expect(gpus).toHaveLength(2);
@@ -46,10 +48,23 @@ describe('queryGpus', () => {
   });
 
   it('handles [N/A] power draw as null', async () => {
-    mockExecFile('0, NVIDIA GeForce RTX 4090, 100, 24564, 60, 90, [N/A]');
+    mockExecFile('0, NVIDIA GeForce RTX 4090, 100, 24564, 60, 90, [N/A], 4, 16');
     const gpus = await queryGpus();
     expect(gpus).toHaveLength(1);
     expect(gpus[0].powerDrawW).toBeNull();
+  });
+
+  it('parses current PCIe gen and width', async () => {
+    mockExecFile('0, NVIDIA GPU, 100, 8192, 50, 10, 80.0, 3, 8');
+    const gpus = await queryGpus();
+    expect(gpus[0]).toMatchObject({ pcieGen: 3, pcieWidth: 8 });
+  });
+
+  it('handles [N/A] PCIe fields as null', async () => {
+    mockExecFile('0, NVIDIA GPU, 100, 8192, 50, 10, 80.0, [N/A], [N/A]');
+    const gpus = await queryGpus();
+    expect(gpus[0].pcieGen).toBeNull();
+    expect(gpus[0].pcieWidth).toBeNull();
   });
 
   it('returns empty array on exec error (no nvidia-smi)', async () => {
@@ -59,7 +74,7 @@ describe('queryGpus', () => {
   });
 
   it('skips blank lines', async () => {
-    mockExecFile('\n0, NVIDIA GPU, 10, 2048, 30, 40, 50.0\n\n');
+    mockExecFile('\n0, NVIDIA GPU, 10, 2048, 30, 40, 50.0, 4, 16\n\n');
     const gpus = await queryGpus();
     expect(gpus).toHaveLength(1);
   });
