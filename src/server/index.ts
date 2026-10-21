@@ -19,6 +19,7 @@ import { isBackendKind, makeBackendId } from './proxy/backends.js';
 import { toLogEntry, parseLogLine, parseTimingMessage, type LogEntry, type TimingData } from './logParser.js';
 import { ModelMetricsPoller } from './metricsPoller.js';
 import { APP_VERSION } from './version.js';
+import { applyUpdate, checkForUpdate } from './update.js';
 
 // When compiled with `bun build --compile --asset dist/client`, the built client
 // bundle is embedded in the executable and served from memory. In dev / node mode
@@ -399,6 +400,71 @@ app.get('/api/devices', async (_req, res) => {
 // This app's own version (baked in at compile time from package.json)
 app.get('/api/app-version', (_req, res) => {
   res.json({ version: APP_VERSION });
+});
+
+// --- Self-update (GitHub Releases) ---
+// Check whether a newer release exists; release assets are matched per platform.
+app.get('/api/update/check', async (_req, res) => {
+  try {
+    const check = await checkForUpdate(APP_VERSION);
+    // Self-replacement only works inside the compiled binary (we know its path)
+    res.json({ ...check, canApply: embeddedClient.size > 0 && check.assetName !== null });
+  } catch (e) {
+    res.status(502).json({ error: `update check failed: ${(e as Error).message}` });
+  }
+});
+
+// Download the latest release binary and replace the running executable.
+app.post('/api/update/apply', async (_req, res) => {
+  if (embeddedClient.size === 0) {
+    res.status(400).json({ error: 'self-update is only available in the compiled release binary' });
+    return;
+  }
+  try {
+    const check = await checkForUpdate(APP_VERSION);
+    if (!check.available) {
+      res.status(400).json({ error: `already on the latest version (${check.latest})` });
+      return;
+    }
+    const target = process.execPath;
+    const binaryName = path.basename(target);
+    const result = await applyUpdate(check, target, binaryName);
+    proxyLog('I', `updated to v${result.latest} — restart to run the new version`);
+    res.json({ ok: true, latest: result.latest, restartRequired: true, backupPath: result.backupPath });
+  } catch (e) {
+    proxyLog('E', `update failed: ${(e as Error).message}`);
+    res.status(500).json({ error: `update failed: ${(e as Error).message}` });
+  }
+});
+
+// Restart the GUI server process (llama.cpp child is stopped first).
+// The compiled binary re-spawns itself detached; in dev, tsx watch restarts
+// the child when it exits.
+app.post('/api/restart', (_req, res) => {
+  res.json({ ok: true });
+  gpuPoller.stop();
+  systemPoller.stop();
+  for (const client of sseClients) {
+    client.end();
+  }
+  sseClients.clear();
+  llama.stop();
+  if (embeddedClient.size > 0) {
+    try {
+      const child = spawn(process.execPath, process.argv.slice(1), {
+        cwd: process.cwd(),
+        env: process.env,
+        stdio: 'ignore',
+        detached: true,
+      });
+      child.on('error', (err) => console.error(`[server] restart failed: ${err.message}`));
+      child.unref();
+    } catch (e) {
+      console.error(`[server] restart spawn failed: ${(e as Error).message}`);
+    }
+  }
+  console.log('[server] restart requested, exiting…');
+  setTimeout(() => process.exit(0), 300);
 });
 
 app.get('/api/version', async (_req, res) => {

@@ -20,23 +20,84 @@ const processStatus = ref('stopped');
 const modelStatusData = ref<ModelStatusData | null>(null);
 const appVersion = ref<string | null>(null);
 const showEnv = ref(false);
+// Self-update state (GitHub Releases)
+interface UpdateInfo {
+  current: string;
+  latest: string;
+  available: boolean;
+  releaseUrl: string;
+  assetName: string | null;
+  canApply: boolean;
+}
+const updateInfo = ref<UpdateInfo | null>(null);
+const updateChecking = ref(false);
+const updateApplying = ref(false);
+
+async function checkForUpdate() {
+  if (updateChecking.value) return;
+  updateChecking.value = true;
+  try {
+    const res = await fetch('/api/update/check');
+    if (res.ok) {
+      updateInfo.value = await res.json();
+    } else {
+      updateInfo.value = null;
+    }
+  } catch {
+    updateInfo.value = null;
+  } finally {
+    updateChecking.value = false;
+  }
+}
+
+function openReleasePage() {
+  const info = updateInfo.value;
+  if (info) window.open(info.releaseUrl, '_blank');
+}
+
+async function applyUpdate() {
+  const info = updateInfo.value;
+  if (!info || updateApplying.value) return;
+  if (!info.canApply) {
+    // Dev mode or no matching asset — send the user to the release page instead
+    openReleasePage();
+    return;
+  }
+  if (!confirm(`Update to v${info.latest}? This downloads the new version and replaces the current binary.`)) return;
+  updateApplying.value = true;
+  try {
+    const res = await fetch('/api/update/apply', { method: 'POST' });
+    const data = await res.json();
+    if (res.ok) {
+      updateInfo.value = null;
+      const backupNote = data.backupPath ? ` (previous version kept at ${data.backupPath})` : '';
+      if (confirm(`Updated to v${data.latest}${backupNote}. Restart now to run the new version?`)) {
+        restartServer();
+      }
+    } else {
+      alert(`Update failed: ${data.error ?? 'unknown error'}`);
+    }
+  } catch (e) {
+    alert(`Update failed: ${(e as Error).message}`);
+  } finally {
+    updateApplying.value = false;
+  }
+}
 // Right-column tab selection, persisted across refreshes
 const TAB_KEY = 'llama-gui:right-tab';
-const rightTab = ref<'models' | 'proxy'>((localStorage.getItem(TAB_KEY) === 'proxy' ? 'proxy' : 'models'));
-function setRightTab(tab: 'models' | 'proxy') {
+const TAB_VALUES = ['models', 'proxy', 'usage'] as const;
+const rightTab = ref<'models' | 'proxy' | 'usage'>(
+  (TAB_VALUES as readonly string[]).includes(localStorage.getItem(TAB_KEY) ?? '')
+    ? (localStorage.getItem(TAB_KEY) as 'models' | 'proxy' | 'usage')
+    : 'models',
+);
+function setRightTab(tab: 'models' | 'proxy' | 'usage') {
   rightTab.value = tab;
   localStorage.setItem(TAB_KEY, tab);
 }
 // Proxy log stream + latest usage event (fed by SSE)
 const proxyLogLines = ref<LogEntry[]>([]);
 const liveUsage = ref<UsageRecord | null>(null);
-// Proxy Usage panel collapsed state, persisted across refreshes
-const PROXY_USAGE_COLLAPSED_KEY = 'llama-gui:proxy-usage-collapsed';
-const proxyUsageCollapsed = ref(localStorage.getItem(PROXY_USAGE_COLLAPSED_KEY) === '1');
-function toggleProxyUsageCollapsed() {
-  proxyUsageCollapsed.value = !proxyUsageCollapsed.value;
-  localStorage.setItem(PROXY_USAGE_COLLAPSED_KEY, proxyUsageCollapsed.value ? '1' : '0');
-}
 // Logs & Metrics collapsed state, persisted across refreshes
 const LOGS_COLLAPSED_KEY = 'llama-gui:logs-collapsed';
 const logsCollapsed = ref(localStorage.getItem(LOGS_COLLAPSED_KEY) === '1');
@@ -130,6 +191,15 @@ async function shutdownServer() {
   document.body.innerHTML = '<div style="display:flex;height:100vh;align-items:center;justify-content:center;font-size:1.2rem;color:#8b949e">Server shut down.</div>';
 }
 
+// Restart the GUI server (the release binary re-spawns itself; dev relies on tsx watch)
+async function restartServer() {
+  if (!confirm('Restart the GUI server? llama.cpp will be stopped.')) return;
+  try {
+    await fetch('/api/restart', { method: 'POST' });
+  } catch { /* server is restarting */ }
+  document.body.innerHTML = '<div style="display:flex;height:100vh;align-items:center;justify-content:center;font-size:1.2rem;color:#8b949e">Restarting… reload this page in a moment.</div>';
+}
+
 onMounted(() => {
   connect();
   fetchAppVersion();
@@ -144,9 +214,35 @@ onUnmounted(() => {
 <template>
   <div class="app">
     <header class="header">
-      <h1>llama.cpp Config GUI<template v-if="appVersion"> ({{ appVersion }})</template></h1>
+      <h1>
+        llama.cpp Config GUI<template v-if="appVersion"> ({{ appVersion }})</template>
+        <button
+          class="update-check-btn"
+          :class="{ spinning: updateChecking }"
+          :disabled="updateChecking"
+          @click="checkForUpdate"
+          :title="updateChecking ? 'Checking for updates…' : 'Check GitHub for a new version'"
+        >⟳</button>
+        <button
+          v-if="updateInfo?.available"
+          class="upgrade-btn"
+          :class="{ applying: updateApplying }"
+          :disabled="updateApplying"
+          :title="updateApplying ? `Downloading v${updateInfo.latest}…` : `New version v${updateInfo.latest} available — click to download and replace the current binary`"
+          @click="applyUpdate"
+        >⬆ v{{ updateInfo.latest }}<span v-if="updateApplying" class="upgrade-spin">…</span></button>
+        <a
+          v-if="updateInfo?.available"
+          class="release-link"
+          :href="updateInfo.releaseUrl"
+          target="_blank"
+          rel="noopener"
+          title="Open the GitHub release page"
+        >↗</a>
+      </h1>
       <div class="header-right">
         <span class="status-badge" :class="processStatus">{{ processStatus }}</span>
+        <button class="restart-btn" @click="restartServer" title="Restart the GUI server">⟳ Restart</button>
         <button class="shutdown-btn" @click="shutdownServer" title="Stop llama.cpp and shut down the server">⏻ Shutdown</button>
       </div>
     </header>
@@ -174,6 +270,9 @@ onUnmounted(() => {
           <button class="tab" :class="{ active: rightTab === 'proxy' }" @click="setRightTab('proxy')">
             <span class="tab-icon">⇄</span> Proxy
           </button>
+          <button class="tab" :class="{ active: rightTab === 'usage' }" @click="setRightTab('usage')">
+            <span class="tab-icon">▮</span> Usage
+          </button>
         </nav>
 
         <template v-if="rightTab === 'models'">
@@ -190,16 +289,14 @@ onUnmounted(() => {
             />
           </section>
         </template>
-        <template v-else>
+        <template v-else-if="rightTab === 'proxy'">
           <section class="panel proxy-section">
             <ProxyPanel :lines="proxyLogLines" />
           </section>
-          <section class="panel proxy-usage-section" :class="{ collapsed: proxyUsageCollapsed }">
-            <ProxyUsagePanel
-              :live-usage="liveUsage"
-              :collapsed="proxyUsageCollapsed"
-              @toggle-collapse="toggleProxyUsageCollapsed"
-            />
+        </template>
+        <template v-else>
+          <section class="panel usage-tab-section">
+            <ProxyUsagePanel :live-usage="liveUsage" />
           </section>
         </template>
       </div>
@@ -248,6 +345,86 @@ body {
 .header h1 {
   font-size: 1.1rem;
   font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.update-check-btn {
+  background: none;
+  border: none;
+  color: #8b949e;
+  font-size: 0.95rem;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  line-height: 1;
+}
+
+.update-check-btn:hover {
+  color: #e1e4e8;
+  background: #30363d;
+}
+
+.update-check-btn:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.update-check-btn.spinning {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.upgrade-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #23863633;
+  border: 1px solid #3fb95066;
+  border-radius: 12px;
+  color: #3fb950;
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 5px 11px;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.upgrade-btn:hover {
+  background: #23863655;
+  border-color: #3fb950;
+}
+
+.upgrade-btn.applying {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.upgrade-spin {
+  animation: blink 1s steps(2) infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+.release-link {
+  color: #8b949e;
+  font-size: 0.8rem;
+  text-decoration: none;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+
+.release-link:hover {
+  color: #79c0ff;
+  background: #30363d;
 }
 
 .status-badge {
@@ -298,6 +475,24 @@ body {
 .status-badge.running { background: #23863633; color: #3fb950; }
 .status-badge.exited { background: #30363d; color: #8b949e; }
 .status-badge.error { background: #da363333; color: #f85149; }
+
+.restart-btn {
+  background: none;
+  border: 1px solid #388bfd66;
+  border-radius: 12px;
+  color: #79c0ff;
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 5px 11px;
+  cursor: pointer;
+}
+
+.restart-btn:hover {
+  background: #388bfd22;
+  border-color: #79c0ff;
+}
 
 .shutdown-btn {
   background: none;
@@ -382,21 +577,17 @@ body {
 }
 
 .proxy-section {
-  flex: 1 1 60%;
+  flex: 1 1 auto;
   overflow: hidden;
   min-height: 0;
   min-width: 0;
 }
 
-.proxy-usage-section {
-  flex: 1 1 40%;
-  overflow: hidden;
+.usage-tab-section {
+  flex: 1 1 auto;
+  overflow-y: auto;
   min-height: 0;
   min-width: 0;
-}
-
-.proxy-usage-section.collapsed {
-  flex: 0 0 auto;
 }
 
 /* Right-column tab bar */

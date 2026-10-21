@@ -10,6 +10,15 @@ const props = defineProps<{
 const summary = ref<UsageSummaryRow[]>([]);
 const pricing = ref<Record<string, ModelPricing>>({});
 
+// --- Settings (gear) ---
+const MAX_MODELS_KEY = 'llama-gui:usage-status-max-models';
+const showControls = ref(false);
+const maxModels = ref(parseInt(localStorage.getItem(MAX_MODELS_KEY) ?? '', 10) || 5);
+function applyMaxModels() {
+  maxModels.value = Math.min(50, Math.max(1, Math.round(maxModels.value) || 5));
+  localStorage.setItem(MAX_MODELS_KEY, String(maxModels.value));
+}
+
 async function loadUsage() {
   try {
     const [sumRes, priceRes] = await Promise.all([
@@ -72,14 +81,37 @@ const totalCost = computed(() => {
 
 /** Latest-used models first (summary comes back ordered by request count). */
 const latestModels = computed(() =>
-  [...summary.value].sort((a, b) => (b.lastUsed ?? '').localeCompare(a.lastUsed ?? '')),
+  [...summary.value]
+    .sort((a, b) => (b.lastUsed ?? '').localeCompare(a.lastUsed ?? ''))
+    .slice(0, maxModels.value),
 );
+const hiddenModels = computed(() => Math.max(0, summary.value.length - maxModels.value));
 </script>
 
 <template>
   <div class="usage-status">
     <div class="status-header">
       <h2 class="section-title">Usage</h2>
+      <button
+        class="gear-btn"
+        :class="{ active: showControls }"
+        @click="showControls = !showControls"
+        title="Usage settings"
+      >&#9881;</button>
+    </div>
+
+    <div v-if="showControls" class="usage-controls">
+      <div class="max-models-control">
+        <label for="usage-max-models">Max models</label>
+        <input
+          id="usage-max-models"
+          v-model.number="maxModels"
+          type="number"
+          min="1"
+          max="50"
+          @change="applyMaxModels"
+        />
+      </div>
     </div>
 
     <div class="totals">
@@ -103,6 +135,7 @@ const latestModels = computed(() =>
         <span class="model-cost">{{ fmtCost(costOf(r.model, r.inputTokens, r.cachedTokens, r.outputTokens)) }}</span>
         <span class="model-tps">{{ r.avgTokensPerSec !== null ? r.avgTokensPerSec.toFixed(1) : '—' }}<span class="unit"> t/s</span></span>
       </div>
+      <div v-if="hiddenModels > 0" class="more-note">+{{ hiddenModels }} more — raise “Max models”</div>
     </div>
     <div v-else class="empty">No proxy usage recorded yet.</div>
   </div>
@@ -110,24 +143,77 @@ const latestModels = computed(() =>
 
 <style scoped>
 .usage-status {
-  padding: 10px 14px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .status-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
 }
 
 .section-title {
-  font-size: 0.7rem;
+  font-size: 1rem;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.5px;
   color: #8b949e;
+}
+
+.gear-btn {
+  background: none;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #8b949e;
+  font-size: 0.9rem;
+  padding: 2px 7px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.gear-btn:hover { background: #21262d; color: #e1e4e8; }
+.gear-btn.active { border-color: #58a6ff; color: #58a6ff; }
+
+.usage-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.max-models-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.max-models-control label {
+  font-size: 0.75rem;
+  color: #8b949e;
+}
+
+.max-models-control input {
+  width: 56px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 4px 6px;
+  color: #e1e4e8;
+  font-size: 0.8rem;
+}
+
+.max-models-control input:focus {
+  outline: none;
+  border-color: #58a6ff;
+}
+
+.more-note {
+  font-size: 0.66rem;
+  color: #484f58;
+  font-style: italic;
+  padding: 2px 4px;
 }
 
 .totals {

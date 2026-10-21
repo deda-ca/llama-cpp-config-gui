@@ -6,10 +6,7 @@ import type { ModelPricing, UsageRecord, UsageSummaryRow } from '../types';
 const props = defineProps<{
   /** Latest completed request, streamed over SSE (event: proxy-usage) */
   liveUsage: UsageRecord | null;
-  collapsed?: boolean;
 }>();
-
-const emit = defineEmits(['toggle-collapse']);
 
 const summary = ref<UsageSummaryRow[]>([]);
 const recent = ref<UsageRecord[]>([]);
@@ -117,9 +114,13 @@ watch(
 
 onMounted(loadUsage);
 
+/** Tokens in k; switches to m once past 1M (same scale as the left-column Usage status). */
 function fmtTok(n: number | null): string {
   if (n === null) return '--';
-  return n >= 10000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}m`;
+  if (n >= 10_000) return `${Math.round(n / 1000)}k`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`;
+  return String(n);
 }
 function fmtAgo(iso: string | null): string {
   if (!iso) return '--';
@@ -150,15 +151,12 @@ function fmtAgo(iso: string | null): string {
         </div>
       </div>
       <div class="usage-actions">
-        <button v-if="!props.collapsed" class="collapse-btn" @click="openPricing" title="Set per-model pricing (USD per 1M tokens)">💵 Pricing</button>
-        <a v-if="!props.collapsed" class="collapse-btn" href="/api/proxy/usage/export" title="Download usage as CSV">⬇ CSV</a>
-        <button class="collapse-btn" @click="emit('toggle-collapse')" :title="props.collapsed ? 'Expand usage' : 'Collapse usage'">
-          {{ props.collapsed ? '▸ Expand' : '▾ Collapse' }}
-        </button>
+        <button class="collapse-btn" @click="openPricing" title="Set per-model pricing (USD per 1M tokens)">💵 Pricing</button>
+        <a class="collapse-btn" href="/api/proxy/usage/export" title="Download usage as CSV">⬇ CSV</a>
       </div>
     </div>
 
-    <div v-if="!props.collapsed" class="usage-body">
+    <div class="usage-body">
       <table class="usage-table" v-if="summary.length > 0">
         <thead>
           <tr><th>Model</th><th>Backend</th><th>Reqs</th><th>In</th><th>Cache</th><th>Out</th><th>Cost</th><th>t/s</th><th>TTFB</th><th>Last used</th></tr>

@@ -370,9 +370,21 @@ pricing & cost).
 
 # Next Phase
 
-- Ability to to map model names so I don't have to keep changing them in apps.
-- Add embeddings, images, videos, etc to the proxy server. 
+- ~~Ability to to map model names so I don't have to keep changing them in apps.~~
+- ~~Add embeddings, images, videos, etc to the proxy server. ~~
+- ~~Move Usage to bottom status panel.~~
+- ~~The number of tokens in the usage status does not match in the proxy usage  also review the cost.~~
+- ~~Move the usage panel from within the proxy tab into it's own tab.~~
+- ~~Add a refresh icon next to the title version to check if there is a new version available. This checks the github releases and if there is a new version available, it will show an upgrade icon with the latest version and clicking it will go to the github release page. Clicking on the upgrade icon will download the new version and replace the current version. Also add a restart button next to the shutdown button.~~
+- ~~Restart the service/program~~
+- ~~Usage status panel add settings gear icon to provide a setting of the max number of last used models within the list bellow. Something similar to the GPU monitor settings icon where it expands down the options. Also make the title size similar to the System monitor and also the same padding as the system monitor so that more space is given to the content.~~
+
 - Add strata configuration and startup within the app.
-- Move Usage to bottom status panel.
 - Ability to delete usage input.
 - Ability to start other .ccp apps with configs such as audio.cpp and stable-diffusion.ccp
+- Add configuration backup process.
+
+
+
+
+
