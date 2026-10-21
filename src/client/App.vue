@@ -2,7 +2,7 @@
 import { onMounted, onUnmounted, ref } from 'vue';
 import GpuMonitor from './components/GpuMonitor.vue';
 import SystemMonitor from './components/SystemMonitor.vue';
-import ModelStatus from './components/ModelStatus.vue';
+import UsageStatus from './components/UsageStatus.vue';
 import ConfigList from './components/ConfigList.vue';
 import LogView from './components/LogView.vue';
 import ProxyPanel from './components/ProxyPanel.vue';
@@ -121,12 +121,6 @@ async function fetchStatus() {
   } catch { /* ignore */ }
 }
 
-async function clearModelStatus() {
-  try {
-    await fetch('/api/model-status/clear', { method: 'POST' });
-  } catch { /* ignore */ }
-}
-
 // Stop the llama.cpp process and shut down the Node server
 async function shutdownServer() {
   if (!confirm('Shut down? This stops llama.cpp and the GUI server.')) return;
@@ -166,8 +160,8 @@ onUnmounted(() => {
         <section class="panel system-panel">
           <SystemMonitor :stats="systemStats" />
         </section>
-        <section class="panel model-status-panel">
-          <ModelStatus :status="modelStatusData" @clear="clearModelStatus" />
+        <section class="panel usage-status-panel">
+          <UsageStatus :live-usage="liveUsage" />
         </section>
       </div>
 
@@ -360,6 +354,12 @@ body {
 }
 
 .system-panel {
+  flex: 0 0 auto;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.usage-status-panel {
   flex: 0 0 auto;
   overflow-y: auto;
   min-height: 0;
