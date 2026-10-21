@@ -1,3 +1,10 @@
+# [0.8.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.7.0...v0.8.0) (2026-10-21)
+
+
+### Features
+
+* compact proxy usage panel in left column replacing model status ([8da5842](https://github.com/deda-ca/llama-cpp-config-gui/commit/8da5842c75a9f298bfdeb50ef9562d7d7ace70f9))
+
 # [0.7.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.6.0...v0.7.0) (2026-10-21)
 
 
