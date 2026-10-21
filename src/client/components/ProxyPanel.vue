@@ -82,8 +82,12 @@ async function proxyAction(action: 'start' | 'stop' | 'restart') {
 // --- Backend (proxy) list ---
 const KIND_LABELS: Record<ProxyBackendKind, string> = {
   llamacpp: 'llama.cpp',
+  embeddings: 'embeddings',
   audio: 'audio',
   sdiffusion: 'image',
+  moderation: 'moderation',
+  videos: 'video',
+  default: 'default',
   custom: 'custom',
 };
 
@@ -95,16 +99,152 @@ interface BackendForm {
   apiKey: string;
   enabled: boolean;
 }
+/** One "client alias -> upstream model id" mapping row in the edit dialog. */
+interface ModelMapRow {
+  upstream: string;
+  alias: string;
+  /** Live route for this alias: requests with that model name go here. */
+  active: boolean;
+}
+/** Snapshot of a saved route a row came from, so removals target the right twin. */
+interface OrigMapEntry {
+  alias: string;
+  upstream: string;
+}
 const editForm = ref<BackendForm | null>(null);
 const backendError = ref<string | null>(null);
+const modelMap = ref<ModelMapRow[]>([]);
+/** Routes this backend had when the dialog opened, used to delete rows whose
+ *  alias/upstream was removed or renamed. */
+const origMap = ref<OrigMapEntry[]>([]);
+const probing = ref(false);
+const probeError = ref<string | null>(null);
+const probeOk = ref<string | null>(null);
+
+const mapKey = (alias: string, upstream: string): string => `${alias}\u0000${upstream}`;
+
+/** Existing declared routes for a backend (all aliases, active flag included). */
+function declaredRoutesFor(backendId: string): ModelMapRow[] {
+  return (settings.value?.models ?? [])
+    .filter((r) => r.backend === backendId)
+    .map((r) => ({ upstream: r.backendModel ?? r.model, alias: r.model, active: r.active !== false }));
+}
 
 function newBackend() {
   backendError.value = null;
+  probeError.value = null;
+  probeOk.value = null;
+  modelMap.value = [];
+  origMap.value = [];
   editForm.value = { id: null, name: '', kind: 'custom', baseUrl: 'http://127.0.0.1:', enabled: true, apiKey: '' };
 }
 function editBackend(b: ProxyBackend) {
   backendError.value = null;
+  probeError.value = null;
+  probeOk.value = null;
+  modelMap.value = declaredRoutesFor(b.id);
+  origMap.value = modelMap.value.map((r) => ({ alias: r.alias, upstream: r.upstream }));
   editForm.value = { id: b.id, name: b.name, kind: b.kind, baseUrl: b.baseUrl, apiKey: b.apiKey ?? '', enabled: b.enabled };
+}
+
+/** Verify the (possibly unsaved) URL, pull hosted models and merge them into the map rows. */
+async function probeBackendModels() {
+  if (!editForm.value) return;
+  probing.value = true;
+  probeError.value = null;
+  probeOk.value = null;
+  try {
+    const res = await fetch('/api/proxy/probe-models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ baseUrl: editForm.value.baseUrl, apiKey: editForm.value.apiKey }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
+    const found: string[] = Array.isArray(body.models) ? body.models : [];
+    const byUpstream = new Map(modelMap.value.map((r) => [r.upstream, r]));
+    for (const m of found) if (!byUpstream.has(m)) byUpstream.set(m, { upstream: m, alias: m, active: false });
+    modelMap.value = [...byUpstream.values()];
+    // Keep exactly one live row per alias so the green indicator stays meaningful
+    ensureActiveRows();
+    probeOk.value = `URL reachable — ${found.length} model(s) found`;
+  } catch (e) {
+    probeError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    probing.value = false;
+  }
+}
+
+function removeMapRow(row: ModelMapRow) {
+  modelMap.value = modelMap.value.filter((r) => r !== row);
+}
+
+/** Every alias in the map has exactly one active (live) row. */
+function ensureActiveRows(): void {
+  const live = new Set<string>();
+  for (const r of modelMap.value) {
+    const alias = r.alias.trim();
+    if (!alias) continue;
+    if (!r.active || live.has(alias)) r.active = false;
+    else live.add(alias);
+  }
+  for (const r of modelMap.value) {
+    const alias = r.alias.trim();
+    if (alias && !live.has(alias)) {
+      r.active = true;
+      live.add(alias);
+    }
+  }
+}
+
+/** Mark a row as the live upstream for its alias; same-alias twins go inactive. */
+function setActiveRow(row: ModelMapRow): void {
+  const alias = row.alias.trim();
+  for (const r of modelMap.value) {
+    if (r === row) r.active = true;
+    else if (r.alias.trim() === alias) r.active = false;
+  }
+}
+
+/** Declare a route for every alias mapping, after the backend itself is saved. */
+async function applyModelMappings(backendId: string): Promise<void> {
+  const rows = modelMap.value.filter((r) => r.alias.trim() && r.upstream.trim());
+  ensureActiveRows();
+  const existing = new Map(
+    (settings.value?.models ?? [])
+      .filter((r) => r.backend === backendId)
+      .map((r) => [mapKey(r.model, r.backendModel ?? r.model), r]),
+  );
+  const wanted = new Set(rows.map((r) => mapKey(r.alias.trim(), r.upstream.trim())));
+  // Drop saved routes whose row was removed or whose alias/upstream was renamed.
+  for (const stale of origMap.value) {
+    if (!wanted.has(mapKey(stale.alias, stale.upstream))) {
+      const q = new URLSearchParams({ backend: backendId, backendModel: stale.upstream });
+      const res = await fetch(`/api/proxy/models/${encodeURIComponent(stale.alias)}?${q}`, { method: 'DELETE' });
+      if (!res.ok && res.status !== 404) throw new Error(`could not remove old alias "${stale.alias}"`);
+    }
+  }
+  const aliasCount = new Map<string, number>();
+  for (const r of rows) aliasCount.set(r.alias.trim(), (aliasCount.get(r.alias.trim()) ?? 0) + 1);
+  for (const row of rows) {
+    const alias = row.alias.trim();
+    // alias == upstream needs no route: model discovery already routes by name —
+    // unless the alias is duplicated, in which case a route is needed to pick a live one
+    if (alias === row.upstream && (aliasCount.get(alias) ?? 0) === 1) continue;
+    const prev = existing.get(mapKey(alias, row.upstream));
+    const url = prev ? `/api/proxy/models/${encodeURIComponent(alias)}` : '/api/proxy/models';
+    const res = await fetch(url, {
+      method: prev ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(prev
+        ? { backend: backendId, backendModel: row.upstream, enabled: true, active: row.active }
+        : { model: alias, backend: backendId, backendModel: row.upstream, enabled: true, active: row.active }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `HTTP ${res.status} (alias "${alias}")`);
+    }
+  }
 }
 
 async function saveBackend() {
@@ -123,7 +263,16 @@ async function saveBackend() {
       backendError.value = body.error ?? `HTTP ${res.status}`;
       return;
     }
-    settings.value.backends = await fetch('/api/proxy/settings').then((r) => r.json()).then((s: ProxySettings) => s.backends);
+    const saved: ProxyBackend = await res.json();
+    try {
+      await applyModelMappings(saved.id);
+    } catch (e) {
+      backendError.value = `Proxy saved, but a model mapping failed: ${e instanceof Error ? e.message : e}`;
+      return;
+    }
+    const fresh = await fetch('/api/proxy/settings').then((r) => r.json()) as ProxySettings;
+    settings.value.backends = fresh.backends;
+    settings.value.models = fresh.models;
     editForm.value = null;
     loadStatus();
   } catch (e) {
@@ -179,6 +328,66 @@ async function toggleBackend(b: ProxyBackend) {
     loadStatus();
   } catch (e) {
     loadError.value = `Toggle failed: ${e}`;
+  }
+}
+
+// --- Alias -> upstream mappings shown under each proxy row ---
+interface BackendMapping {
+  alias: string;
+  upstream: string;
+  active: boolean;
+  /** Upstream model id reported by that proxy's model discovery (unknown = assume yes). */
+  available: boolean;
+}
+const mappingsByBackend = computed(() => {
+  const out: Record<string, BackendMapping[]> = {};
+  for (const r of settings.value?.models ?? []) {
+    if (r.auto) continue;
+    const backend = settings.value!.backends.find((b) => b.id === r.backend);
+    // Unknown discovery counts as available, matching the router's auto-pick rule
+    const available = !!backend && backend.enabled &&
+      (backend.models === undefined || backend.models.includes(r.backendModel ?? r.model));
+    (out[r.backend] ??= []).push({ alias: r.model, upstream: r.backendModel ?? r.model, active: r.active !== false, available });
+  }
+  // Mirror the router: when an alias has several upstreams, the live one is an
+  // available one — so the green dot tracks what the proxy actually routes to.
+  const byAlias = new Map<string, BackendMapping[]>();
+  for (const list of Object.values(out)) {
+    for (const m of list) {
+      const twin = byAlias.get(m.alias);
+      if (twin) twin.push(m);
+      else byAlias.set(m.alias, [m]);
+    }
+  }
+  for (const list of byAlias.values()) {
+    if (list.length < 2) continue;
+    // Mirror ModelRouter.activeRoute: keep the flagged route when its upstream is
+    // available, otherwise follow whichever duplicate is loaded upstream.
+    const flagged = list.find((m) => m.active) ?? list[0];
+    const live = flagged.available ? flagged : (list.find((m) => m.available) ?? flagged);
+    for (const m of list) m.active = m === live;
+  }
+  return out;
+});
+
+/** Make one alias route the live one; its same-named twins go inactive. */
+async function setMappingActive(b: ProxyBackend, m: BackendMapping): Promise<void> {
+  if (m.active) return;
+  try {
+    const res = await fetch(`/api/proxy/models/${encodeURIComponent(m.alias)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ backend: b.id, backendModel: m.upstream, active: true }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(body.error ?? `HTTP ${res.status}`);
+    }
+    const fresh = await fetch('/api/proxy/settings').then((r) => r.json()) as ProxySettings;
+    settings.value!.models = fresh.models;
+    loadStatus();
+  } catch (e) {
+    loadError.value = `Could not switch alias: ${e instanceof Error ? e.message : e}`;
   }
 }
 
@@ -307,6 +516,23 @@ onUnmounted(() => {
             <span v-for="m in b.models" :key="m" class="model-chip">{{ m }}</span>
           </div>
           <div v-else-if="b.modelsFetchedAt" class="backend-models empty">No models reported by this proxy.</div>
+          <div v-if="mappingsByBackend[b.id]?.length" class="backend-models">
+            <span class="models-label">Mappings ({{ mappingsByBackend[b.id].length }}):</span>
+            <button
+              v-for="m in mappingsByBackend[b.id]"
+              :key="m.alias + '→' + m.upstream"
+              class="map-chip"
+              :class="{ live: m.active }"
+              :title="m.active
+                ? `Live: requests for '${m.alias}' go to ${m.upstream}`
+                : `Not live — click to route '${m.alias}' to ${m.upstream}`"
+              :disabled="!b.enabled"
+              @click="setMappingActive(b, m)"
+            >
+              <span class="live-dot" :class="{ on: m.active }"></span>
+              <span class="map-chip-text">{{ m.alias }} → {{ m.upstream }}</span>
+            </button>
+          </div>
         </div>
         <div v-if="settings.backends.length === 0" class="empty-hint">No proxies yet. Add one with + New.</div>
       </div>
@@ -340,8 +566,12 @@ onUnmounted(() => {
           <span>Type</span>
           <select v-model="editForm.kind">
             <option value="llamacpp">llama.cpp (text)</option>
+            <option value="embeddings">embeddings</option>
             <option value="audio">audio</option>
             <option value="sdiffusion">image (stable-diffusion)</option>
+            <option value="moderation">moderation</option>
+            <option value="videos">video</option>
+            <option value="default">default (catch-all)</option>
             <option value="custom">custom</option>
           </select>
         </label>
@@ -349,6 +579,16 @@ onUnmounted(() => {
           <span>URL</span>
           <input type="text" v-model="editForm.baseUrl" placeholder="http://127.0.0.1:8082" />
         </label>
+        <div class="url-actions wide">
+          <button
+            class="btn btn-sm"
+            :disabled="probing || !editForm.baseUrl"
+            title="Verify this URL and pull the models it hosts"
+            @click="probeBackendModels"
+          >{{ probing ? '⟳ Fetching…' : '⟳ Test URL & fetch models' }}</button>
+          <span v-if="probeOk" class="probe-ok">{{ probeOk }}</span>
+        </div>
+        <div v-if="probeError" class="error-banner wide">{{ probeError }}</div>
         <label class="field wide">
           <span>Upstream API key (optional)</span>
           <input type="password" v-model="editForm.apiKey" placeholder="(none)" />
@@ -357,6 +597,27 @@ onUnmounted(() => {
           <input type="checkbox" v-model="editForm.enabled" />
           <span>Enabled</span>
         </label>
+
+        <!-- Model name mapping: client alias -> upstream model id -->
+        <div class="map-section wide">
+          <div class="map-header">
+            <span class="map-title">Model name mapping</span>
+            <button class="row-btn" title="Add an empty mapping row" @click="modelMap.push({ upstream: '', alias: '', active: false })">+</button>
+          </div>
+          <p class="map-hint">
+            Clients send the alias; the proxy rewrites it to the upstream model id.
+            Several rows may share one alias (different upstreams) — only the ● live one
+            receives requests, so you can swap models without changing the name in apps.
+          </p>
+          <div v-for="(row, i) in modelMap" :key="i" class="map-row">
+            <input type="radio" name="active-map" class="map-active" :checked="row.active" title="Live upstream for this alias" @change="setActiveRow(row)" />
+            <input type="text" v-model="row.alias" placeholder="alias (what clients send)" />
+            <span class="map-arrow">→</span>
+            <input type="text" v-model="row.upstream" placeholder="upstream model id" />
+            <button class="row-btn danger" title="Remove mapping" @click="removeMapRow(row)">✕</button>
+          </div>
+          <div v-if="modelMap.length === 0" class="empty-hint">No mappings yet. Use ⟳ above to pull the hosted models.</div>
+        </div>
         <div v-if="backendError" class="error-banner">{{ backendError }}</div>
       </div>
       <template #footer>
@@ -374,7 +635,12 @@ onUnmounted(() => {
   gap: 12px;
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  overflow: auto;
+}
+
+/* Keep sections at a usable width; the panel's horizontal scrollbar handles overflow */
+.proxy-panel > :not(.dialog-overlay) {
+  min-width: 640px;
 }
 
 /* --- Toolbar (Models-tab style) --- */
@@ -447,6 +713,7 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  flex-shrink: 0;
 }
 .field span, .check-field span {
   font-size: 0.7rem;
@@ -472,9 +739,13 @@ onUnmounted(() => {
   gap: 6px;
   padding-bottom: 5px;
   cursor: pointer;
+  flex-shrink: 0;
 }
 .check-field input { accent-color: #238636; }
-.settings-actions { margin-left: auto; }
+.settings-actions {
+  margin-left: auto;
+  flex-shrink: 0;
+}
 
 .error-banner {
   background: #da363322;
@@ -587,8 +858,12 @@ onUnmounted(() => {
   flex-shrink: 0;
 }
 .kind-llamacpp { background: #388bfd22; color: #79c0ff; }
+.kind-embeddings { background: #28a7a022; color: #56d4dd; }
 .kind-audio { background: #a371f722; color: #d2a8ff; }
 .kind-sdiffusion { background: #db6d2822; color: #f0883e; }
+.kind-moderation { background: #bf398922; color: #ec6cb9; }
+.kind-videos { background: #e3b34122; color: #e3b341; }
+.kind-default { background: #f0f1f322; color: #e1e4e8; }
 .kind-custom { background: #30363d; color: #8b949e; }
 .backend-url {
   flex: 1;
@@ -677,7 +952,103 @@ onUnmounted(() => {
   grid-template-columns: 1fr 1fr;
   gap: 12px;
 }
-.form-grid .field.wide, .form-grid .check-field, .form-grid .error-banner {
+.form-grid .field.wide, .form-grid .check-field, .form-grid .error-banner,
+.form-grid .url-actions, .form-grid .map-section {
   grid-column: 1 / -1;
 }
+
+.url-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: -4px;
+}
+.probe-ok {
+  font-size: 0.74rem;
+  color: #3fb950;
+}
+
+/* --- Model name mapping (edit dialog) --- */
+.map-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  background: #0d1117;
+  padding: 8px 10px;
+}
+.map-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.map-title {
+  font-size: 0.7rem;
+  color: #8b949e;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.map-header .row-btn { margin-left: auto; }
+.map-hint {
+  margin: 0;
+  font-size: 0.7rem;
+  color: #484f58;
+  line-height: 1.4;
+}
+.map-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.map-row input {
+  flex: 1;
+  min-width: 0;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #e1e4e8;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.75rem;
+  padding: 5px 8px;
+}
+.map-row input:focus { outline: none; border-color: #58a6ff; }
+.map-row .map-active {
+  flex: 0 0 auto;
+  width: 16px;
+  accent-color: #3fb950;
+  cursor: pointer;
+}
+.map-arrow {
+  color: #8b949e;
+  font-size: 0.8rem;
+  flex-shrink: 0;
+}
+
+/* --- Alias -> upstream chips in the proxy list --- */
+.map-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 0.72rem;
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 2px 9px;
+  color: #79c0ff;
+  cursor: pointer;
+}
+.map-chip:disabled { cursor: default; }
+.map-chip.live { border-color: #238636; }
+.map-chip:not(.live):hover { border-color: #3fb950; color: #3fb950; }
+.map-chip-text { white-space: nowrap; }
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: #30363d;
+}
+.live-dot.on { background: #3fb950; box-shadow: 0 0 4px #3fb95088; }
 </style>

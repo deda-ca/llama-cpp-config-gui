@@ -3,7 +3,28 @@
  */
 
 /** Determines endpoint compatibility and usage-capture behavior. */
-export type ProxyBackendKind = 'llamacpp' | 'audio' | 'sdiffusion' | 'custom';
+export type ProxyBackendKind =
+  | 'llamacpp'
+  | 'audio'
+  | 'sdiffusion'
+  | 'embeddings'
+  | 'moderation'
+  | 'videos'
+  | 'default'
+  | 'custom';
+
+/** All valid backend kinds, in UI display order. 'default' is the catch-all
+ *  fallback for requests that match no route, prefix or path convention. */
+export const BACKEND_KINDS: ProxyBackendKind[] = [
+  'llamacpp',
+  'embeddings',
+  'audio',
+  'sdiffusion',
+  'moderation',
+  'videos',
+  'default',
+  'custom',
+];
 
 /** A user-managed upstream server that the proxy can route to. */
 export interface ProxyBackend {
@@ -21,7 +42,9 @@ export interface ProxyBackend {
   modelsFetchedAt?: string;
 }
 
-/** A model route in the proxy registry. */
+/** A model route in the proxy registry. Several routes may share the same
+ *  `model` alias (same client-facing name, different upstream); exactly one of
+ *  them is `active` and receives requests. */
 export interface ProxyModelRoute {
   /** Model name clients send in the `model` field. */
   model: string;
@@ -32,6 +55,8 @@ export interface ProxyModelRoute {
   enabled: boolean;
   /** True for routes auto-derived from llama.cpp model configs (read-only). */
   auto?: boolean;
+  /** True for the live route of a duplicated alias. Missing = first route wins. */
+  active?: boolean;
 }
 
 /** USD price per 1M tokens. */
@@ -90,7 +115,7 @@ export function normalizePricing(raw: unknown): ModelPricing | null {
 function normalizeBackend(raw: unknown, fallbackId: string, fallbackKind: ProxyBackendKind, fallbackName: string): ProxyBackend | null {
   const b = (raw ?? {}) as Partial<ProxyBackend>;
   if (typeof b.baseUrl !== 'string') return null;
-  const kind = b.kind === 'llamacpp' || b.kind === 'audio' || b.kind === 'sdiffusion' || b.kind === 'custom' ? b.kind : fallbackKind;
+  const kind: ProxyBackendKind = BACKEND_KINDS.includes(b.kind as ProxyBackendKind) ? (b.kind as ProxyBackendKind) : fallbackKind;
   return {
     id: typeof b.id === 'string' && b.id ? b.id : fallbackId,
     name: typeof b.name === 'string' && b.name ? b.name : fallbackName,
@@ -144,9 +169,26 @@ export function normalizeProxySettings(partial: unknown): ProxySettings {
     usageRetentionDays: Number.isInteger(p.usageRetentionDays) && p.usageRetentionDays! > 0
       ? p.usageRetentionDays! : d.usageRetentionDays,
     backends,
-    models: Array.isArray(p.models)
-      ? p.models.filter((m) => m && typeof m.model === 'string' && typeof m.backend === 'string')
-      : [],
+    models: (() => {
+      const routes = Array.isArray(p.models)
+        ? p.models.filter((m) => m && typeof m.model === 'string' && typeof m.backend === 'string')
+        : [];
+      // Duplicate aliases are allowed (same client name -> different upstreams);
+      // keep exactly one active route per alias, defaulting to the first.
+      const activeByAlias = new Map<string, boolean>();
+      for (const m of routes) {
+        if (m.active && !activeByAlias.has(m.model)) activeByAlias.set(m.model, true);
+      }
+      for (const m of routes) {
+        if (!activeByAlias.get(m.model)) {
+          m.active = true;
+          activeByAlias.set(m.model, true);
+        } else {
+          m.active = false;
+        }
+      }
+      return routes;
+    })(),
     modelPricing: (() => {
       const out: Record<string, ModelPricing> = {};
       if (p.modelPricing && typeof p.modelPricing === 'object') {

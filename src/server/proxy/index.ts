@@ -11,7 +11,7 @@ import { ModelRouter } from './router.js';
 import { RequestRecorder, SseUsageScanner, extractJsonUsage, persistRecord } from './recorder.js';
 import { estimateMessagesTokens, estimateTokens } from './tokenCount.js';
 import type { UsageDb } from './usageDb.js';
-import type { ProxyBackend, ProxySettings, UsageRecord } from './types.js';
+import type { ProxyBackend, ProxyBackendKind, ProxySettings, UsageRecord } from './types.js';
 
 export interface ProxyAppDeps {
   /** Getter so settings changes apply without rebuilding the app. */
@@ -24,6 +24,25 @@ export interface ProxyAppDeps {
 
 const JSON_BODY_LIMIT = '10mb';
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'host', 'content-length']);
+
+/** Which backend kinds may serve each JSON endpoint ('custom'/'default' always allowed). */
+const ENDPOINT_KINDS: Record<string, ProxyBackendKind[]> = {
+  '/v1/chat/completions': ['llamacpp', 'default', 'custom'],
+  '/v1/completions': ['llamacpp', 'default', 'custom'],
+  '/v1/embeddings': ['llamacpp', 'embeddings', 'default', 'custom'],
+  '/v1/images/generations': ['sdiffusion', 'default', 'custom'],
+  '/v1/moderations': ['moderation', 'default', 'custom'],
+  '/v1/videos': ['videos', 'default', 'custom'],
+};
+
+/** Kinds accepted by the raw audio passthrough endpoints. */
+const AUDIO_KINDS: ProxyBackendKind[] = ['audio', 'default', 'custom'];
+
+/** Endpoints whose `prompt` string feeds the estimated-token fallback. */
+const TEXT_ENDPOINTS = ['/v1/completions', '/v1/embeddings'];
+
+/** Kinds whose upstream `model` field may be rewritten from the route alias. */
+const REWRITE_MODEL_KINDS: ProxyBackendKind[] = ['llamacpp', 'embeddings', 'moderation', 'videos', 'default', 'custom'];
 
 function openaiError(res: Response, status: number, message: string, code?: string): void {
   res.status(status).json({ error: { message, type: 'invalid_request_error', code: code ?? null } });
@@ -66,6 +85,8 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
   app.post('/v1/completions', jsonParser, (req, res) => handleJson(req, res, false));
   app.post('/v1/embeddings', jsonParser, (req, res) => handleJson(req, res, false));
   app.post('/v1/images/generations', jsonParser, (req, res) => handleJson(req, res, false));
+  app.post('/v1/moderations', jsonParser, (req, res) => handleJson(req, res, false));
+  app.post('/v1/videos', jsonParser, (req, res) => handleJson(req, res, false));
   // Audio endpoints: raw passthrough (multipart / binary bodies are not parsed)
   app.post('/v1/audio/speech', (req, res) => handleRaw(req, res));
   app.post('/v1/audio/transcriptions', (req, res) => handleRaw(req, res));
@@ -115,33 +136,31 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
     if (!resolved) return;
     const { route, backend } = resolved;
 
-    // llama.cpp only serves text endpoints; SD/audio only their own namespaces
-    const isTextEp = isChat || req.path === '/v1/completions' || req.path === '/v1/embeddings';
-    if (isTextEp && backend.kind !== 'llamacpp' && backend.kind !== 'custom') {
-      openaiError(res, 400, `Model "${model}" is not a text model for ${req.path}`, 'unsupported_model');
-      return;
-    }
-    if (req.path === '/v1/images/generations' && backend.kind !== 'sdiffusion' && backend.kind !== 'custom') {
-      openaiError(res, 400, `Model "${model}" is not an image model`, 'unsupported_model');
+    // Each endpoint only accepts backends whose kind can serve it
+    const allowed = ENDPOINT_KINDS[req.path];
+    if (allowed && !allowed.includes(backend.kind)) {
+      openaiError(res, 400, `Model "${model}" (${backend.kind}) cannot serve ${req.path}`, 'unsupported_model');
       return;
     }
 
     const stream = body.stream === true;
     const outBody = { ...body };
-    if (route.upstreamModel !== model && (backend.kind === 'llamacpp' || backend.kind === 'custom')) outBody.model = route.upstreamModel;
+    if (route.upstreamModel !== model && REWRITE_MODEL_KINDS.includes(backend.kind)) outBody.model = route.upstreamModel;
     // Ensure streaming usage is available from llama.cpp
     if (isChat && stream && backend.kind === 'llamacpp') {
       const so = (outBody.stream_options ?? {}) as Record<string, unknown>;
       outBody.stream_options = { ...so, include_usage: true };
     }
 
-    // Token estimation fallback applies to text endpoints only (not image/audio)
+    // Token estimation fallback applies to text endpoints only (not image/audio/video)
     const estimatedInput = isChat
       ? estimateMessagesTokens(body.messages)
-      : isTextEp && typeof body.prompt === 'string' ? estimateTokens(body.prompt) : undefined;
+      : TEXT_ENDPOINTS.includes(req.path) && typeof body.prompt === 'string' ? estimateTokens(body.prompt) : undefined;
     const meta = req.path === '/v1/images/generations'
       ? { promptChars: typeof body.prompt === 'string' ? body.prompt.length : 0, steps: body.steps, width: body.width, height: body.height, n: body.n }
-      : null;
+      : req.path === '/v1/videos'
+        ? { promptChars: typeof body.prompt === 'string' ? body.prompt.length : 0, seconds: body.seconds, size: body.size, n: body.n }
+        : null;
 
     const rec = makeRecorder(req, model ?? '', route.backend, stream, meta, estimatedInput);
     const payload = Buffer.from(JSON.stringify(outBody));
@@ -155,7 +174,7 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
     const resolved = resolveOr404(req, res, modelHeader ?? inferAudioModel(req));
     if (!resolved) return;
     const { route, backend } = resolved;
-    if (backend.kind !== 'audio' && backend.kind !== 'custom') {
+    if (!AUDIO_KINDS.includes(backend.kind)) {
       openaiError(res, 400, `Endpoint ${req.path} requires an audio model`, 'unsupported_model');
       return;
     }

@@ -97,9 +97,10 @@ Routing is driven by a **model registry** derived from existing model configs
 ```ts
 interface ProxyModelRoute {
   model: string;          // name clients send, e.g. "qwen2.5-14b", "sd-xl-turbo"
-  backend: 'llamacpp' | 'audio' | 'sdiffusion';
+  backend: string;        // backend id
   backendModel?: string;  // upstream model name if different (llama router alias)
   enabled: boolean;
+  active?: boolean;       // live route when several share the same alias
 }
 ```
 
@@ -107,15 +108,27 @@ interface ProxyModelRoute {
   automatically routable (alias = model name). No duplication.
 - **audio.ccp / stable-diffusion.cpp models**: declared in settings (see §8) with an
   alias-to-upstream mapping.
+- **Duplicate aliases**: several routes may share one `model` name pointing at
+  different backends/upstream model ids. Exactly one is `active` (the live one);
+  requests for that alias route to it. When duplicates exist, the proxy
+  automatically prefers the route whose upstream model id is currently reported
+  by that backend's model discovery (⟳ refresh) — so the alias follows whichever
+  upstream model is actually loaded. Switching the live route manually (PUT with
+  `active: true`) or deleting it (promotes a twin) still works. All upstream
+  models stay visible in the GUI.
 
 ### 4.2 Routing rules (evaluated in order)
 
 1. Exact match on `model` in the registry -> that backend.
-2. Prefix match: `audio/...`, `sd/...`, `tts/...` -> corresponding backend (convention for
-   clients that namespace models).
+2. Prefix match: `audio/...`, `sd/...`, `tts/...`, `embed/...`, `mod/...`, `video/...` ->
+   corresponding backend (convention for clients that namespace models).
 3. Path-based fallback: `POST /v1/audio/*` -> audio backend; `POST /v1/images/*` -> SD
-   backend (when `model` is absent or unknown).
-4. No match -> `404 { "error": { "message": "Unknown model \"x\"", "type": "invalid_request_error", "code": "model_not_found" } }`.
+   backend; `/v1/embeddings`, `/v1/moderations`, `/v1/videos` -> matching kind backend
+   (when `model` is absent or unknown).
+4. Catch-all: a backend with kind `default` receives anything not routed by the rules
+   above (unknown/missing model names, endpoints with no matching kind backend).
+   Requests targeting an *explicitly disabled* backend are still rejected (404).
+5. No match -> `404 { "error": { "message": "Unknown model \"x\"", "type": "invalid_request_error", "code": "model_not_found" } }`.
 
 `GET /v1/models` returns the union of all enabled routes (with `created` and `owned_by`
 set to the backend id), optionally live-merged from llama-server's `/models`.
@@ -274,7 +287,7 @@ interface ProxySettings {
 interface ProxyBackend {
   id: string;                    // slug derived from name, unique
   name: string;                  // display name, e.g. "audio.cpp"
-  kind: 'llamacpp' | 'audio' | 'sdiffusion' | 'custom'; // endpoint compatibility + usage capture
+  kind: 'llamacpp' | 'embeddings' | 'audio' | 'sdiffusion' | 'moderation' | 'videos' | 'default' | 'custom'; // endpoint compatibility + usage capture; 'default' = catch-all fallback
   baseUrl: string;               // e.g. http://127.0.0.1:8082
   enabled: boolean;              // checkbox in the proxy list
   apiKey?: string;               // optional key the proxy sends upstream

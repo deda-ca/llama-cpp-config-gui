@@ -3,11 +3,12 @@
  */
 
 import type { ProxyBackend, ProxyBackendKind } from './types.js';
+import { BACKEND_KINDS } from './types.js';
 
-export const BACKEND_KINDS: ProxyBackendKind[] = ['llamacpp', 'audio', 'sdiffusion', 'custom'];
+export { BACKEND_KINDS };
 
 export function isBackendKind(v: unknown): v is ProxyBackendKind {
-  return v === 'llamacpp' || v === 'audio' || v === 'sdiffusion' || v === 'custom';
+  return BACKEND_KINDS.includes(v as ProxyBackendKind);
 }
 
 /** Slug id derived from a name, uniquified against the existing list. */

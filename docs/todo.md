@@ -366,3 +366,13 @@ timestamp into SQLite.
 **Verification so far:** `npx vitest run` 170/170, `npx tsc -p tsconfig.server.json --noEmit`
 clean, `npx vite build` clean. Shipped in v0.4.0 (proxy feature) and v0.5.0 (cached tokens,
 pricing & cost).
+
+
+# Next Phase
+
+- Ability to to map model names so I don't have to keep changing them in apps.
+- Add embeddings, images, videos, etc to the proxy server. 
+- Add strata configuration and startup within the app.
+- Move Usage to bottom status panel.
+- Ability to delete usage input.
+- Ability to start other .ccp apps with configs such as audio.cpp and stable-diffusion.ccp

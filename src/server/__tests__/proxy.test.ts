@@ -58,6 +58,19 @@ beforeAll(async () => {
       } else if (req.url === '/v1/images/generations') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ data: [{ b64_json: 'AA' }] }));
+      } else if (req.url === '/v1/embeddings') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          object: 'list', model: JSON.parse(body).model,
+          data: [{ index: 0, embedding: [0.1, 0.2] }],
+          usage: { prompt_tokens: 7, total_tokens: 7 },
+        }));
+      } else if (req.url === '/v1/moderations') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: 'mod-1', model: JSON.parse(body).model, results: [{ flagged: false }] }));
+      } else if (req.url === '/v1/videos') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: 'vid-1', object: 'video', model: JSON.parse(body).model, status: 'queued' }));
       } else {
         res.writeHead(404).end();
       }
@@ -85,8 +98,16 @@ beforeEach(() => {
       { id: 'llamacpp', name: 'llama.cpp', kind: 'llamacpp', baseUrl: upstreamUrl, apiKey: 'upstream-key', enabled: true },
       { id: 'audio', name: 'audio.cpp', kind: 'audio', baseUrl: 'http://127.0.0.1:1', enabled: true },
       { id: 'sdiffusion', name: 'stable-diffusion.cpp', kind: 'sdiffusion', baseUrl: upstreamUrl, enabled: true },
+      { id: 'embeddings', name: 'embeddings.cpp', kind: 'embeddings', baseUrl: upstreamUrl, enabled: true },
+      { id: 'moderation', name: 'moderation.cpp', kind: 'moderation', baseUrl: upstreamUrl, enabled: true },
+      { id: 'videos', name: 'videos.cpp', kind: 'videos', baseUrl: upstreamUrl, enabled: true },
     ],
-    models: [{ model: 'sd-xl', backend: 'sdiffusion', enabled: true }],
+    models: [
+      { model: 'sd-xl', backend: 'sdiffusion', enabled: true },
+      { model: 'bge-m3', backend: 'embeddings', enabled: true },
+      { model: 'omni-mod', backend: 'moderation', enabled: true },
+      { model: 'wan-video', backend: 'videos', enabled: true },
+    ],
   };
   router = new ModelRouter();
   router.rebuild(settings, ['qwen']);
@@ -209,6 +230,84 @@ describe('proxy passthrough + usage recording', () => {
     expect(row.backend).toBe('sdiffusion');
     expect(row.inputTokens).toBeNull();
     expect(row.meta).toMatchObject({ steps: 20, width: 1024, promptChars: 5 });
+  });
+
+  it('embeddings route to the embeddings backend and record usage', async () => {
+    const res = await request(app).post('/v1/embeddings')
+      .send({ model: 'bge-m3', prompt: 'hello there my friend' });
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].embedding).toEqual([0.1, 0.2]);
+    await settle();
+    const [row] = db.query({});
+    expect(row.backend).toBe('embeddings');
+    expect(row.endpoint).toBe('/v1/embeddings');
+    expect(row.inputTokens).toBe(7);
+  });
+
+  it('embeddings still accepted by llama.cpp backends', async () => {
+    settings.models.push({ model: 'qwen-embed', backend: 'llamacpp', enabled: true });
+    router.rebuild(settings, ['qwen']);
+    const res = await request(app).post('/v1/embeddings').send({ model: 'qwen-embed', input: 'hi' });
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects embedding models on chat endpoints', async () => {
+    const res = await request(app).post('/v1/chat/completions').send({ model: 'bge-m3', messages: [] });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('unsupported_model');
+  });
+
+  it('moderations route to the moderation backend', async () => {
+    const res = await request(app).post('/v1/moderations').send({ model: 'omni-mod', input: 'hi' });
+    expect(res.status).toBe(200);
+    expect(res.body.results[0].flagged).toBe(false);
+    await settle();
+    expect(db.query({})[0].backend).toBe('moderation');
+  });
+
+  it('videos route to the videos backend with meta captured', async () => {
+    const res = await request(app).post('/v1/videos')
+      .send({ model: 'wan-video', prompt: 'a cat', seconds: 4, size: '720p' });
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('queued');
+    await settle();
+    const [row] = db.query({});
+    expect(row.backend).toBe('videos');
+    expect(row.meta).toMatchObject({ seconds: 4, size: '720p', promptChars: 5 });
+  });
+
+  it('rejects non-video models on the videos endpoint', async () => {
+    const res = await request(app).post('/v1/videos').send({ model: 'sd-xl', prompt: 'a cat' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('unsupported_model');
+  });
+
+  it("'default' kind backend catches unrouted requests", async () => {
+    settings.backends.push({ id: 'default', name: 'Default', kind: 'default', baseUrl: upstreamUrl, enabled: true });
+    router.rebuild(settings, ['qwen']);
+    const res = await request(app).post('/v1/chat/completions')
+      .send({ model: 'anything-not-registered', messages: [{ role: 'user', content: 'hi' }] });
+    expect(res.status).toBe(200);
+    expect(res.body.choices[0].message.content).toBe('Hello!');
+    await settle();
+    const [row] = db.query({});
+    expect(row.backend).toBe('default');
+    expect(row.model).toBe('anything-not-registered');
+  });
+
+  it("'default' backend also serves embeddings and raw audio endpoints", async () => {
+    settings.backends.push({ id: 'default', name: 'Default', kind: 'default', baseUrl: upstreamUrl, enabled: true });
+    // Only llamacpp + default exist, so namespaced paths with no kind backend land on default
+    settings.backends = settings.backends.filter((b) => b.id === 'llamacpp' || b.id === 'default');
+    router.rebuild(settings, []);
+    const emb = await request(app).post('/v1/embeddings').send({ model: 'whatever', input: 'hi' });
+    expect(emb.status).toBe(200);
+    expect(emb.body.data[0].embedding).toEqual([0.1, 0.2]);
+    const audio = await request(app).post('/v1/audio/speech')
+      .set('x-model', 'unrouted-voice').send(JSON.stringify({ input: 'hi' }));
+    // Upstream stub has no /v1/audio/speech -> its own 404 proves the request was forwarded
+    expect(audio.status).toBe(404);
+    expect(audio.body?.error).toBeUndefined();
   });
 
   it('records 502 row when upstream unreachable', async () => {

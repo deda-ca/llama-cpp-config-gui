@@ -138,10 +138,44 @@ describe('/api/proxy/models CRUD', () => {
     expect(res.status).toBe(400);
   });
 
-  it('rejects duplicate aliases', async () => {
-    await request(app).post('/api/proxy/models').send({ model: 'dup', backend: 'audio' });
-    const res = await request(app).post('/api/proxy/models').send({ model: 'dup', backend: 'sdiffusion' });
-    expect(res.status).toBe(409);
+  it('allows duplicate aliases with exactly one active route', async () => {
+    const first = await request(app).post('/api/proxy/models')
+      .send({ model: 'dup', backend: 'audio', backendModel: 'up-a' });
+    expect(first.status).toBe(200);
+    const second = await request(app).post('/api/proxy/models')
+      .send({ model: 'dup', backend: 'sdiffusion', backendModel: 'up-b' });
+    expect(second.status).toBe(200);
+    let get = await request(app).get('/api/proxy/settings');
+    const routes = get.body.models.filter((m: { model: string }) => m.model === 'dup');
+    expect(routes).toHaveLength(2);
+    expect(routes.filter((m: { active: boolean }) => m.active)).toHaveLength(1);
+    expect(routes[0].active).toBe(true);
+    expect(routes[1].active).toBe(false);
+
+    // Activating the second deactivates the first
+    const act = await request(app).put('/api/proxy/models/dup')
+      .send({ backend: 'sdiffusion', backendModel: 'up-b', active: true });
+    expect(act.status).toBe(200);
+    get = await request(app).get('/api/proxy/settings');
+    const after = get.body.models.filter((m: { model: string }) => m.model === 'dup');
+    expect(after.find((m: { backend: string }) => m.backend === 'audio').active).toBe(false);
+    expect(after.find((m: { backend: string }) => m.backend === 'sdiffusion').active).toBe(true);
+
+    // Deleting the live route promotes the twin
+    const del = await request(app).delete('/api/proxy/models/dup?backend=sdiffusion&backendModel=up-b');
+    expect(del.status).toBe(200);
+    get = await request(app).get('/api/proxy/settings');
+    const remaining = get.body.models.filter((m: { model: string }) => m.model === 'dup');
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].backend).toBe('audio');
+    expect(remaining[0].active).toBe(true);
+  });
+
+  it('allows the same alias twice on the same backend with different upstreams', async () => {
+    const a = await request(app).post('/api/proxy/models').send({ model: 'same', backend: 'audio' });
+    const b = await request(app).post('/api/proxy/models').send({ model: 'same', backend: 'audio', backendModel: 'other' });
+    expect(a.status).toBe(200);
+    expect(b.status).toBe(200);
   });
 });
 
@@ -210,6 +244,37 @@ describe('/api/proxy/backends CRUD', () => {
     const ref = await request(app).post('/api/proxy/backends/dead/refresh');
     expect(ref.status).toBe(502);
     expect(ref.body.error).toContain('Failed to fetch models');
+  });
+
+  it('probe-models verifies an arbitrary URL without persisting anything', async () => {
+    const http = await import('http');
+    const stub = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ object: 'list', data: [{ id: 'bge-m3' }, { id: 'nomic-embed' }] }));
+    });
+    await new Promise<void>((r) => stub.listen(0, '127.0.0.1', r));
+    const port = (stub.address() as { port: number }).port;
+    try {
+      const res = await request(app).post('/api/proxy/probe-models')
+        .send({ baseUrl: `http://127.0.0.1:${port}` });
+      expect(res.status).toBe(200);
+      expect(res.body.models).toEqual(['bge-m3', 'nomic-embed']);
+      // Nothing was created or attached
+      const get = await request(app).get('/api/proxy/settings');
+      expect(get.body.backends).toHaveLength(3);
+    } finally {
+      stub.close();
+    }
+  });
+
+  it('probe-models validates input and 502s on unreachable URLs', async () => {
+    const noUrl = await request(app).post('/api/proxy/probe-models').send({});
+    expect(noUrl.status).toBe(400);
+    const badUrl = await request(app).post('/api/proxy/probe-models').send({ baseUrl: 'nope' });
+    expect(badUrl.status).toBe(400);
+    const dead = await request(app).post('/api/proxy/probe-models').send({ baseUrl: 'http://127.0.0.1:1' });
+    expect(dead.status).toBe(502);
+    expect(dead.body.error).toContain('Failed to fetch models');
   });
 
   it('deleting a backend removes its routes', async () => {

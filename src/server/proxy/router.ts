@@ -1,6 +1,7 @@
 /**
  * Model routing for the proxy (docs/proxy-server.md §4).
- * Resolution order: exact registry match -> prefix convention -> path fallback.
+ * Resolution order: exact registry match -> prefix convention -> path fallback
+ * -> 'default' kind backend (catch-all).
  * Backends are user-managed; routes reference backend ids.
  */
 
@@ -16,15 +17,18 @@ export interface ResolvedRoute {
   route?: ProxyModelRoute;
 }
 
-/** Prefix convention: "audio/...", "sd/...", "tts/..." map onto backend kinds. */
+/** Prefix convention: "audio/...", "sd/...", "tts/"... map onto backend kinds. */
 const PREFIX_KINDS: Record<string, ProxyBackendKind> = {
   'audio/': 'audio',
   'sd/': 'sdiffusion',
   'tts/': 'audio',
+  'embed/': 'embeddings',
+  'mod/': 'moderation',
+  'video/': 'videos',
 };
 
 export class ModelRouter {
-  private byModel = new Map<string, ProxyModelRoute>();
+  private byModel = new Map<string, ProxyModelRoute[]>();
   private backends: ProxyBackend[] = [];
 
   /** Rebuild the registry: llama routes (aliases) + declared audio/SD/custom routes. */
@@ -34,11 +38,11 @@ export class ModelRouter {
     const llamaBackend = backendOfKind(settings.backends, 'llamacpp');
     if (llamaBackend) {
       for (const alias of llamaAliases) {
-        this.byModel.set(alias, { model: alias, backend: llamaBackend.id, enabled: true, auto: true });
+        this.addRoute({ model: alias, backend: llamaBackend.id, enabled: true, auto: true });
       }
     }
     for (const m of settings.models) {
-      this.byModel.set(m.model, m);
+      this.addRoute(m);
     }
     // Models discovered from upstream /v1/models (e.g. multiple llama.cpp instances):
     // route by model name. Existing entries (aliases, declared routes) win.
@@ -46,14 +50,62 @@ export class ModelRouter {
       if (!b.enabled) continue;
       for (const model of b.models ?? []) {
         if (!this.byModel.has(model)) {
-          this.byModel.set(model, { model, backend: b.id, enabled: true, auto: true });
+          this.addRoute({ model, backend: b.id, enabled: true, auto: true });
         }
       }
     }
   }
 
+  /** Insert a route, keeping declared entries ahead of auto-discovered ones. */
+  private addRoute(route: ProxyModelRoute): void {
+    const list = this.byModel.get(route.model);
+    if (!list) {
+      this.byModel.set(route.model, [route]);
+      return;
+    }
+    if (!route.auto) {
+      const firstAuto = list.findIndex((r) => r.auto);
+      if (firstAuto < 0) list.push(route);
+      else list.splice(firstAuto, 0, route);
+    } else {
+      list.push(route);
+    }
+  }
+
+  /** The live route for an alias: the flagged-active one when its upstream model
+   *  is actually served by that backend, else the first duplicate whose upstream
+   *  is available, else the flagged/first route (unchanged behaviour otherwise). */
+  private activeRoute(model: string): ProxyModelRoute | undefined {
+    const list = this.byModel.get(model);
+    if (!list || list.length === 0) return undefined;
+    const flagged = list.find((r) => r.active) ?? list[0];
+    if (list.length > 1 && !this.upstreamAvailable(flagged)) {
+      // Same alias, several upstreams: prefer one that is live upstream right now.
+      const available = list.find((r) => this.upstreamAvailable(r));
+      if (available) return available;
+    }
+    return flagged;
+  }
+
+  /** True when the route's upstream model is reported by its backend's discovery.
+   *  Unknown discovery (never refreshed) counts as available. */
+  private upstreamAvailable(route: ProxyModelRoute): boolean {
+    if (!route.enabled) return false;
+    const backend = this.backends.find((b) => b.id === route.backend);
+    if (!backend || !backend.enabled) return false;
+    if (!backend.models) return true;
+    return backend.models.includes(route.backendModel ?? route.model);
+  }
+
   listRoutes(): ProxyModelRoute[] {
-    return [...this.byModel.values()].filter((m) => m.enabled);
+    return [...this.byModel.keys()]
+      .map((model) => this.activeRoute(model)!)
+      .filter((m) => m.enabled);
+  }
+
+  /** Every registry entry, including non-active duplicates of the same alias. */
+  allRoutes(): ProxyModelRoute[] {
+    return [...this.byModel.values()].flat();
   }
 
   /**
@@ -62,8 +114,9 @@ export class ModelRouter {
    * @param path  the proxy request path, for the path-based fallback
    */
   resolve(model: string | undefined, path: string): ResolvedRoute | null {
+    let prefixStripped: string | null = null;
     if (model) {
-      const route = this.byModel.get(model);
+      const route = this.activeRoute(model);
       if (route) {
         if (!route.enabled) return null;
         const backend = this.backends.find((b) => b.id === route.backend);
@@ -72,21 +125,41 @@ export class ModelRouter {
       }
       for (const [prefix, kind] of Object.entries(PREFIX_KINDS)) {
         if (model.startsWith(prefix)) {
-          const backend = backendOfKind(this.backends, kind);
-          if (backend) return { backend: backend.id, upstreamModel: model.slice(prefix.length) };
-          return null;
+          const backend = this.backends.find((b) => b.kind === kind);
+          if (!backend) {
+            prefixStripped = model.slice(prefix.length); // kind not configured -> 'default' catch-all
+            break;
+          }
+          return backend.enabled
+            ? { backend: backend.id, upstreamModel: model.slice(prefix.length) }
+            : null; // explicitly disabled -> not rescued by 'default'
         }
       }
     }
     // Path fallback for namespaced endpoints
     if (path.startsWith('/v1/audio/')) {
-      const backend = backendOfKind(this.backends, 'audio');
-      return backend ? { backend: backend.id, upstreamModel: model ?? '' } : null;
+      const backend = this.backends.find((b) => b.kind === 'audio');
+      if (backend) return backend.enabled ? { backend: backend.id, upstreamModel: model ?? '' } : null;
     }
     if (path.startsWith('/v1/images/')) {
-      const backend = backendOfKind(this.backends, 'sdiffusion');
-      return backend ? { backend: backend.id, upstreamModel: model ?? '' } : null;
+      const backend = this.backends.find((b) => b.kind === 'sdiffusion');
+      if (backend) return backend.enabled ? { backend: backend.id, upstreamModel: model ?? '' } : null;
     }
+    if (path.startsWith('/v1/embeddings')) {
+      const backend = this.backends.find((b) => b.kind === 'embeddings');
+      if (backend) return backend.enabled ? { backend: backend.id, upstreamModel: model ?? '' } : null;
+    }
+    if (path.startsWith('/v1/moderations')) {
+      const backend = this.backends.find((b) => b.kind === 'moderation');
+      if (backend) return backend.enabled ? { backend: backend.id, upstreamModel: model ?? '' } : null;
+    }
+    if (path.startsWith('/v1/videos')) {
+      const backend = this.backends.find((b) => b.kind === 'videos');
+      if (backend) return backend.enabled ? { backend: backend.id, upstreamModel: model ?? '' } : null;
+    }
+    // Catch-all: a backend of kind 'default' receives anything not routed elsewhere.
+    const fallback = backendOfKind(this.backends, 'default');
+    if (fallback) return { backend: fallback.id, upstreamModel: prefixStripped ?? model ?? '' };
     return null;
   }
 }

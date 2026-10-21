@@ -340,6 +340,7 @@ body {
   flex-direction: column;
   gap: 12px;
   min-height: 0;
+  min-width: 0;
 }
 
 .panel {

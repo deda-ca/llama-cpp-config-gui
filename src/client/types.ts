@@ -86,7 +86,15 @@ export interface ModelStatusData {
 }
 
 /** Proxy gateway settings (mirrors src/server/proxy/types.ts). */
-export type ProxyBackendKind = 'llamacpp' | 'audio' | 'sdiffusion' | 'custom';
+export type ProxyBackendKind =
+  | 'llamacpp'
+  | 'audio'
+  | 'sdiffusion'
+  | 'embeddings'
+  | 'moderation'
+  | 'videos'
+  | 'default'
+  | 'custom';
 
 export interface ProxyBackend {
   id: string;
@@ -126,6 +134,8 @@ export interface ProxyModelRoute {
   backendModel?: string;
   enabled: boolean;
   auto?: boolean;
+  /** True for the live route when several share the same alias. */
+  active?: boolean;
 }
 
 /** One proxied request, as recorded by the usage store. */

@@ -847,6 +847,26 @@ app.post('/api/proxy/backends', (req, res) => {
   res.json(backend);
 });
 
+app.post('/api/proxy/probe-models', async (req, res) => {
+  // Verify a URL and list hosted models without persisting anything — used by the
+  // backend edit dialog so unsaved URL/key edits can be tested before saving.
+  const body = req.body as { baseUrl?: string; apiKey?: string };
+  if (typeof body?.baseUrl !== 'string' || !body.baseUrl) {
+    res.status(400).json({ error: 'baseUrl is required' });
+    return;
+  }
+  try { new URL(body.baseUrl); } catch {
+    res.status(400).json({ error: 'baseUrl is not a valid URL' });
+    return;
+  }
+  try {
+    const models = await proxyFetchModels(body.baseUrl, typeof body.apiKey === 'string' && body.apiKey ? body.apiKey : undefined);
+    res.json({ models });
+  } catch (e) {
+    res.status(502).json({ error: `Failed to fetch models from ${body.baseUrl}: ${e instanceof Error ? e.message : e}` });
+  }
+});
+
 app.post('/api/proxy/backends/:id/refresh', async (req, res) => {
   const b = proxySettings.backends.find((x) => x.id === req.params.id);
   if (!b) {
@@ -983,21 +1003,37 @@ app.get('/api/proxy/usage/export', (req, res) => {
   res.type('text/csv').send([header, ...lines].join('\n'));
 });
 
+/** Find a declared route; when several share an alias, backend/backendModel pick one. */
+function findDeclaredRoute(model: string, backend?: string, backendModel?: string) {
+  const matches = proxySettings.models.filter((m) => m.model === model);
+  if (matches.length <= 1) return matches[0];
+  return matches.find((m) => m.backend === backend && (m.backendModel ?? '') === (backendModel ?? ''))
+    ?? matches.find((m) => m.backend === backend)
+    ?? matches.find((m) => m.active)
+    ?? matches[0];
+}
+
 app.post('/api/proxy/models', (req, res) => {
-  const body = req.body as { model?: string; backend?: string; backendModel?: string; enabled?: boolean };
+  const body = req.body as { model?: string; backend?: string; backendModel?: string; enabled?: boolean; active?: boolean };
   if (!body?.model || !proxySettings.backends.some((b) => b.id === body.backend)) {
     res.status(400).json({ error: 'model and a valid backend id are required' });
     return;
   }
-  if (proxySettings.models.some((m) => m.model === body.model) || proxyLlamaAliases().includes(body.model)) {
+  if (proxyLlamaAliases().includes(body.model)) {
     res.status(409).json({ error: `Model alias "${body.model}" already exists` });
     return;
   }
+  // Duplicate aliases are allowed (same client name -> different upstreams); the
+  // first route for an alias is active unless another one already is.
+  const anyActive = proxySettings.models.some((m) => m.model === body.model && m.active);
+  const active = body.active === true || !anyActive;
+  if (active) proxySettings.models.forEach((m) => { if (m.model === body.model) m.active = false; });
   proxySettings.models.push({
     model: body.model,
     backend: body.backend!,
     backendModel: body.backendModel,
     enabled: body.enabled !== false,
+    active,
   });
   saveProxySettings();
   rebuildProxyRegistry();
@@ -1005,26 +1041,48 @@ app.post('/api/proxy/models', (req, res) => {
 });
 
 app.put('/api/proxy/models/:model', (req, res) => {
-  const m = proxySettings.models.find((x) => x.model === req.params.model);
+  const body = req.body as { backend?: string; backendModel?: string; enabled?: boolean; active?: boolean };
+  const m = findDeclaredRoute(req.params.model, body.backend, body.backendModel);
   if (!m) {
     res.status(404).json({ error: `Model "${req.params.model}" not found` });
     return;
   }
-  const body = req.body as { backendModel?: string; enabled?: boolean };
   if (typeof body.backendModel === 'string') m.backendModel = body.backendModel;
   if (typeof body.enabled === 'boolean') m.enabled = body.enabled;
+  if (body.active === true) {
+    // Exactly one live route per alias: activating one deactivates its twins.
+    proxySettings.models.forEach((x) => {
+      if (x.model === m.model && x !== m) x.active = false;
+    });
+    m.active = true;
+  } else if (body.active === false && m.active) {
+    // Never leave an alias without a live route: promote a twin first.
+    const other = proxySettings.models.find((x) => x.model === m.model && x !== m);
+    if (other) other.active = true;
+    m.active = false;
+  }
   saveProxySettings();
   rebuildProxyRegistry();
   res.json(m);
 });
 
 app.delete('/api/proxy/models/:model', (req, res) => {
-  const idx = proxySettings.models.findIndex((x) => x.model === req.params.model);
+  const backend = typeof req.query.backend === 'string' ? req.query.backend : undefined;
+  const backendModel = typeof req.query.backendModel === 'string' ? req.query.backendModel : undefined;
+  const target = findDeclaredRoute(req.params.model, backend, backendModel);
+  const idx = target ? proxySettings.models.indexOf(target) : -1;
   if (idx < 0) {
     res.status(404).json({ error: `Model "${req.params.model}" not found` });
     return;
   }
+  const wasActive = target!.active === true;
+  const alias = target!.model;
   proxySettings.models.splice(idx, 1);
+  // Deleting the live route promotes a remaining twin so the alias stays usable.
+  if (wasActive) {
+    const other = proxySettings.models.find((x) => x.model === alias);
+    if (other) other.active = true;
+  }
   saveProxySettings();
   rebuildProxyRegistry();
   res.json({ status: 'deleted' });
