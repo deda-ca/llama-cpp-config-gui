@@ -1,3 +1,10 @@
+# [0.7.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.6.0...v0.7.0) (2026-10-21)
+
+
+### Features
+
+* proxy model alias mapping, duplicate upstreams, and new backend kinds ([2c1cb81](https://github.com/deda-ca/llama-cpp-config-gui/commit/2c1cb81d0fc153b2273b90de733e9b1a8329eb4f))
+
 # [0.6.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.5.0...v0.6.0) (2026-10-15)
 
 
