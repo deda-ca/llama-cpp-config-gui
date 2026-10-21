@@ -1,3 +1,10 @@
+# [0.9.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.8.0...v0.9.0) (2026-10-21)
+
+
+### Features
+
+* usage tab, GitHub self-update with restart, and usage status settings ([70359cc](https://github.com/deda-ca/llama-cpp-config-gui/commit/70359cc4e94c764b2a8deffc334fd0641855bd9f))
+
 # [0.8.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.7.0...v0.8.0) (2026-10-21)
 
 
