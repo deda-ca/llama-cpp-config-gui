@@ -44,6 +44,7 @@
     "release:start": "./release/llama-cpp-config-gui"
   },
   "dependencies": {
+    "@huggingface/tokenizers": "^0.2.0",
     "express": "^5.2.1"
   },
   "devDependencies": {
