@@ -36,6 +36,13 @@ const isLive = (i: EngineInstance) => {
   return s === 'running' || s === 'starting';
 };
 
+// --port is a plain parameter now; the list column reads it back out.
+// Disabled rows never reach the command line, so they don't count here either.
+const portOf = (i: EngineInstance) => {
+  const p = i.params.find((x) => (x.key === '--port' || x.key === '-p') && !x.disabled);
+  return p?.value ? `:${p.value}` : '';
+};
+
 async function loadData() {
   try {
     const [engRes, modelsRes] = await Promise.all([
@@ -120,16 +127,28 @@ async function stopInstance(id: string) {
 async function duplicateInstance(inst: EngineInstance) {
   error.value = '';
   try {
+    // --port is a param now: shift the copy's port clear of every instance
+    const portKey = (p: EngineParam) => (p.key === '--port' || p.key === '-p') && !p.disabled;
+    const taken = new Set(
+      instances.value
+        .map((i) => Number(i.params.find(portKey)?.value))
+        .filter((n) => Number.isFinite(n)),
+    );
+    const params = inst.params.map((p) => ({ ...p }));
+    const portRow = params.find(portKey);
+    if (portRow) {
+      let port = Number(portRow.value) || 8080;
+      while (taken.has(port)) port++;
+      portRow.value = String(port);
+    }
     const copy = await postJson('/api/engines/instances', 'POST', {
       name: `${inst.name}-copy`,
       definitionId: inst.definitionId,
-      port: inst.port + 1,
     });
     await postJson(`/api/engines/instances/${copy.id}`, 'PUT', {
+      notes: inst.notes,
       binary: inst.binary,
-      host: inst.host,
-      apiKey: inst.apiKey,
-      params: inst.params,
+      params,
       routerMode: inst.routerMode,
       modelConfigIds: inst.modelConfigIds,
       modelPath: inst.modelPath ?? '',
@@ -232,7 +251,7 @@ onUnmounted(() => es?.close());
           <span class="status-dot" :class="statusOf(inst)"></span>
           <span class="engine-status">{{ statusOf(inst) }}</span>
           <span class="engine-kind">{{ ENGINE_KIND_LABELS[definitionOf(inst)?.kind ?? 'custom'] }}</span>
-          <span class="engine-port">:{{ inst.port }}</span>
+          <span class="engine-port">{{ portOf(inst) }}</span>
           <div class="engine-actions">
             <button
               v-if="!isLive(inst)"
@@ -284,7 +303,6 @@ onUnmounted(() => es?.close());
       v-if="editingInstance"
       :instance="editingInstance"
       :definitions="definitions"
-      :models="models"
       @saved="onEditorSaved"
       @close="editingInstance = null"
     />

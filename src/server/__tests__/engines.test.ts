@@ -22,6 +22,7 @@ import {
   normalizeEngines,
   isPortTaken,
   findFreePort,
+  instancePort,
   blankInstance,
   makeEngineId,
 } from '../engines/store.js';
@@ -56,12 +57,10 @@ describe('loadEngines / saveEngines', () => {
         {
           id: 'llama-main',
           name: 'llama-main',
+          notes: 'main box',
           definitionId: 'default',
           binary: 'llama-server',
-          host: '0.0.0.0',
-          port: 8080,
-          apiKey: 'secret',
-          params: [{ key: '--host', value: '0.0.0.0' }, { key: '--metrics' }],
+          params: [{ key: '--host', value: '0.0.0.0' }, { key: '--port', value: '8080' }, { key: '--api-key', value: 'secret' }, { key: '--metrics' }],
           routerMode: true,
           modelConfigIds: ['cfg1', 'cfg2'],
         },
@@ -99,16 +98,36 @@ describe('normalizeEngines', () => {
     expect(normalized.instances[0]).toEqual({
       id: 'inst-0',
       name: 'Inst',
+      notes: '',
       definitionId: 'def-0',
       binary: 'llama-server',
-      host: '127.0.0.1',
-      port: 8080,
-      apiKey: '',
       params: [],
       routerMode: false,
       modelConfigIds: [],
     });
     expect(normalized.defaultInstanceId).toBe('inst-0');
+  });
+
+  it('folds pre-upgrade host/port/apiKey fields into params', () => {
+    const normalized = normalizeEngines({
+      instances: [
+        {
+          id: 'a',
+          host: '0.0.0.0',
+          port: 9090,
+          apiKey: 'secret',
+          params: [{ key: '--host', value: '127.0.0.1' }, { key: '--metrics' }],
+        },
+      ],
+    });
+    // Existing params win; missing flags are appended in host/port/api-key order.
+    expect(normalized.instances[0].params).toEqual([
+      { key: '--host', value: '127.0.0.1' },
+      { key: '--metrics' },
+      { key: '--port', value: '9090' },
+      { key: '--api-key', value: 'secret' },
+    ]);
+    expect(normalized.instances[0]).not.toHaveProperty('port');
   });
 
   it('drops invalid params entries and keeps flag-only params', () => {
@@ -181,12 +200,16 @@ describe('migrateLegacyConfig', () => {
     expect(migrated!.instances[0]).toEqual({
       id: 'default',
       name: 'default',
+      notes: '',
       definitionId: 'default',
       binary: 'llama-server',
-      host: '0.0.0.0',
-      port: 8081,
-      apiKey: 'k',
-      params: [{ key: '--metrics' }, { key: '--flash-attn', value: 'auto' }],
+      params: [
+        { key: '--host', value: '0.0.0.0' },
+        { key: '--port', value: '8081' },
+        { key: '--api-key', value: 'k' },
+        { key: '--metrics' },
+        { key: '--flash-attn', value: 'auto' },
+      ],
       routerMode: false,
       modelConfigIds: [],
       modelPath: '/models/a.gguf',
@@ -205,11 +228,27 @@ describe('port allocation', () => {
   const data: EnginesFile = {
     definitions: [],
     instances: [
-      { id: 'a', name: 'a', definitionId: 'default', binary: 'llama-server', host: '127.0.0.1', port: 8080, apiKey: '', params: [], routerMode: false, modelConfigIds: [] },
-      { id: 'b', name: 'b', definitionId: 'default', binary: 'llama-server', host: '127.0.0.1', port: 8082, apiKey: '', params: [], routerMode: false, modelConfigIds: [] },
+      { id: 'a', name: 'a', notes: '', definitionId: 'default', binary: 'llama-server', params: [{ key: '--port', value: '8080' }], routerMode: false, modelConfigIds: [] },
+      { id: 'b', name: 'b', notes: '', definitionId: 'default', binary: 'llama-server', params: [{ key: '--port', value: '8082' }], routerMode: false, modelConfigIds: [] },
     ],
     defaultInstanceId: 'a',
   };
+
+  it('instancePort reads --port from params', () => {
+    expect(instancePort([{ key: '--port', value: '8080' }])).toBe(8080);
+    expect(instancePort([{ key: '-p', value: '5000' }])).toBe(5000);
+    expect(instancePort([{ key: '--port', value: 'nope' }])).toBeNull();
+    expect(instancePort([])).toBeNull();
+  });
+
+  it('instancePort ignores a disabled --port row', () => {
+    expect(instancePort([{ key: '--port', value: '8080', disabled: true }])).toBeNull();
+    // A later enabled row still wins
+    expect(instancePort([
+      { key: '--port', value: '8080', disabled: true },
+      { key: '--port', value: '9090' },
+    ])).toBe(9090);
+  });
 
   it('isPortTaken ignores the excluded instance', () => {
     expect(isPortTaken(data, 8080)).toBe(true);
@@ -227,12 +266,30 @@ describe('port allocation', () => {
 describe('blankInstance / makeEngineId', () => {
   const def = { id: 'default', name: 'default', kind: 'llamacpp' as const, buildPath: '/opt/llama', envVars: {} };
 
+  beforeEach(() => {
+    // No template file on disk → the seeded llamacpp template is used
+    readFileSync.mockImplementation(() => {
+      throw new Error('ENOENT');
+    });
+  });
+
   it('derives a slug id and a free port', () => {
     const inst = blankInstance('My Engine', def, emptyEngines);
     expect(inst.id).toBe('my-engine');
-    expect(inst.port).toBe(8080);
+    // New instances are seeded from the kind's parameter template
+    expect(instancePort(inst.params)).toBe(8080);
+    expect(inst.params[0]).toEqual({ key: '--host', value: '127.0.0.1' });
     expect(inst.binary).toBe('llama-server');
     expect(inst.definitionId).toBe('default');
+  });
+
+  it('nudges the template --port past ports already in use', () => {
+    const existing = normalizeEngines({
+      definitions: [{ id: 'default', kind: 'llamacpp' }],
+      instances: [{ id: 'x', params: [{ key: '--port', value: '8080' }] }],
+    });
+    const inst = blankInstance('Another', def, existing);
+    expect(instancePort(inst.params)).toBe(8081);
   });
 
   it('uniquifies ids against existing instances', () => {
@@ -259,5 +316,45 @@ describe('args helpers', () => {
     expect(paramsToArgs([{ key: '--metrics' }, { key: '--api-key', value: 'a b' }])).toBe(
       '--metrics --api-key "a b"',
     );
+  });
+
+  it('paramsToArgs skips disabled rows', () => {
+    expect(paramsToArgs([
+      { key: '--host', value: '0.0.0.0' },
+      { key: '--metrics', disabled: true },
+      { key: '--flash-attn', value: 'on' },
+    ])).toBe('--host 0.0.0.0 --flash-attn on');
+  });
+});
+
+describe('disabled param rows', () => {
+  it('normalizeEngineParams keeps the disabled flag and drops it when false', () => {
+    const normalized = normalizeEngines({
+      instances: [
+        {
+          id: 'a',
+          params: [
+            { key: '--metrics', disabled: true },
+            { key: '--temp', value: '0.7', disabled: false },
+          ],
+        },
+      ],
+    });
+    expect(normalized.instances[0].params).toEqual([
+      { key: '--metrics', disabled: true },
+      { key: '--temp', value: '0.7' },
+    ]);
+  });
+
+  it('a disabled row survives a save round-trip', () => {
+    const data: EnginesFile = {
+      definitions: [],
+      instances: [
+        { id: 'a', name: 'a', notes: '', definitionId: 'default', binary: 'llama-server', params: [{ key: '--metrics', disabled: true }], routerMode: false, modelConfigIds: [] },
+      ],
+      defaultInstanceId: 'a',
+    };
+    readFileSync.mockReturnValue(JSON.stringify(data));
+    expect(loadEngines()).toEqual(data);
   });
 });

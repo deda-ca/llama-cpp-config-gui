@@ -4,7 +4,7 @@
  * Three concepts:
  *  - EngineDefinition: a named, reusable build ("which executable + env vars"),
  *    generalizing today's single EnvironmentConfig (todo #11).
- *  - EngineInstance:  a launchable entry — a definition + port/host/params/model
+ *  - EngineInstance:  a launchable entry — a definition + executable/params/model
  *    selection. Launching spawns one child process tracked by instance id.
  *  - EngineParam:     one CLI argument. `value === undefined` means a flag-only
  *    key (e.g. `--metrics`); a string value is passed as key + value
@@ -52,6 +52,8 @@ export interface EngineParam {
   key: string;
   /** Argument value; undefined = flag-only (boolean switch). */
   value?: string;
+  /** Row kept in the config but excluded from the launch (editor "off" toggle). */
+  disabled?: boolean;
 }
 
 /** A launchable engine: definition + runtime settings + model selection. */
@@ -59,15 +61,14 @@ export interface EngineInstance {
   /** Stable slug id, derived from name on creation. */
   id: string;
   name: string;
+  /** Free-form notes shown in the editor (not part of the launch). */
+  notes: string;
   /** EngineDefinition this instance launches from. */
   definitionId: string;
   /** Executable name inside the build folder (llama.cpp: "llama-server" | "llama-cli"). */
   binary: string;
-  host: string;
-  port: number;
-  /** API key for engines that support it (llama.cpp --api-key); empty = none. */
-  apiKey: string;
-  /** Ordered CLI parameters applied to every launch of this instance. */
+  /** Ordered CLI parameters applied to every launch of this instance. Server
+   * options (--host/--port/--api-key, ...) are ordinary params, not fields. */
   params: EngineParam[];
   /** llama.cpp only: launch in router mode with these model config ids. */
   routerMode: boolean;

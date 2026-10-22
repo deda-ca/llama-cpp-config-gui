@@ -50,6 +50,14 @@ export interface LlamaConfig {
   /** API key for the server (--api-key); empty = no auth */
   apiKey: string;
   extraArgs: string;
+  /**
+   * Engine-instance launch: `extraArgs` is the complete, user-authored param
+   * list, so the llama.cpp driver must not inject its own defaults
+   * (-c/-ngl/-b/-ub/-t/-ts/--host/--port/--api-key) for flags the instance
+   * does not list. Legacy settings.json launches leave this unset and keep
+   * the old default-injection behavior.
+   */
+  paramsOnly?: boolean;
   gpuIntervalMs: number;
   gpuSort: GpuSortMode;
   gpuOrder: number[]; // manual order of SMI indices; empty = use sort mode

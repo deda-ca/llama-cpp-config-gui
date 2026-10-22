@@ -427,48 +427,63 @@ export function extractMetrics(line: string, current: PerfMetrics): PerfMetrics 
  * Build the CLI argument list for a llama.cpp launch. `spec` is the legacy
  * LlamaConfig shape: `llamaCppPath` carries the build folder, `extraArgs`
  * carries the instance's structured params rendered by `paramsToArgs`.
+ *
+ * `--host`/`--port`/`--api-key` are injected from the spec fields only when
+ * `extraArgs` does not already name those flags — engine instances keep them
+ * as ordinary params, so this avoids emitting a flag twice.
+ *
+ * When `spec.paramsOnly` is set (engine-instance launches), `extraArgs` *is*
+ * the user's parameter list: nothing that the list does not name is added, so
+ * the command line matches the Command tab exactly. Only the model selection
+ * (`-m`/`--mmproj`) or the router preset comes from the spec itself. Legacy
+ * settings.json launches leave the flag unset and keep the default injection.
  */
 export function buildLlamaArgs(spec: LlamaConfig): string[] {
   const args: string[] = [];
+  const extra = spec.extraArgs.trim() ? splitArgs(spec.extraArgs) : [];
+  const hasExtraFlag = (flag: string) => extra.includes(flag);
+  const paramsOnly = spec.paramsOnly === true;
 
   // Router mode: launch with a preset INI containing multiple models.
   // Per-model flags come from the INI sections, so skip single-model args.
   if (spec.routerIniPath) {
     args.push('--models-preset', spec.routerIniPath);
-    if (spec.binary === 'llama-server') {
-      args.push('--port', String(spec.port));
-      args.push('--host', spec.host || '127.0.0.1');
+    if (spec.binary === 'llama-server' && !paramsOnly) {
+      if (!hasExtraFlag('--port')) args.push('--port', String(spec.port));
+      if (!hasExtraFlag('--host')) args.push('--host', spec.host || '127.0.0.1');
       // Enable the Prometheus /metrics endpoint so the GUI can poll per-model speeds
       if (METRICS_PARSING_ENABLED) args.push('--metrics');
-      if (spec.apiKey) args.push('--api-key', `"${spec.apiKey}"`);
+      if (spec.apiKey && !hasExtraFlag('--api-key')) args.push('--api-key', `"${spec.apiKey}"`);
     }
+    args.push(...extra);
     return args;
   }
 
   if (spec.modelPath) {
     args.push('-m', spec.modelPath);
   }
-  if (spec.mmproj) {
+  if (spec.mmproj && !hasExtraFlag('--mmproj')) {
     args.push('--mmproj', spec.mmproj);
   }
-  args.push('-c', String(spec.contextSize));
-  args.push('-ngl', String(spec.gpuLayers));
 
-  if (spec.threads > 0) args.push('-t', String(spec.threads));
-  if (spec.mainThreads > 0) args.push('-ts', String(spec.mainThreads));
-  args.push('-b', String(spec.batchSize));
-  args.push('-ub', String(spec.ubatchSize));
+  if (!paramsOnly) {
+    args.push('-c', String(spec.contextSize));
+    args.push('-ngl', String(spec.gpuLayers));
 
-  if (spec.binary === 'llama-server') {
-    args.push('--port', String(spec.port));
-    args.push('--host', spec.host || '127.0.0.1');
-    if (spec.apiKey) args.push('--api-key', `"${spec.apiKey}"`);
+    if (spec.threads > 0) args.push('-t', String(spec.threads));
+    if (spec.mainThreads > 0) args.push('-ts', String(spec.mainThreads));
+    args.push('-b', String(spec.batchSize));
+    args.push('-ub', String(spec.ubatchSize));
+
+    if (spec.binary === 'llama-server') {
+      if (!hasExtraFlag('--port')) args.push('--port', String(spec.port));
+      if (!hasExtraFlag('--host')) args.push('--host', spec.host || '127.0.0.1');
+      if (spec.apiKey && !hasExtraFlag('--api-key')) args.push('--api-key', `"${spec.apiKey}"`);
+    }
   }
 
   // Append extra args (split on whitespace, respecting quotes)
-  if (spec.extraArgs.trim()) {
-    args.push(...splitArgs(spec.extraArgs));
-  }
+  args.push(...extra);
 
   return args;
 }

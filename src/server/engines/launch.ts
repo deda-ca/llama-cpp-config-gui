@@ -11,17 +11,27 @@
 import { DEFAULT_CONFIG } from '../config.js';
 import type { LlamaConfig } from '../types.js';
 import { paramsToArgs } from './args.js';
+import { paramValue, paramValueAny } from './store.js';
 import type { EngineDefinition, EngineInstance } from './types.js';
 
 /**
  * `routerIniPath` is passed in by the caller because generating it requires
  * reading model configs and writing a file (side effects kept out of here).
+ *
+ * host/port/api-key are plain params on the instance; the llama.cpp driver
+ * still expects them as spec fields (legacy launch parity), so they are read
+ * back out of the param list here. `paramsOnly` tells the driver that
+ * `extraArgs` is the whole story: it must not inject defaults for flags the
+ * instance does not list, so the launched command line matches the Command
+ * tab exactly.
  */
 export function instanceToLlamaConfig(
   instance: EngineInstance,
   definition: EngineDefinition,
   routerIniPath?: string,
 ): LlamaConfig {
+  const portParam = paramValueAny(instance.params, '--port');
+  const port = Number(portParam);
   return {
     ...DEFAULT_CONFIG,
     llamaCppPath: definition.buildPath,
@@ -35,9 +45,10 @@ export function instanceToLlamaConfig(
       : instance.binary,
     modelPath: instance.routerMode ? '' : (instance.modelPath ?? ''),
     mmproj: instance.routerMode ? undefined : instance.mmproj,
-    host: instance.host,
-    port: instance.port,
-    apiKey: instance.apiKey,
+    host: paramValue(instance.params, '--host') ?? '',
+    port: Number.isInteger(port) && port > 0 ? port : DEFAULT_CONFIG.port,
+    apiKey: paramValue(instance.params, '--api-key') ?? '',
     extraArgs: paramsToArgs(instance.params),
+    paramsOnly: true,
   };
 }

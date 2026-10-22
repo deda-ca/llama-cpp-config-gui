@@ -12,12 +12,14 @@ import { EngineManager } from './engines/manager.js';
 import { instanceToLlamaConfig } from './engines/launch.js';
 import {
   blankInstance,
+  instancePort,
   isPortTaken,
   makeEngineId,
   normalizeEngineParams,
   normalizeEnvVars,
 } from './engines/store.js';
-import { isEngineKind, type EngineDefinition } from './engines/types.js';
+import { loadTemplate, saveTemplate } from './engines/template.js';
+import { isEngineKind, type EngineDefinition, type EngineInstance } from './engines/types.js';
 import { getDriver } from './engines/driver.js';
 import type { WsMessage, LlamaConfig, GpuInfo, LlamaDevice, GpuSortMode, SystemStats } from './types.js';
 import { loadModels, saveModels, loadParams, saveParams, generateId, type ModelConfig, type ConfigTemplate, type ParamDef } from './modelConfig.js';
@@ -691,6 +693,67 @@ app.get('/api/engines/definitions/:id/version', async (req, res) => {
   res.json({ ...info, valid, kind: def.kind });
 });
 
+// Compose the command line a launch would run, for the editor's Command tab.
+// Takes the *draft* from the dialog (unsaved edits included) and goes through
+// the exact same driver path as a real launch, so the preview cannot drift
+// from what would actually be spawned.
+app.post('/api/engines/command', (req, res) => {
+  const body = req.body ?? {};
+  const data = engines.getEngines();
+  const def = data.definitions.find((d) => d.id === body.definitionId);
+  const executable = typeof body.executable === 'string' ? body.executable.trim() : '';
+  if (!executable) {
+    res.status(400).json({ error: 'executable is required' });
+    return;
+  }
+  const kind = isEngineKind(body.kind) ? body.kind : def?.kind ?? 'llamacpp';
+  const buildPath = path.dirname(executable);
+  const binary = path.basename(executable);
+  const driver = getDriver(kind);
+
+  const spec = instanceToLlamaConfig(
+    {
+      id: '__preview__',
+      name: '__preview__',
+      notes: '',
+      definitionId: def?.id ?? 'default',
+      binary,
+      params: normalizeEngineParams(body.params),
+      routerMode: false,
+      modelConfigIds: [],
+    } as EngineInstance,
+    {
+      id: def?.id ?? '__preview__',
+      name: def?.name ?? 'preview',
+      kind,
+      buildPath,
+      envVars: normalizeEnvVars(body.envVars),
+    },
+  );
+
+  const args = driver.buildArgs(spec);
+  res.json({
+    binaryPath: path.join(buildPath, driver.binaryName(spec)),
+    args,
+    envVars: spec.envVars,
+    cwd: buildPath,
+    exists: fs.existsSync(path.join(buildPath, driver.binaryName(spec))),
+  });
+});
+
+// Ordered parameter list auto-filled when a new instance of a kind is
+// created. --host/--port/--api-key are ordinary params here, not fields.
+app.get('/api/engines/templates/:kind', (req, res) => {
+  const kind = isEngineKind(req.params.kind) ? req.params.kind : 'llamacpp';
+  res.json({ kind, params: loadTemplate(kind) });
+});
+
+app.put('/api/engines/templates/:kind', (req, res) => {
+  const kind = isEngineKind(req.params.kind) ? req.params.kind : 'llamacpp';
+  const params = saveTemplate(kind, req.body?.params);
+  res.json({ kind, params });
+});
+
 app.post('/api/engines/instances', (req, res) => {
   const data = engines.getEngines();
   const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
@@ -704,9 +767,9 @@ app.post('/api/engines/instances', (req, res) => {
     return;
   }
   const inst = blankInstance(name, def, data);
-  if (typeof req.body?.port === 'number') inst.port = req.body.port;
-  if (isPortTaken(data, inst.port)) {
-    res.status(409).json({ error: `Port ${inst.port} is already used by another instance` });
+  const port = instancePort(inst.params);
+  if (port !== null && isPortTaken(data, port)) {
+    res.status(409).json({ error: `Port ${port} is already used by another instance` });
     return;
   }
   data.instances.push(inst);
@@ -723,22 +786,22 @@ app.put('/api/engines/instances/:id', (req, res) => {
     return;
   }
   const body = req.body ?? {};
+  // --port is a plain param; conflict-check it against the other instances
+  // *before* touching the stored instance, so a rejected edit leaves no trace.
+  const nextParams = body.params !== undefined ? normalizeEngineParams(body.params) : inst.params;
+  const nextPort = instancePort(nextParams);
+  if (nextPort !== null && isPortTaken(data, nextPort, inst.id)) {
+    res.status(409).json({ error: `Port ${nextPort} is already used by another instance` });
+    return;
+  }
   if (typeof body.name === 'string' && body.name.trim()) inst.name = body.name.trim();
+  if (typeof body.notes === 'string') inst.notes = body.notes;
   if (typeof body.binary === 'string' && body.binary) inst.binary = body.binary;
-  if (typeof body.host === 'string' && body.host) inst.host = body.host;
-  if (typeof body.apiKey === 'string') inst.apiKey = body.apiKey;
   if (typeof body.routerMode === 'boolean') inst.routerMode = body.routerMode;
   if (Array.isArray(body.modelConfigIds)) inst.modelConfigIds = body.modelConfigIds.filter((x: unknown): x is string => typeof x === 'string');
   if (typeof body.modelPath === 'string') inst.modelPath = body.modelPath || undefined;
   if (typeof body.mmproj === 'string') inst.mmproj = body.mmproj || undefined;
-  if (body.params !== undefined) inst.params = normalizeEngineParams(body.params);
-  if (typeof body.port === 'number' && body.port !== inst.port) {
-    if (isPortTaken(data, body.port, inst.id)) {
-      res.status(409).json({ error: `Port ${body.port} is already used by another instance` });
-      return;
-    }
-    inst.port = body.port;
-  }
+  inst.params = nextParams;
   if (typeof body.definitionId === 'string' && data.definitions.some((d) => d.id === body.definitionId)) {
     inst.definitionId = body.definitionId;
   }

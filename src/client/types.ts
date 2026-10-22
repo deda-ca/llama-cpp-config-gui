@@ -104,21 +104,23 @@ export interface EngineDefinition {
   envVars: Record<string, string>;
 }
 
-/** One CLI argument: key + optional value (flag-only when value is undefined). */
+/** One CLI argument: key + optional value (flag-only when value is undefined).
+ * `disabled` keeps the row in the config but excludes it from the launch. */
 export interface EngineParam {
   key: string;
   value?: string;
+  disabled?: boolean;
 }
 
-/** A launchable engine instance, with its live process status. */
+/** A launchable engine instance, with its live process status. Server options
+ * (--host/--port/--api-key, ...) are ordinary params, not dedicated fields. */
 export interface EngineInstance {
   id: string;
   name: string;
+  /** Free-form notes shown in the editor (not part of the launch). */
+  notes: string;
   definitionId: string;
   binary: string;
-  host: string;
-  port: number;
-  apiKey: string;
   params: EngineParam[];
   routerMode: boolean;
   modelConfigIds: string[];

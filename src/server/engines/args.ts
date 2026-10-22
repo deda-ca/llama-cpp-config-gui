@@ -51,9 +51,15 @@ export function tokensToParams(tokens: string[]): { key: string; value?: string 
   return params;
 }
 
+/** Params that actually reach the command line (disabled rows are kept in the
+ * config but excluded from the launch, like ModelConfig.disabledParams). */
+export function enabledParams<T extends { disabled?: boolean }>(params: T[]): T[] {
+  return params.filter((p) => !p.disabled);
+}
+
 /** Render params back to a flat CLI string (for display / legacy extraArgs). */
-export function paramsToArgs(params: { key: string; value?: string }[]): string {
-  return params
+export function paramsToArgs(params: { key: string; value?: string; disabled?: boolean }[]): string {
+  return enabledParams(params)
     .map((p) => {
       if (p.value === undefined || p.value === '') return p.key;
       return /\s/.test(p.value) ? `${p.key} "${p.value}"` : `${p.key} ${p.value}`;

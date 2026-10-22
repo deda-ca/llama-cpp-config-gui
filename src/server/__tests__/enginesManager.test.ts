@@ -192,7 +192,7 @@ describe('EngineManager legacy migration', () => {
     expect(writeFileSync).toHaveBeenCalled();
     const written = JSON.parse(writeFileSync.mock.calls[0][1] as string);
     expect(written.definitions[0].buildPath).toBe('/opt/llama');
-    expect(written.instances[0].port).toBe(8081);
+    expect(written.instances[0].params).toContainEqual({ key: '--port', value: '8081' });
   });
 
   it('does nothing when no build path is configured', () => {
@@ -209,7 +209,7 @@ describe('EngineManager legacy migration', () => {
     readFileSync.mockReturnValue(
       JSON.stringify({
         definitions: [{ id: 'd1', name: 'Build', kind: 'llamacpp', buildPath: '/x', envVars: {} }],
-        instances: [{ id: 'i1', name: 'Inst', definitionId: 'd1', binary: 'llama-server', host: '127.0.0.1', port: 9000, apiKey: '', params: [], routerMode: false, modelConfigIds: [] }],
+        instances: [{ id: 'i1', name: 'Inst', definitionId: 'd1', binary: 'llama-server', params: [{ key: '--port', value: '9000' }], routerMode: false, modelConfigIds: [] }],
         defaultInstanceId: 'i1',
       }),
     );
@@ -231,12 +231,16 @@ describe('instanceToLlamaConfig', () => {
   const base: EngineInstance = {
     id: 'llama-main',
     name: 'llama-main',
+    notes: '',
     definitionId: 'default',
     binary: 'llama-server',
-    host: '0.0.0.0',
-    port: 8081,
-    apiKey: 'k',
-    params: [{ key: '--metrics' }, { key: '--flash-attn', value: 'auto' }],
+    params: [
+      { key: '--host', value: '0.0.0.0' },
+      { key: '--port', value: '8081' },
+      { key: '--api-key', value: 'k' },
+      { key: '--metrics' },
+      { key: '--flash-attn', value: 'auto' },
+    ],
     routerMode: false,
     modelConfigIds: [],
     modelPath: '/models/a.gguf',
@@ -248,13 +252,17 @@ describe('instanceToLlamaConfig', () => {
     expect(spec.llamaCppPath).toBe('/opt/llama/build');
     expect(spec.envVars).toEqual({ CUDA_VISIBLE_DEVICES: '0' });
     expect(spec.binary).toBe('llama-server');
+    // host/port/api-key live in params; the spec fields mirror them so the
+    // llama.cpp driver (and legacy consumers) still see them.
     expect(spec.host).toBe('0.0.0.0');
     expect(spec.port).toBe(8081);
     expect(spec.apiKey).toBe('k');
-    expect(spec.extraArgs).toBe('--metrics --flash-attn auto');
+    expect(spec.extraArgs).toBe('--host 0.0.0.0 --port 8081 --api-key k --metrics --flash-attn auto');
     expect(spec.modelPath).toBe('/models/a.gguf');
     expect(spec.mmproj).toBe('/models/a-mmproj.gguf');
     expect(spec.routerIniPath).toBe('');
+    // Engine instances launch strictly from their param list
+    expect(spec.paramsOnly).toBe(true);
   });
 
   it('router mode clears the single-model fields and uses the INI path', () => {
@@ -302,8 +310,8 @@ describe('driver selection', () => {
         { id: 'd-audio', name: 'audio', kind: 'audio', buildPath: '/opt/audio', envVars: {} },
       ],
       [
-        { id: 'i-llama', name: 'llama', definitionId: 'd-llama', binary: 'llama-server', host: '127.0.0.1', port: 8080, apiKey: '', params: [], routerMode: false, modelConfigIds: [] },
-        { id: 'i-audio', name: 'audio', definitionId: 'd-audio', binary: 'audio-server', host: '127.0.0.1', port: 8081, apiKey: '', params: [], routerMode: false, modelConfigIds: [] },
+        { id: 'i-llama', name: 'llama', notes: '', definitionId: 'd-llama', binary: 'llama-server', params: [], routerMode: false, modelConfigIds: [] },
+        { id: 'i-audio', name: 'audio', notes: '', definitionId: 'd-audio', binary: 'audio-server', params: [], routerMode: false, modelConfigIds: [] },
       ],
     );
     const mgr = new EngineManager();
@@ -317,7 +325,7 @@ describe('passthrough driver launch', () => {
   it('spawns the instance binary with its params and streams raw logs', () => {
     enginesFs(
       [{ id: 'd-c', name: 'custom', kind: 'custom', buildPath: '/opt/tool', envVars: { FOO: 'bar' } }],
-      [{ id: 'i-c', name: 'custom', definitionId: 'd-c', binary: 'my-tool', host: '127.0.0.1', port: 8080, apiKey: '', params: [{ key: '--serve' }, { key: '--port', value: '8080' }], routerMode: false, modelConfigIds: [] }],
+      [{ id: 'i-c', name: 'custom', notes: '', definitionId: 'd-c', binary: 'my-tool', params: [{ key: '--serve' }, { key: '--port', value: '8080' }], routerMode: false, modelConfigIds: [] }],
     );
     const lines: Array<[string, string]> = [];
     const mgr = new EngineManager({ onLogLine: (id, line) => lines.push([id, line]) });
@@ -346,7 +354,7 @@ describe('passthrough driver launch', () => {
     readFileSync.mockReturnValue(
       JSON.stringify({
         definitions: [{ id: 'd-c', name: 'custom', kind: 'custom', buildPath: '/opt/tool', envVars: {} }],
-        instances: [{ id: 'i-c', name: 'custom', definitionId: 'd-c', binary: 'my-tool', host: '127.0.0.1', port: 8080, apiKey: '', params: [{ key: '--serve' }], routerMode: false, modelConfigIds: [] }],
+        instances: [{ id: 'i-c', name: 'custom', definitionId: 'd-c', binary: 'my-tool', params: [{ key: '--serve' }], routerMode: false, modelConfigIds: [] }],
         defaultInstanceId: 'i-c',
       }),
     );

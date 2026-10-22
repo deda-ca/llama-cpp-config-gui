@@ -296,28 +296,58 @@ describe('Engine API', () => {
     await request(app).delete(`/api/engines/definitions/${missing.body.id}`);
   });
 
-  it('POST /api/engines/instances creates an instance with a free port', async () => {
-    const before = await request(app).get('/api/engines');
-    const taken = new Set(before.body.instances.map((i: any) => i.port));
+  it('GET /api/engines/templates/:kind returns the seeded llamacpp template', async () => {
+    const res = await request(app).get('/api/engines/templates/llamacpp');
+    expect(res.status).toBe(200);
+    expect(res.body.kind).toBe('llamacpp');
+    expect(res.body.params).toEqual(expect.arrayContaining([{ key: '--port', value: '8080' }]));
+  });
 
+  it('PUT /api/engines/templates/:kind persists and round-trips', async () => {
+    const res = await request(app)
+      .put('/api/engines/templates/custom')
+      .send({ params: [{ key: '--serve' }, { key: '--port', value: '9000' }, { key: '  ' }] });
+    expect(res.status).toBe(200);
+    expect(res.body.params).toEqual([{ key: '--serve' }, { key: '--port', value: '9000' }]);
+    const get = await request(app).get('/api/engines/templates/custom');
+    expect(get.body.params).toEqual([{ key: '--serve' }, { key: '--port', value: '9000' }]);
+  });
+
+  it('POST /api/engines/instances seeds params from the kind template', async () => {
     const res = await request(app)
       .post('/api/engines/instances')
       .send({ name: 'My Engine', definitionId: defId });
     expect(res.status).toBe(200);
     expect(res.body.id).toBe('my-engine');
     expect(res.body.definitionId).toBe(defId);
-    expect(taken.has(res.body.port)).toBe(false);
+    // The llamacpp template seeds --host/--port/--api-key as ordinary params
+    expect(res.body.params).toEqual(expect.arrayContaining([
+      { key: '--host', value: '127.0.0.1' },
+      { key: '--port', value: '8081' },
+    ]));
+    // The legacy default instance already holds :8080, so the new one is free
+    const portParam = res.body.params.find((p: any) => p.key === '--port');
+    expect(portParam.value).not.toBe('8080');
     instId = res.body.id;
   });
 
-  it('POST /api/engines/instances rejects an explicit port conflict', async () => {
-    const before = await request(app).get('/api/engines');
-    const used = before.body.instances[0].port;
+  it('POST /api/engines/instances nudges a clashing template port to a free one', async () => {
+    // Force the template --port onto the default instance's port: creation
+    // must shift to the next free port instead of failing.
+    const putT = await request(app)
+      .put('/api/engines/templates/llamacpp')
+      .send({ params: [{ key: '--host', value: '127.0.0.1' }, { key: '--port', value: '8080' }] });
+    expect(putT.status).toBe(200);
     const res = await request(app)
       .post('/api/engines/instances')
-      .send({ name: 'Clash', definitionId: defId, port: used });
-    expect(res.status).toBe(409);
-    expect(res.body.error).toContain(String(used));
+      .send({ name: 'Nudged', definitionId: defId });
+    expect(res.status).toBe(200);
+    const port = res.body.params.find((p: any) => p.key === '--port').value;
+    expect(port).not.toBe('8080');
+    expect(Number(port)).toBeGreaterThan(8080);
+    await request(app).delete(`/api/engines/instances/${res.body.id}`);
+    // Restore the default template for later tests
+    await request(app).put('/api/engines/templates/llamacpp').send({ params: [] });
   });
 
   it('POST /api/engines/instances requires a valid definitionId', async () => {
@@ -338,10 +368,64 @@ describe('Engine API', () => {
       { key: '--metrics' },
     ]);
 
-    const before = await request(app).get('/api/engines');
-    const otherPort = before.body.instances.find((i: any) => i.id !== instId).port;
-    const clash = await request(app).put(`/api/engines/instances/${instId}`).send({ port: otherPort });
+    const clash = await request(app)
+      .put(`/api/engines/instances/${instId}`)
+      .send({ params: [{ key: '--port', value: '8080' }] });
     expect(clash.status).toBe(409);
+  });
+
+  it('PUT /api/engines/instances/:id round-trips notes', async () => {
+    const res = await request(app)
+      .put(`/api/engines/instances/${instId}`)
+      .send({ notes: 'runs on the 3050' });
+    expect(res.status).toBe(200);
+    expect(res.body.notes).toBe('runs on the 3050');
+  });
+
+  it('POST /api/engines/command composes the launch command from a draft', async () => {
+    const res = await request(app)
+      .post('/api/engines/command')
+      .send({
+        definitionId: defId,
+        kind: 'llamacpp',
+        executable: '/opt/llama/build/bin/llama-server',
+        envVars: { CUDA_VISIBLE_DEVICES: '1' },
+        params: [{ key: '--port', value: '9090' }, { key: '--metrics' }, { key: '--seed', value: '-1' }],
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.binaryPath).toBe('/opt/llama/build/bin/llama-server');
+    expect(res.body.cwd).toBe('/opt/llama/build/bin');
+    expect(res.body.envVars).toEqual({ CUDA_VISIBLE_DEVICES: '1' });
+    expect(res.body.exists).toBe(false);
+    expect(res.body.args).toEqual(expect.arrayContaining(['--port', '9090', '--metrics', '--seed', '-1']));
+  });
+
+  it('POST /api/engines/command requires an executable', async () => {
+    const res = await request(app).post('/api/engines/command').send({ kind: 'llamacpp', params: [] });
+    expect(res.status).toBe(400);
+  });
+
+  it('disabled param rows round-trip and stay out of the composed command', async () => {
+    const put = await request(app)
+      .put(`/api/engines/instances/${instId}`)
+      .send({ params: [{ key: '--metrics', disabled: true }, { key: '--port', value: '9090' }] });
+    expect(put.status).toBe(200);
+    expect(put.body.params).toEqual([
+      { key: '--metrics', disabled: true },
+      { key: '--port', value: '9090' },
+    ]);
+
+    const cmd = await request(app)
+      .post('/api/engines/command')
+      .send({
+        definitionId: defId,
+        kind: 'llamacpp',
+        executable: '/opt/llama/build/bin/llama-server',
+        params: put.body.params,
+      });
+    expect(cmd.status).toBe(200);
+    expect(cmd.body.args).not.toContain('--metrics');
+    expect(cmd.body.args).toEqual(expect.arrayContaining(['--port', '9090']));
   });
 
   it('DELETE /api/engines/definitions/:id is blocked while an instance uses it', async () => {

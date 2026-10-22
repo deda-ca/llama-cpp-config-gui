@@ -1,23 +1,18 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from 'vue';
 import Dialog from './ui/Dialog.vue';
 import type {
   EngineDefinition,
   EngineInstance,
   EngineKind,
   EngineParam,
+  ParamDef,
 } from '../types';
 import { ENGINE_KIND_LABELS } from '../types';
-
-interface ModelOption {
-  id: string;
-  alias: string;
-}
 
 const props = defineProps<{
   instance: EngineInstance;
   definitions: EngineDefinition[];
-  models: ModelOption[];
   /** Pre-selected definition id for a brand-new instance (kind dropdown helper) */
   isNew?: boolean;
 }>();
@@ -28,58 +23,48 @@ const emit = defineEmits<{
 }>();
 
 // --- Form state (instance) ---
+// The dialog is fully generic: name, executable, env vars and parameters.
+// host/port/api-key and even llama.cpp model/router options are ordinary
+// parameters — model selection stays on the Models tab for now.
 const form = ref({
   name: props.instance.name,
+  notes: props.instance.notes ?? '',
   definitionId: props.instance.definitionId,
   binary: props.instance.binary,
-  host: props.instance.host,
-  port: props.instance.port,
-  apiKey: props.instance.apiKey,
-  routerMode: props.instance.routerMode,
-  modelPath: props.instance.modelPath ?? '',
-  mmproj: props.instance.mmproj ?? '',
 });
-const modelIds = ref<string[]>([...props.instance.modelConfigIds]);
 const params = ref<EngineParam[]>(
   props.instance.params.map((p) => ({ key: p.key, value: p.value })),
 );
 
 // --- Definition editing (build folder + env live on the definition) ---
+// The definition dropdown is hidden for now; edits apply to the definition
+// this instance already belongs to.
 const def = ref<EngineDefinition | null>(
   props.definitions.find((d) => d.id === props.instance.definitionId) ?? null,
 );
 const defName = ref(def.value?.name ?? '');
 const defKind = ref<EngineKind>(def.value?.kind ?? 'llamacpp');
-const buildPath = ref(def.value?.buildPath ?? '');
+
+// The editor shows ONE "Executable" field with the full path
+// (<definition build folder>/<binary>); on save it splits back into the
+// definition's buildPath + the instance's binary name.
+function joinPath(folder: string, file: string): string {
+  if (!folder) return file;
+  return `${folder.replace(/\/+$/, '')}/${file}`;
+}
+function splitPath(p: string): { folder: string; file: string } {
+  const idx = p.lastIndexOf('/');
+  if (idx < 0) return { folder: '', file: p };
+  return { folder: p.slice(0, idx), file: p.slice(idx + 1) };
+}
+const executablePath = ref(joinPath(def.value?.buildPath ?? '', props.instance.binary));
 interface EnvRow { key: string; value: string }
 const envRows = ref<EnvRow[]>(
   Object.entries(def.value?.envVars ?? {}).map(([key, value]) => ({ key, value })),
 );
 
-// Switching to an existing definition pulls its values into the edit fields;
-// choosing "+ New build definition" blanks them for a fresh entry.
-function onDefinitionChange() {
-  const d = props.definitions.find((x) => x.id === form.value.definitionId);
-  if (d) {
-    def.value = d;
-    defName.value = d.name;
-    defKind.value = d.kind;
-    buildPath.value = d.buildPath;
-    envRows.value = Object.entries(d.envVars).map(([key, value]) => ({ key, value }));
-  } else {
-    def.value = null;
-    defName.value = '';
-    buildPath.value = '';
-    envRows.value = [];
-    versionInfo.value = null;
-    pathValid.value = null;
-  }
-}
-
-const kindIsLlamaCpp = computed(() => defKind.value === 'llamacpp');
-const selectedDefIsNew = computed(() => !props.definitions.some((d) => d.id === form.value.definitionId));
-
-// --- Build path validation (llama.cpp only — the probe runs llama-server) ---
+// --- Build validation (kinds with a version probe report it; others just
+// check the folder exists) ---
 interface VersionInfo {
   version: string | null;
   build: string | null;
@@ -92,8 +77,8 @@ const checkingPath = ref(false);
 const pathValid = ref<boolean | null>(null);
 
 async function checkBuildPath() {
-  const p = buildPath.value.trim();
-  if (!p) {
+  const folder = splitPath(executablePath.value.trim()).folder;
+  if (!folder) {
     versionInfo.value = null;
     pathValid.value = false;
     return;
@@ -103,7 +88,7 @@ async function checkBuildPath() {
     const res = await fetch('/api/version/check', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: p, kind: defKind.value }),
+      body: JSON.stringify({ path: folder, kind: defKind.value }),
     });
     if (res.ok) {
       const info = await res.json();
@@ -121,10 +106,113 @@ async function checkBuildPath() {
   }
 }
 
-// Validate the saved path on open so the badge is accurate for llama.cpp
+// Validate the saved path on open so the badge is accurate
 onMounted(() => {
-  if (kindIsLlamaCpp.value && buildPath.value) checkBuildPath();
+  if (splitPath(executablePath.value).folder) checkBuildPath();
 });
+
+// --- Tabs: the launch panel vs the composed command line ---
+const activeTab = ref<'launch' | 'command'>('launch');
+
+interface CommandPreview {
+  binaryPath: string;
+  args: string[];
+  envVars: Record<string, string>;
+  cwd: string;
+  exists: boolean;
+}
+const command = ref<CommandPreview | null>(null);
+const commandLoading = ref(false);
+const commandError = ref('');
+let commandTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Ask the server to compose the command: it runs the draft through the exact
+// driver path a real launch uses, so the preview matches what would spawn.
+async function fetchCommand() {
+  const executable = executablePath.value.trim();
+  if (!executable) {
+    command.value = null;
+    commandError.value = 'Set an executable path to preview the command.';
+    return;
+  }
+  commandLoading.value = true;
+  try {
+    const envVars: Record<string, string> = {};
+    for (const row of envRows.value) {
+      if (row.key.trim()) envVars[row.key.trim()] = row.value;
+    }
+    const res = await fetch('/api/engines/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        definitionId: form.value.definitionId,
+        kind: defKind.value,
+        executable,
+        envVars,
+        params: params.value,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      command.value = null;
+      commandError.value = data.error || `Preview failed (${res.status})`;
+    } else {
+      command.value = data;
+      commandError.value = '';
+    }
+  } catch (e) {
+    command.value = null;
+    commandError.value = String(e);
+  } finally {
+    commandLoading.value = false;
+  }
+}
+
+// Re-preview whenever the draft changes while the Command tab is open.
+watch([activeTab, executablePath, defKind, envRows, params], () => {
+  if (activeTab.value !== 'command') return;
+  if (commandTimer) clearTimeout(commandTimer);
+  commandTimer = setTimeout(fetchCommand, 250);
+}, { deep: true });
+
+// Group a flat argv list into "--flag value" lines, mirroring the Models tab
+// export: a flag and its value stay on one line, bare flags get their own.
+// A leading `-` only starts a new flag when a letter follows, so values like
+// `--seed -1` stay paired with their flag.
+const isFlag = (s: string) => /^--?[a-zA-Z]/.test(s);
+
+const commandLines = computed(() => {
+  const c = command.value;
+  if (!c) return [];
+  const lines: string[] = Object.entries(c.envVars)
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${k}="${v}"`);
+  lines.push(c.binaryPath);
+  const args = c.args;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const next = args[i + 1];
+    if (isFlag(arg) && next !== undefined && !isFlag(next)) {
+      lines.push(/\s/.test(next) ? `${arg} "${next}"` : `${arg} ${next}`);
+      i++;
+    } else {
+      lines.push(/\s/.test(arg) ? `"${arg}"` : arg);
+    }
+  }
+  return lines;
+});
+
+const commandText = computed(() =>
+  commandLines.value.map((line, i) => (i < commandLines.value.length - 1 ? `${line} \\` : line)).join('\n'),
+);
+
+const copiedCommand = ref(false);
+function copyCommand() {
+  navigator.clipboard.writeText(commandText.value).then(() => {
+    copiedCommand.value = true;
+    setTimeout(() => (copiedCommand.value = false), 1500);
+  });
+}
 
 // --- Env rows ---
 function addEnvRow() {
@@ -135,12 +223,169 @@ function removeEnvRow(idx: number) {
 }
 
 // --- Param rows (key-only = flag, key+value = option) ---
-function addParamRow() {
-  params.value.push({ key: '', value: '' });
+// The kind's parameter catalog (`.config/params.<kind>.json`, served by
+// GET /api/params?kind=) drives grouping, descriptions, input types and
+// dropdown options — same model as the model-config editor. Rows stay plain
+// EngineParams: order is the launch order, `disabled` keeps a row visible but
+// out of the command line.
+const catalog = ref<ParamDef[]>([]);
+
+async function loadCatalog() {
+  try {
+    const res = await fetch(`/api/params?kind=${defKind.value}`);
+    catalog.value = res.ok ? await res.json() : [];
+  } catch {
+    catalog.value = [];
+  }
 }
+watch(defKind, loadCatalog);
+onMounted(loadCatalog);
+
+const keyToDef = computed(() => new Map(catalog.value.map((d) => [d.flag, d])));
+
+const CATEGORY_LABELS: Record<string, string> = {
+  gpu: 'GPU & Offload',
+  context: 'Context & RoPE',
+  sampling: 'Sampling',
+  reasoning: 'Reasoning',
+  speculative: 'Speculative Decoding',
+  other: 'Other',
+  unknown: 'Unknown',
+};
+const CATEGORY_ORDER = ['gpu', 'context', 'sampling', 'reasoning', 'speculative', 'other', 'unknown'];
+
+interface ParamRow {
+  param: EngineParam;
+  index: number;
+  def: ParamDef | null;
+}
+
+// Active rows grouped by category, preserving the instance's param order.
+const groupedParams = computed(() => {
+  const groups: Record<string, ParamRow[]> = {};
+  params.value.forEach((param, index) => {
+    if (!param.key.trim()) return;
+    const def = keyToDef.value.get(param.key) ?? null;
+    const cat = def ? def.category : 'unknown';
+    if (!groups[cat]) groups[cat] = [];
+    groups[cat].push({ param, index, def });
+  });
+  return CATEGORY_ORDER.filter((cat) => groups[cat]?.length).map((cat) => ({
+    cat,
+    label: CATEGORY_LABELS[cat] || cat,
+    rows: groups[cat],
+  }));
+});
+
+function isToggleOn(p: EngineParam): boolean {
+  return !p.disabled && (p.value === undefined || p.value === '');
+}
+
+function toggleParam(p: EngineParam) {
+  if (p.disabled) {
+    p.disabled = false;
+    p.value = undefined; // bare flag on the command line
+  } else {
+    p.disabled = true;
+  }
+}
+
 function removeParamRow(idx: number) {
   params.value.splice(idx, 1);
 }
+
+// --- Add parameter picker (catalog entries not on the instance yet) ---
+const showPicker = ref(false);
+const pickerFilter = ref('');
+const pickerRef = ref<HTMLElement | null>(null);
+
+const pickerGroups = computed(() => {
+  const used = new Set(params.value.map((p) => p.key));
+  const q = pickerFilter.value.toLowerCase();
+  const groups: Record<string, ParamDef[]> = {};
+  for (const d of catalog.value) {
+    if (used.has(d.flag)) continue;
+    if (q && !d.flag.toLowerCase().includes(q) && !d.label.toLowerCase().includes(q) && !d.description.toLowerCase().includes(q)) continue;
+    if (!groups[d.category]) groups[d.category] = [];
+    groups[d.category].push(d);
+  }
+  return CATEGORY_ORDER.filter((cat) => groups[cat]?.length).map((cat) => ({
+    cat,
+    label: CATEGORY_LABELS[cat] || cat,
+    defs: groups[cat],
+  }));
+});
+
+function addCatalogParam(d: ParamDef) {
+  // Toggle params join as bare flags (enabled); everything else takes its default.
+  params.value.push(d.inputType === 'toggle' ? { key: d.flag } : { key: d.flag, value: d.default ?? '' });
+  showPicker.value = false;
+  pickerFilter.value = '';
+}
+
+function addParamRow() {
+  params.value.push({ key: '', value: '' });
+}
+
+// --- Drag to reorder (same native DnD pattern as the model-config editor) ---
+// Rows are tracked by index rather than flag, since the same flag can appear
+// more than once in a generic param list.
+const dragIndex = ref<number | null>(null);
+const dropTarget = ref<number | null>(null);
+const dragEnabledIndex = ref<number | null>(null);
+
+function onHandleMousedown(index: number) {
+  dragEnabledIndex.value = index;
+}
+function onGlobalMouseup() {
+  dragEnabledIndex.value = null;
+}
+onMounted(() => window.addEventListener('mouseup', onGlobalMouseup));
+onUnmounted(() => window.removeEventListener('mouseup', onGlobalMouseup));
+
+function onDragStart(index: number, e: DragEvent) {
+  dragIndex.value = index;
+  e.dataTransfer?.setData('text/plain', String(index));
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+}
+
+function onDragOverRow(index: number, e: DragEvent) {
+  e.preventDefault();
+  if (dragIndex.value === null || dragIndex.value === index) return;
+  dropTarget.value = index;
+}
+
+function onDragLeaveRow() {
+  dropTarget.value = null;
+}
+
+function onDropRow(targetIndex: number, e: DragEvent) {
+  e.preventDefault();
+  const from = dragIndex.value;
+  clearDragState();
+  if (from === null || from === targetIndex) return;
+  // Always insert underneath the target row (adjusted for the source removal).
+  let insertIdx = targetIndex + 1;
+  if (from < insertIdx) insertIdx -= 1;
+  const [moved] = params.value.splice(from, 1);
+  params.value.splice(insertIdx, 0, moved);
+}
+
+function onDragEnd() {
+  clearDragState();
+}
+
+function clearDragState() {
+  dragIndex.value = null;
+  dropTarget.value = null;
+  dragEnabledIndex.value = null;
+}
+
+watch(showPicker, (open) => {
+  if (open) {
+    requestAnimationFrame(() => pickerRef.value?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }));
+  }
+});
 
 // Bulk "paste args" mode: one text blob converted to rows (quote-aware server-side
 // would be nicer, but the client keeps it simple: whitespace split honoring quotes).
@@ -177,7 +422,7 @@ function applyArgsPaste() {
 
 const previewArgs = computed(() =>
   params.value
-    .filter((p) => p.key.trim())
+    .filter((p) => p.key.trim() && !p.disabled)
     .map((p) => (p.value !== undefined && p.value !== '' ? `${p.key} ${p.value}` : p.key))
     .join(' '),
 );
@@ -188,16 +433,15 @@ let snapshot = '';
 function currentState() {
   return JSON.stringify({
     form: form.value,
-    modelIds: modelIds.value,
     params: params.value,
     defName: defName.value,
     defKind: defKind.value,
-    buildPath: buildPath.value,
+    executablePath: executablePath.value,
     envRows: envRows.value,
   });
 }
 watch(
-  [form, modelIds, params, defName, defKind, buildPath, envRows],
+  [form, params, defName, defKind, executablePath, envRows],
   () => {
     dirty.value = currentState() !== snapshot;
   },
@@ -208,17 +452,17 @@ watch(
 const saving = ref(false);
 const error = ref('');
 
-function toggleModel(id: string) {
-  const next = new Set(modelIds.value);
-  if (next.has(id)) next.delete(id);
-  else next.add(id);
-  modelIds.value = [...next];
-}
-
 async function save() {
   saving.value = true;
   error.value = '';
   try {
+    // Split the single Executable field back into definition folder + binary name
+    const { folder: exeFolder, file: exeName } = splitPath(executablePath.value.trim());
+    if (!exeName) {
+      error.value = 'Executable path is required';
+      return;
+    }
+
     // 1. Persist the definition (build folder + env live there)
     const envVars: Record<string, string> = {};
     for (const row of envRows.value) {
@@ -227,11 +471,11 @@ async function save() {
     const defBody = {
       name: defName.value.trim() || def.value?.name || 'Engine',
       kind: defKind.value,
-      buildPath: buildPath.value.trim(),
+      buildPath: exeFolder,
       envVars,
     };
     let defId = form.value.definitionId;
-    if (def.value && !selectedDefIsNew.value) {
+    if (def.value) {
       const res = await fetch(`/api/engines/definitions/${def.value.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -255,18 +499,21 @@ async function save() {
       defId = (await res.json()).id;
     }
 
-    // 2. Persist the instance
+    // 2. Persist the instance. routerMode/modelConfigIds/modelPath/mmproj are
+    // intentionally not sent — the generic dialog never edits them, and the
+    // server PUT only touches the fields present in the body.
     const cleanParams = params.value
       .filter((p) => p.key.trim())
-      .map((p) => ({ key: p.key.trim(), ...(p.value !== undefined && p.value !== '' ? { value: p.value } : {}) }));
+      .map((p) => ({
+        key: p.key.trim(),
+        ...(p.value !== undefined && p.value !== '' ? { value: p.value } : {}),
+        ...(p.disabled ? { disabled: true } : {}),
+      }));
     const body = {
       ...form.value,
+      binary: exeName,
       definitionId: defId,
-      port: Number(form.value.port) || 8080,
       params: cleanParams,
-      modelConfigIds: modelIds.value,
-      modelPath: form.value.modelPath.trim(),
-      mmproj: form.value.mmproj.trim(),
     };
     const res = await fetch(`/api/engines/instances/${props.instance.id}`, {
       method: 'PUT',
@@ -317,39 +564,38 @@ snapshot = currentState();
       </div>
 
       <div class="field">
-        <label>Build / Definition</label>
-        <select v-model="form.definitionId" @change="onDefinitionChange">
-          <option v-for="d in definitions" :key="d.id" :value="d.id">{{ d.name }} ({{ ENGINE_KIND_LABELS[d.kind] }})</option>
-          <option value="__new__">+ New build definition</option>
-        </select>
-        <small>Build folder and environment variables are shared by every instance using this definition</small>
+        <label>Notes</label>
+        <textarea
+          v-model="form.notes"
+          rows="2"
+          placeholder="What this engine is for, GPU it sits on, trade-offs..."
+        ></textarea>
       </div>
 
-      <div v-if="selectedDefIsNew" class="def-block">
-        <div class="field">
-          <label>Definition Name</label>
-          <input v-model="defName" type="text" placeholder="llama-cpp-cuda" />
-        </div>
+      <!-- Tabs: launch settings vs the command that would actually run -->
+      <div class="tab-bar">
+        <button class="tab-btn" :class="{ active: activeTab === 'launch' }" @click="activeTab = 'launch'">Launch</button>
+        <button class="tab-btn" :class="{ active: activeTab === 'command' }" @click="activeTab = 'command'">Command</button>
       </div>
 
+      <template v-if="activeTab === 'launch'">
       <div class="field">
-        <label>Build Folder</label>
+        <label>Executable</label>
         <div class="path-row">
-          <input v-model="buildPath" type="text" placeholder="/path/to/build/bin" />
+          <input v-model="executablePath" type="text" placeholder="/path/to/build/bin/llama-server" />
           <button
-            v-if="kindIsLlamaCpp"
             class="btn refresh-btn"
             :disabled="checkingPath"
             @click="checkBuildPath"
-            title="Validate this path and fetch the llama.cpp version"
+            title="Validate this path and fetch the engine version when available"
           >{{ checkingPath ? '…' : '↻ Validate' }}</button>
         </div>
-        <small>Folder containing the engine executable</small>
-        <div v-if="kindIsLlamaCpp && pathValid === false" class="version-info version-invalid">
-          Invalid path — <code>llama-server</code> not found here.
+        <small>Full path to the engine executable; its folder is shared by every instance using this definition</small>
+        <div v-if="pathValid === false" class="version-info version-invalid">
+          Invalid path — no engine build found in that folder.
         </div>
-        <div v-else-if="kindIsLlamaCpp && versionInfo && (versionInfo.version || versionInfo.build)" class="version-info">
-          llama.cpp {{ versionInfo.version || '?' }} (build {{ versionInfo.build || '?' }})<template v-if="versionInfo.backend"> · {{ versionInfo.backend }}</template><template v-if="versionInfo.commit"> · {{ versionInfo.commit.slice(0, 7) }}</template>
+        <div v-else-if="versionInfo && (versionInfo.version || versionInfo.build)" class="version-info">
+          {{ versionInfo.version || '?' }} (build {{ versionInfo.build || '?' }})<template v-if="versionInfo.backend"> · {{ versionInfo.backend }}</template><template v-if="versionInfo.commit"> · {{ versionInfo.commit.slice(0, 7) }}</template>
         </div>
       </div>
 
@@ -364,64 +610,95 @@ snapshot = currentState();
         <small>e.g. <code>CUDA_VISIBLE_DEVICES=1</code></small>
       </div>
 
-      <div class="field-row">
-        <div class="field">
-          <label>Executable</label>
-          <input v-model="form.binary" type="text" placeholder="llama-server" />
-          <small>Name inside the build folder (<code>llama-server</code>, <code>llama-cli</code>, …)</small>
-        </div>
-        <div class="field">
-          <label>Host</label>
-          <input v-model="form.host" type="text" placeholder="0.0.0.0" />
-        </div>
-        <div class="field field-port">
-          <label>Port</label>
-          <input v-model.number="form.port" type="number" min="1" max="65535" />
-        </div>
-      </div>
-
-      <div class="field">
-        <label>API Key</label>
-        <input v-model="form.apiKey" type="password" placeholder="(optional)" autocomplete="off" />
-      </div>
-
-      <!-- llama.cpp specific block -->
-      <div v-if="kindIsLlamaCpp" class="kind-block">
-        <div class="kind-block-title">llama.cpp options</div>
-        <label class="check-row">
-          <input v-model="form.routerMode" type="checkbox" />
-          <span>Router mode — launch with <code>--models-preset</code> using selected model configs</span>
-        </label>
-        <div v-if="form.routerMode" class="model-checks">
-          <label v-for="m in models" :key="m.id" class="check-row">
-            <input type="checkbox" :checked="modelIds.includes(m.id)" @change="toggleModel(m.id)" />
-            <span>{{ m.alias }}</span>
-          </label>
-          <small v-if="models.length === 0">No model configs yet — create them in the Models tab.</small>
-        </div>
-        <template v-else>
-          <div class="field">
-            <label>Model Path</label>
-            <input v-model="form.modelPath" type="text" placeholder="/path/to/model.gguf" />
-          </div>
-          <div class="field">
-            <label>MMProj Path</label>
-            <input v-model="form.mmproj" type="text" placeholder="(optional) vision projector .gguf" />
-          </div>
-        </template>
-      </div>
-
-      <!-- Generic params -->
+      <!-- Parameters: grouped by the kind's catalog, ordered, on/off to include -->
       <div class="field">
         <label>Parameters</label>
-        <div v-for="(row, idx) in params" :key="idx" class="env-row">
-          <input v-model="row.key" type="text" placeholder="--flag" class="env-key" />
-          <input v-model="row.value" type="text" placeholder="value (empty = flag only)" class="env-value" />
-          <button class="remove-btn" @click="removeParamRow(idx)" title="Remove">&times;</button>
+        <div v-for="group in groupedParams" :key="group.cat" class="param-group">
+          <h4 class="group-title" :class="{ 'group-unknown': group.cat === 'unknown' }">{{ group.label }}</h4>
+          <div
+            v-for="row in group.rows"
+            :key="row.index"
+            class="param-row"
+            :class="{ 'param-disabled': row.param.disabled, dragging: dragIndex === row.index, 'drop-after': dropTarget === row.index && dragIndex !== null }"
+            :draggable="dragEnabledIndex === row.index"
+            @dragstart="onDragStart(row.index, $event)"
+            @dragover="onDragOverRow(row.index, $event)"
+            @dragleave="onDragLeaveRow()"
+            @drop="onDropRow(row.index, $event)"
+            @dragend="onDragEnd()"
+          >
+            <span class="drag-handle" title="Drag to reorder" @mousedown="onHandleMousedown(row.index)">&#8942;</span>
+            <span class="param-flag" :title="row.def?.description || ''">{{ row.param.key }}</span>
+            <!-- Catalog toggle params: presence on/off -->
+            <label v-if="row.def && row.def.inputType === 'toggle'" class="toggle-wrap">
+              <input type="checkbox" :checked="isToggleOn(row.param)" @change="toggleParam(row.param)" />
+              <span>{{ isToggleOn(row.param) ? 'on' : 'off' }}</span>
+            </label>
+            <!-- Catalogued value params -->
+            <select v-else-if="row.def?.inputType === 'select'" v-model="row.param.value">
+              <option value="">(none)</option>
+              <option v-for="opt in row.def?.options" :key="opt" :value="opt">{{ opt }}</option>
+            </select>
+            <input
+              v-else-if="row.def?.inputType === 'number'"
+              v-model="row.param.value"
+              type="number"
+              step="any"
+              :placeholder="row.def?.default || ''"
+            />
+            <input
+              v-else-if="row.def?.inputType === 'path'"
+              v-model="row.param.value"
+              type="text"
+              placeholder="/path/to/file"
+            />
+            <template v-else-if="row.def?.inputType === 'preset'">
+              <input v-model="row.param.value" type="text" :placeholder="row.def?.default || ''" />
+              <select
+                v-if="row.def?.presets?.length"
+                class="preset-select"
+                :value="row.def?.presets?.includes(row.param.value ?? '') ? row.param.value : ''"
+                @change="(e: Event) => { const v = (e.target as HTMLSelectElement).value; if (v) row.param.value = v; }"
+                title="Quick presets"
+              >
+                <option value="">preset…</option>
+                <option v-for="p in row.def?.presets" :key="p" :value="p">{{ p }}</option>
+              </select>
+            </template>
+            <input
+              v-else
+              v-model="row.param.value"
+              type="text"
+              :placeholder="row.def ? (row.def.inputType === 'comma-list' ? 'e.g. CUDA0,CUDA1' : row.def.default || '') : 'value (empty = flag only)'"
+            />
+            <span class="param-desc" :title="row.def?.description || 'Not in this parameter catalog'">{{ row.def?.description || 'custom flag' }}</span>
+            <button
+              v-if="!row.def || row.def.inputType !== 'toggle'"
+              class="toggle-enabled-btn"
+              :class="{ 'is-disabled': row.param.disabled }"
+              @click="row.param.disabled = !row.param.disabled"
+              :title="row.param.disabled ? 'Include in the launch' : 'Exclude from the launch'"
+            >{{ row.param.disabled ? 'off' : 'on' }}</button>
+            <button class="remove-btn" @click="removeParamRow(row.index)" title="Remove">&times;</button>
+          </div>
         </div>
         <div class="params-actions">
-          <button class="add-env-btn" @click="addParamRow">+ Add Parameter</button>
+          <button class="add-env-btn" @click="showPicker = !showPicker">+ Add Parameter</button>
+          <button class="add-env-btn" @click="addParamRow">+ Custom Flag</button>
           <button class="add-env-btn" @click="showArgsPaste = !showArgsPaste">Paste args…</button>
+        </div>
+        <div v-if="showPicker" ref="pickerRef" class="param-picker">
+          <input v-model="pickerFilter" type="text" placeholder="Search parameters..." autofocus />
+          <div class="picker-list">
+            <div v-for="group in pickerGroups" :key="group.cat" class="picker-group">
+              <h5>{{ group.label }}</h5>
+              <div v-for="d in group.defs" :key="d.flag" class="picker-item" @click="addCatalogParam(d)">
+                <span class="picker-flag">{{ d.flag }}</span>
+                <span class="picker-desc">{{ d.description }}</span>
+              </div>
+            </div>
+            <div v-if="!pickerGroups.length" class="picker-empty">No matching parameters</div>
+          </div>
         </div>
         <div v-if="showArgsPaste" class="args-paste">
           <textarea
@@ -433,6 +710,27 @@ snapshot = currentState();
         </div>
         <small v-if="previewArgs" class="params-preview">→ <code>{{ previewArgs }}</code></small>
       </div>
+      </template>
+
+      <!-- Composed command line (same driver path a real launch uses) -->
+      <template v-else>
+        <div class="preview-panel">
+          <div class="preview-header">
+            <span class="preview-label">Command line</span>
+            <button class="btn" :disabled="!commandText" @click="copyCommand">
+              {{ copiedCommand ? '✓ Copied' : 'Copy' }}
+            </button>
+          </div>
+          <div v-if="commandError" class="version-info version-invalid">{{ commandError }}</div>
+          <pre v-else class="preview-code command-cmd">{{ commandLoading ? 'Composing…' : commandText || 'Nothing to run yet.' }}</pre>
+          <small v-if="command && !command.exists" class="version-info version-invalid">
+            The executable does not exist at that path — this command would fail to start.
+          </small>
+          <small v-if="command" class="preview-hint">
+            Working directory <code>{{ command.cwd || '(not set)' }}</code> · generated by the engine's driver, so it matches the actual launch
+          </small>
+        </div>
+      </template>
     </div>
 
     <template #footer>
@@ -483,7 +781,8 @@ snapshot = currentState();
 }
 
 .field input,
-.field select {
+.field select,
+.field textarea {
   background: #0d1117;
   border: 1px solid #30363d;
   border-radius: 4px;
@@ -493,8 +792,13 @@ snapshot = currentState();
   font-family: inherit;
 }
 
+.field textarea {
+  resize: vertical;
+}
+
 .field input:focus,
-.field select:focus { outline: none; border-color: #58a6ff; }
+.field select:focus,
+.field textarea:focus { outline: none; border-color: #58a6ff; }
 
 .field-row {
   display: flex;
@@ -509,31 +813,6 @@ snapshot = currentState();
   width: 180px;
   flex-shrink: 0;
   flex-grow: 0 !important;
-}
-
-.field-port {
-  width: 110px;
-  flex-shrink: 0;
-  flex-grow: 0 !important;
-}
-
-.def-block,
-.kind-block {
-  border: 1px solid #30363d;
-  border-radius: 6px;
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  background: #0d111766;
-}
-
-.kind-block-title {
-  font-size: 0.72rem;
-  font-weight: 600;
-  color: #58a6ff;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .version-info {
@@ -649,28 +928,6 @@ snapshot = currentState();
   margin-top: 4px;
 }
 
-.check-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.8rem;
-  color: #e1e4e8;
-  cursor: pointer;
-}
-
-.check-row code {
-  font-family: 'Cascadia Code', monospace;
-  color: #79c0ff;
-  font-size: 0.75rem;
-}
-
-.model-checks {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding-left: 4px;
-}
-
 .btn {
   padding: 6px 14px;
   border-radius: 4px;
@@ -685,4 +942,249 @@ snapshot = currentState();
 
 .btn-primary { background: #238636; border-color: #238636; color: white; }
 .btn-primary:hover:not(:disabled) { background: #2ea043; }
+
+/* Tabs — same look as the model config editor */
+.tab-bar {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid #30363d;
+}
+
+.tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 14px;
+  color: #8b949e;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.tab-btn:hover { color: #e1e4e8; }
+.tab-btn.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+
+/* Command tab */
+.preview-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.preview-label {
+  font-size: 0.72rem;
+  color: #8b949e;
+  font-weight: 500;
+}
+
+.preview-code {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 12px;
+  margin: 0;
+  font-family: 'Cascadia Code', monospace;
+  font-size: 0.78rem;
+  line-height: 1.6;
+  color: #e1e4e8;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  min-height: 180px;
+}
+
+.command-cmd {
+  color: #7ee787;
+}
+
+.preview-hint {
+  font-size: 0.65rem;
+  color: #484f58;
+}
+
+.preview-hint code {
+  font-family: 'Cascadia Code', monospace;
+  color: #79c0ff;
+}
+
+/* Grouped parameter rows */
+.param-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.group-title {
+  font-size: 0.7rem;
+  color: #58a6ff;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 4px 0 0;
+}
+
+.group-unknown { color: #d29922; }
+
+.param-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: #0d1117;
+  border: 1px solid #21262d;
+}
+
+.param-row:hover { border-color: #30363d; }
+.param-row.dragging { opacity: 0.4; }
+.param-row.drop-after { box-shadow: 0 2px 0 0 #58a6ff; }
+.param-row.param-disabled { opacity: 0.5; }
+.param-row.param-disabled .param-flag { text-decoration: line-through; color: #484f58; }
+
+.drag-handle {
+  color: #484f58;
+  cursor: grab;
+  font-size: 0.8rem;
+  user-select: none;
+}
+
+.drag-handle:active { cursor: grabbing; }
+
+.param-flag {
+  font-family: 'Cascadia Code', monospace;
+  font-size: 0.72rem;
+  color: #79c0ff;
+  min-width: 150px;
+}
+
+.param-row input,
+.param-row select {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 3px;
+  padding: 4px 8px;
+  color: #e1e4e8;
+  font-size: 0.78rem;
+  flex: 1;
+  min-width: 60px;
+}
+
+.param-row input:focus,
+.param-row select:focus { outline: none; border-color: #58a6ff; }
+
+.preset-select {
+  flex: 0 0 auto;
+  min-width: 74px;
+  background: #0d1117;
+  color: #8b949e;
+}
+
+.toggle-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: #8b949e;
+  flex: 1;
+}
+
+.param-desc {
+  font-size: 0.65rem;
+  color: #484f58;
+  flex: 0 0 150px;
+  width: 150px;
+  margin-left: auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toggle-enabled-btn {
+  flex: 0 0 auto;
+  background: none;
+  border: 1px solid #30363d;
+  border-radius: 3px;
+  color: #3fb950;
+  font-size: 0.62rem;
+  padding: 1px 5px;
+  cursor: pointer;
+  text-transform: uppercase;
+}
+
+.toggle-enabled-btn:hover { background: #23863633; }
+
+.toggle-enabled-btn.is-disabled {
+  color: #f85149;
+  border-color: #da3633;
+}
+
+.toggle-enabled-btn.is-disabled:hover { background: #da363333; }
+
+/* Add-parameter picker */
+.param-picker {
+  margin-top: 6px;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.param-picker input {
+  width: 100%;
+  background: #0d1117;
+  border: none;
+  border-bottom: 1px solid #30363d;
+  padding: 8px 12px;
+  color: #e1e4e8;
+  font-size: 0.82rem;
+}
+
+.param-picker input:focus { outline: none; }
+
+.picker-list {
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.picker-group h5 {
+  font-size: 0.65rem;
+  color: #8b949e;
+  text-transform: uppercase;
+  padding: 6px 12px 2px;
+  position: sticky;
+  top: 0;
+  background: #161b22;
+}
+
+.picker-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 12px;
+  cursor: pointer;
+}
+
+.picker-item:hover { background: #21262d; }
+
+.picker-flag {
+  font-family: 'Cascadia Code', monospace;
+  font-size: 0.72rem;
+  color: #79c0ff;
+  min-width: 150px;
+}
+
+.picker-desc {
+  font-size: 0.7rem;
+  color: #8b949e;
+}
+
+.picker-empty {
+  padding: 12px;
+  text-align: center;
+  color: #484f58;
+  font-size: 0.8rem;
+}
 </style>

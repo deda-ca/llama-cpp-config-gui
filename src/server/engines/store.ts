@@ -13,6 +13,7 @@ import path from 'path';
 import { configDir } from '../config.js';
 import type { LlamaConfig } from '../types.js';
 import { splitArgs, tokensToParams } from './args.js';
+import { loadTemplate } from './template.js';
 import {
   EMPTY_ENGINES,
   defaultBinaryForKind,
@@ -55,7 +56,10 @@ export function normalizeEngineParams(raw: unknown): EngineParam[] {
     const key = (p as EngineParam).key;
     if (typeof key !== 'string' || !key.trim()) continue;
     const value = (p as EngineParam).value;
-    out.push(typeof value === 'string' ? { key: key.trim(), value } : { key: key.trim() });
+    const param: EngineParam =
+      typeof value === 'string' ? { key: key.trim(), value } : { key: key.trim() };
+    if ((p as EngineParam).disabled === true) param.disabled = true;
+    out.push(param);
   }
   return out;
 }
@@ -73,20 +77,76 @@ function normalizeDefinition(raw: unknown, index: number): EngineDefinition | nu
   };
 }
 
+/** Value of an *enabled* param key (first match), or undefined when absent.
+ * Disabled rows are stored but never reach the command line, so they must not
+ * count for port allocation or launch spec fields either. */
+export function paramValue(params: EngineParam[], key: string): string | undefined {
+  return params.find((p) => p.key === key && !p.disabled)?.value;
+}
+
+/**
+ * Alternate spellings of a long flag as accepted by the llama.cpp CLI, so a
+ * param written as `-c` is still found when looking up `--ctx-size`. Mirrors
+ * the short options `buildLlamaArgs` itself emits.
+ */
+const PARAM_FLAG_ALIASES: Record<string, string[]> = {
+  '--ctx-size': ['-c'],
+  '--n-gpu-layers': ['-ngl'],
+  '--batch-size': ['-b'],
+  '--ubatch-size': ['-ub'],
+  '--threads': ['-t'],
+  '--threads-shared': ['-ts'],
+  '--port': ['-p'],
+};
+
+/** All spellings to try for a flag: the flag itself then its short aliases. */
+export function paramFlagAliases(flag: string): string[] {
+  return [flag, ...(PARAM_FLAG_ALIASES[flag] ?? [])];
+}
+
+/** Value of a flag under any of its accepted spellings. */
+export function paramValueAny(params: EngineParam[], flag: string): string | undefined {
+  for (const key of paramFlagAliases(flag)) {
+    const value = paramValue(params, key);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+/** Port an instance listens on, read from its --port/-p param (null = unset). */
+export function instancePort(params: EngineParam[]): number | null {
+  const raw = paramValueAny(params, '--port');
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 && n <= 65535 ? n : null;
+}
+
 function normalizeInstance(raw: unknown, index: number): EngineInstance | null {
-  const i = (raw ?? {}) as Partial<EngineInstance>;
+  const i = (raw ?? {}) as Partial<EngineInstance> & {
+    host?: unknown; port?: unknown; apiKey?: unknown;
+  };
   if (!i || typeof i !== 'object') return null;
   const id = typeof i.id === 'string' && i.id ? i.id : `inst-${index}`;
-  const port = typeof i.port === 'number' && Number.isFinite(i.port) ? i.port : 8080;
+  const params = normalizeEngineParams(i.params);
+  // engines.json written before host/port/apiKey became plain params: fold the
+  // old fields in (unless a param already names the flag) so launches keep the
+  // same flags after the upgrade.
+  const legacyField = (key: string, value: unknown): void => {
+    const flag = `--${key}`;
+    if (typeof value !== 'string' || !value || params.some((p) => p.key === flag)) return;
+    params.push({ key: flag, value });
+  };
+  legacyField('host', i.host);
+  if (typeof i.port === 'number' && Number.isFinite(i.port) && !params.some((p) => p.key === '--port')) {
+    params.push({ key: '--port', value: String(i.port) });
+  }
+  legacyField('api-key', i.apiKey);
   return {
     id,
     name: typeof i.name === 'string' && i.name ? i.name : id,
+    notes: typeof i.notes === 'string' ? i.notes : '',
     definitionId: typeof i.definitionId === 'string' ? i.definitionId : 'default',
     binary: typeof i.binary === 'string' && i.binary ? i.binary : 'llama-server',
-    host: typeof i.host === 'string' && i.host ? i.host : '127.0.0.1',
-    port,
-    apiKey: typeof i.apiKey === 'string' ? i.apiKey : '',
-    params: normalizeEngineParams(i.params),
+    params,
     routerMode: !!i.routerMode,
     modelConfigIds: Array.isArray(i.modelConfigIds)
       ? i.modelConfigIds.filter((x): x is string => typeof x === 'string')
@@ -163,15 +223,27 @@ export function migrateLegacyConfig(legacy: LlamaConfig): EnginesFile | null {
     envVars: normalizeEnvVars(legacy.envVars),
   };
 
+  const params = tokensToParams(splitArgs(legacy.extraArgs || ''));
+  // host/port/api-key are ordinary launch params now — migrate them to the
+  // front of the ordered list instead of dedicated fields.
+  const prefix: EngineParam[] = [];
+  if (legacy.host && !params.some((p) => p.key === '--host')) {
+    prefix.push({ key: '--host', value: legacy.host });
+  }
+  if (legacy.port && !params.some((p) => p.key === '--port')) {
+    prefix.push({ key: '--port', value: String(legacy.port) });
+  }
+  if (legacy.apiKey && !params.some((p) => p.key === '--api-key')) {
+    prefix.push({ key: '--api-key', value: legacy.apiKey });
+  }
+
   const instance: EngineInstance = {
     id: 'default',
     name: 'default',
+    notes: '',
     definitionId: 'default',
     binary: legacy.binary || 'llama-server',
-    host: legacy.host || '127.0.0.1',
-    port: legacy.port || 8080,
-    apiKey: legacy.apiKey || '',
-    params: tokensToParams(splitArgs(legacy.extraArgs || '')),
+    params: [...prefix, ...params],
     routerMode: false,
     modelConfigIds: [],
     ...(legacy.modelPath ? { modelPath: legacy.modelPath } : {}),
@@ -183,28 +255,34 @@ export function migrateLegacyConfig(legacy: LlamaConfig): EnginesFile | null {
 
 /** True when `port` is used by another instance (optionally excluding one). */
 export function isPortTaken(data: EnginesFile, port: number, excludeInstanceId?: string): boolean {
-  return data.instances.some((i) => i.port === port && i.id !== excludeInstanceId);
+  return data.instances.some((i) => instancePort(i.params) === port && i.id !== excludeInstanceId);
 }
 
 /** First free port at or after `base`, avoiding all instances plus `reserved`. */
 export function findFreePort(data: EnginesFile, base: number, reserved: number[] = []): number {
   let port = base;
-  const taken = new Set([...data.instances.map((i) => i.port), ...reserved]);
+  const taken = new Set([
+    ...data.instances.map((i) => instancePort(i.params)).filter((p): p is number => p !== null),
+    ...reserved,
+  ]);
   while (taken.has(port)) port++;
   return port;
 }
 
 /** Convenience for creating a blank instance bound to a definition. */
 export function blankInstance(name: string, def: EngineDefinition, existing: EnginesFile): EngineInstance {
+  // New instances start from the kind's parameter template; the --port row is
+  // nudged to a free port so parallel instances don't collide.
+  const params = loadTemplate(def.kind);
+  const portRow = params.find((p) => p.key === '--port' || p.key === '-p');
+  if (portRow) portRow.value = String(findFreePort(existing, instancePort(params) ?? 8080));
   return {
     id: makeEngineId(name, existing.instances),
     name,
+    notes: '',
     definitionId: def.id,
     binary: defaultBinaryForKind(def.kind),
-    host: '127.0.0.1',
-    port: findFreePort(existing, 8080),
-    apiKey: '',
-    params: [],
+    params,
     routerMode: false,
     modelConfigIds: [],
   };

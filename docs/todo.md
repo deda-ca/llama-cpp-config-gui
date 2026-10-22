@@ -459,6 +459,69 @@ reads `params.<kind>.json` when present (llama.cpp keeps `params.json`; other
 kinds fall back to it until their own catalog exists). `/api/version/check` and
 `/api/engines/definitions/:id/version` now probe through the kind's driver.
 
+### Phase 3.5 — engine = generic spawner (UI refinement) ✅
+The engine model dropped its special-cased fields: `EngineInstance` is now
+**executable + env vars + ordered params** only — `host`, `port` and `apiKey`
+were removed and are ordinary `--host` / `--port` / `--api-key` params, so no
+kind gets preferential treatment.
+- **Editor:** the Host/Port/API Key inputs are gone; the params list is the only
+  place they exist (the single full-path **Executable** field from the previous
+  step stays, splitting into definition `buildPath` + instance `binary`).
+- **Templates:** `GET/PUT /api/engines/templates/:kind` read/write
+  `.config/params.<kind>.template.json` (`params.template.json` for llama.cpp,
+  same convention as the param catalogs). A template is an ordered `EngineParam[]`
+  auto-filled when a new instance is created; the llama.cpp seed is
+  `--host/--port/--api-key` + a curated slice of the params catalog defaults,
+  other kinds start empty. `blankInstance()` nudges the template `--port` to a
+  free port.
+- **Launch:** `instanceToLlamaConfig()` reads host/port/api-key back out of the
+  params into the legacy spec fields (Models tab + `/api/launch` unchanged), and
+  `buildLlamaArgs()` skips its own injection when `extraArgs` already names the
+  flag — each flag appears exactly once, including in router mode.
+- **Port checks** (`isPortTaken`/`findFreePort`/instance CRUD 409) and the
+  Engines list `:port` column read the `--port`/`-p` param (`instancePort()`).
+- **Migration:** `normalizeInstance()` folds pre-upgrade `host`/`port`/`apiKey`
+  fields from an existing `engines.json` into params (existing params win);
+  `migrateLegacyConfig()` prefixes them instead of setting fields.
+- **Fully generic dialog:** the configure dialog is now just name + kind +
+  executable + env vars + params — the "llama.cpp options" block (router mode,
+  model/mmproj paths) and the Build/Definition dropdown are gone from the UI
+  (model selection stays on the Models tab; definition switching deferred).
+  Path validation runs for every kind (kinds without a probe report folder
+  existence). `routerMode`/`modelConfigIds`/`modelPath`/`mmproj` stay on the
+  instance — the PUT only touches fields present in the body.
+- **Notes + Command tab:** instances carry a free-form `notes` string shown under
+  the name in the dialog (and copied by Duplicate). The dialog body is split into
+  **Launch** (executable/env/params) and **Command** tabs; the latter shows the
+  exact command line a launch would run — env assignments, the resolved binary
+  path and the driver-built args, one flag/value pair per line with `\`
+  continuations, styled like the model config Export tab. `POST /api/engines/command`
+  composes it from the *draft* in the dialog through the same driver path as a
+  real launch, and flags a missing executable.
+- **Catalog-driven parameter editor:** the params section borrows the model
+  config editor wholesale. Each engine kind's catalog
+  (`GET /api/params?kind=` → `.config/params.<kind>.json`, llama.cpp =
+  `params.json`) supplies grouping, descriptions, input types (number/select/
+  path/preset/comma-list), dropdown options and defaults. Rows render grouped by
+  category in the instance's own order, are drag-reorderable (handle-based
+  native DnD), and value rows get an **on/off** include toggle backed by a new
+  optional `disabled` flag on `EngineParam` — a disabled row stays in the config
+  but is excluded from the launch (`paramsToArgs`), the launch spec fields and
+  port allocation (`paramValue`/`instancePort`), and the Engines list port
+  column. Flags not in the catalog land in an **Unknown** group with plain
+  value inputs; "+ Add Parameter" opens a searchable catalog picker (already
+  added flags hidden), "+ Custom Flag" and "Paste args…" keep the free-form
+  escape hatches.
+- **No hidden launch args:** engine instances launch strictly from their
+  parameter list. `instanceToLlamaConfig` marks the spec `paramsOnly`, and
+  `buildLlamaArgs` then emits only the model selection (`-m`/`--mmproj`) or the
+  router preset plus the instance's own params — the old unconditional
+  `-c 4096 -ngl 99 -b 512 -ub 512` and the `--host`/`--port`/`--api-key`
+  fallbacks are skipped, so the Command tab and the real spawn agree exactly.
+  Legacy `POST /api/launch` (settings.json) leaves the flag unset and keeps the
+  default injection. `paramValueAny`/`paramFlagAliases` resolve a flag under
+  any accepted spelling (`--port`/`-p`, `--ctx-size`/`-c`, …) for port lookup.
+
 ### Phase 4 — real non-llama kinds
 audio.cpp, stable-diffusion.cpp, strata drivers + auto-registration as proxy backends.
 Blocked on the proxy Phase 0 spike (fixtures for their HTTP APIs).
