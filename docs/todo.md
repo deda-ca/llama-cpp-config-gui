@@ -540,9 +540,11 @@ binary + `strata generate` flags, the `serve/server.py` HTTP options, and an
 optional `vision` encoder, so it is **self-contained** (no shared definition).
 - **Data model:** `EngineInstance` gained a self-describing `kind` (a `''` value
   falls back to the definition's kind, so existing files keep working) and
-  `autoLaunch` on **every** kind. A `StrataConfig` block (`exe`/`cwd`/`tokenizer`/
-  `modelName` + `engineArgs[]` / `serverArgs[]` / `vision` / `extra`) lives on the
-  instance in `engines.json`; several strata configs can run side by side.
+  `autoLaunch` on **every** kind. A `StrataConfig` block (`engineArgs[]` /
+  `serverArgs[]` / `vision` / `extra`) lives on the instance in `engines.json`;
+  several strata configs can run side by side. The deployment keys (`exe`, `cwd`,
+  `tokenizer`, `model_name`) are ordinary `serverArgs` rows keyed by their config
+  name — `serve/server.py` reads them straight from the config, not from flags.
 - **Mapping** (`engines/strata.ts`): lossless import/export of the real file shape.
   Unknown keys (`gpus_asked`, `gpu_order`, `layer_split`, `lib_dirs`, `log`,
   `sampling`, …) ride in `extra` untouched, so import → export is byte-equivalent
@@ -563,9 +565,10 @@ optional `vision` encoder, so it is **self-contained** (no shared definition).
   option catalog), and `kind`/`autoLaunch`/`strata` on instance POST/PUT.
 - **UI:** `+ New Engine` is now a **kind dropdown** (`llama.cpp` / `strata` /
   custom); picking a kind fetches a draft and opens the matching dialog, and
-  nothing is written until Save. `StrataEditor.vue` edits basics + Engine/Server/
-  Vision tabs, an **Other Keys** raw-JSON tab for `extra`, Import/Export of the
-  strata file, and a Command preview. `ui/ParamRows.vue` is the shared
+  nothing is written until Save. `StrataEditor.vue` edits basics + Server (first
+  tab, deployment rows included) / Engine / Vision tabs, an **Other Keys** raw-JSON
+  tab for `extra`, Import/Export of the strata file, and a Command preview.
+  `ui/ParamRows.vue` is the shared
   catalog-driven row editor (grouping, add-from-catalog, custom flag, paste args,
   drag-reorder, on/off toggle) reused by both editors.
 - **Tests:** `strata.test.ts` (mapping round-trip + driver) and a `Strata Engine

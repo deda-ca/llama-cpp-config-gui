@@ -301,40 +301,55 @@ function clearDrag() {
   align-items: center;
   gap: 6px;
   margin-bottom: 4px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: #0d1117;
+  border: 1px solid #21262d;
 }
 
+.param-row:hover { border-color: #30363d; }
 .param-row.dragging { opacity: 0.4; }
 .param-row.drop-after { box-shadow: 0 2px 0 0 #58a6ff; }
-.param-disabled .param-flag,
-.param-disabled .param-desc { opacity: 0.45; text-decoration: line-through; }
+.param-disabled { opacity: 0.5; }
+.param-disabled .param-flag {
+  text-decoration: line-through;
+  color: #484f58;
+}
+.param-disabled .param-desc { opacity: 0.45; }
 
 .drag-handle {
   color: #484f58;
   cursor: grab;
-  font-size: 0.9rem;
+  font-size: 0.8rem;
   width: 12px;
   text-align: center;
+  user-select: none;
 }
+
+.drag-handle:active { cursor: grabbing; }
 
 .param-flag {
   font-family: 'Cascadia Code', monospace;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   color: #79c0ff;
-  min-width: 150px;
+  min-width: 140px;
   flex-shrink: 0;
 }
 
 .param-row input,
 .param-row select {
-  background: #0d1117;
+  background: #161b22;
   border: 1px solid #30363d;
-  border-radius: 4px;
-  padding: 5px 8px;
+  border-radius: 3px;
+  padding: 4px 8px;
   color: #e1e4e8;
   font-size: 0.78rem;
   font-family: inherit;
-  min-width: 0;
+  min-width: 60px;
 }
+
+.param-row input:focus,
+.param-row select:focus { outline: none; border-color: #58a6ff; }
 
 .param-row input[type='text'] { flex: 1; }
 .preset-select { width: 90px; flex-shrink: 0; }
@@ -348,26 +363,36 @@ function clearDrag() {
 }
 
 .param-desc {
-  font-size: 0.68rem;
+  font-size: 0.65rem;
   color: #484f58;
-  flex: 1;
+  flex: 0 0 160px;
+  width: 160px;
+  margin-left: auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 260px;
 }
 
 .toggle-enabled-btn {
   background: none;
   border: 1px solid #30363d;
-  border-radius: 4px;
+  border-radius: 3px;
   color: #3fb950;
-  font-size: 0.68rem;
-  padding: 3px 7px;
+  font-size: 0.62rem;
+  padding: 1px 5px;
   cursor: pointer;
+  text-transform: uppercase;
+  flex: 0 0 auto;
 }
 
-.toggle-enabled-btn.is-disabled { color: #8b949e; background: #21262d; }
+.toggle-enabled-btn:hover { background: #23863633; }
+
+.toggle-enabled-btn.is-disabled {
+  color: #f85149;
+  border-color: #da3633;
+}
+
+.toggle-enabled-btn.is-disabled:hover { background: #da363333; }
 
 .remove-btn {
   background: none;
@@ -376,6 +401,7 @@ function clearDrag() {
   font-size: 1rem;
   cursor: pointer;
   padding: 0 4px;
+  flex: 0 0 auto;
 }
 
 .remove-btn:hover { color: #f85149; }

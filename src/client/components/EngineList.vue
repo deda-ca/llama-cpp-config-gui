@@ -229,6 +229,12 @@ function definitionOf(inst: EngineInstance): EngineDefinition | undefined {
   return definitions.value.find((d) => d.id === inst.definitionId);
 }
 
+// The strata deployment keys (exe, cwd, …) are ordinary server rows now.
+function deploymentOf(inst: EngineInstance, key: string): string {
+  const row = inst.strata?.serverArgs.find((p) => p.key === key && !p.disabled);
+  return row?.value?.trim() ?? '';
+}
+
 function modelNames(inst: EngineInstance): string {
   return inst.modelConfigIds
     .map((id) => models.value.find((m) => m.id === id)?.alias ?? id)
@@ -310,7 +316,7 @@ onUnmounted(() => es?.close());
           </div>
           <div v-if="inst.strata" class="drawer-section">
             <span class="drawer-label">Strata</span>
-            <code>{{ inst.strata.exe || '(no engine exe)' }} · cwd {{ inst.strata.cwd || '(not set)' }}</code>
+            <code>{{ deploymentOf(inst, 'exe') || '(no engine exe)' }} · cwd {{ deploymentOf(inst, 'cwd') || '(not set)' }}</code>
           </div>
           <div v-if="inst.params.length" class="drawer-section">
             <span class="drawer-label">Params</span>

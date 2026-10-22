@@ -51,8 +51,22 @@ const SERVER_KEY_ALIASES: Record<string, string> = {
   '--owner-fd': 'owner_fd',
 };
 
-/** Config keys that are engine-owned (never server options). */
-const ENGINE_KEYS = new Set(['exe', 'args', 'cwd', 'tokenizer', 'model_name', 'vision']);
+/**
+ * Top-level config keys that are structural, not editable rows: `args` becomes
+ * the Engine tab's row list and `vision` its own section, so neither appears as
+ * a server row.
+ */
+const STRUCTURAL_KEYS = new Set(['args', 'vision']);
+
+/**
+ * Top-level deployment keys the Server tab edits as ordinary key/value rows.
+ * `serve/server.py` reads each straight from the config (`cfg.get("cwd")`,
+ * `cfg.get("exe")`, `cfg["tokenizer"]`, `cfg.get("model_name")`), never from a
+ * CLI flag of the same name, so a row's name is the config key verbatim — the
+ * same rule the vision rows follow. (`--tokenizer` is a CLI flag, but the
+ * config key overrides it, so the key — not the flag — is what the row writes.)
+ */
+export const DEPLOYMENT_KEYS = new Set(['exe', 'cwd', 'tokenizer', 'model_name']);
 
 /**
  * Top-level config keys that `serve/server.py` reads as its own options — the
@@ -63,7 +77,7 @@ const ENGINE_KEYS = new Set(['exe', 'args', 'cwd', 'tokenizer', 'model_name', 'v
  */
 export const SERVER_CONFIG_KEYS = new Set([
   'host', 'port', 'api_key', 'no_api_key', 'offline', 'open_browser', 'gpu',
-  'tokenizer', 'parallel', 'batch_groups', 'max_queue', 'queue_timeout',
+  'parallel', 'batch_groups', 'max_queue', 'queue_timeout',
   'shutdown_timeout', 'replicas', 'lazy_load', 'idle_unload_s',
   'min_free_vram_mib', 'before_load', 'before_load_timeout_s',
   'before_load_strict', 'before_load_ignore_failure', 'slot_save_path',
@@ -74,6 +88,8 @@ export const SERVER_CONFIG_KEYS = new Set([
 
 /** Flag for a server config key, preferring the documented spelling. */
 export function serverFlagFor(key: string): string {
+  // Deployment keys have no flag spelling — the row name IS the config key.
+  if (DEPLOYMENT_KEYS.has(key)) return key;
   const entry = Object.entries(SERVER_KEY_ALIASES).find(([, k]) => k === key);
   if (entry) return entry[0];
   return `--${key.replace(/_/g, '-')}`;
@@ -81,6 +97,8 @@ export function serverFlagFor(key: string): string {
 
 /** Config key a server param writes, and whether it is a negated flag. */
 function serverKeyOf(param: EngineParam): { key: string; negated: boolean } {
+  // A deployment row is keyed by its config key verbatim (no leading dashes).
+  if (DEPLOYMENT_KEYS.has(param.key)) return { key: param.key, negated: false };
   const alias = SERVER_KEY_ALIASES[param.key];
   const negated = param.key.startsWith('--no-');
   return { key: alias ?? param.key.replace(/^--/, '').replace(/-/g, '_'), negated };
@@ -97,6 +115,9 @@ export function serverParamsToConfig(params: EngineParam[]): Record<string, unkn
     if (p.disabled) continue;
     const { key, negated } = serverKeyOf(p);
     if (p.value === undefined || p.value === '') {
+      // A deployment row holds a path or a name: an empty one means "not set",
+      // not a boolean flag, so it is left out of the file entirely.
+      if (DEPLOYMENT_KEYS.has(key)) continue;
       out[key] = !negated;
       continue;
     }
@@ -109,7 +130,8 @@ export function serverParamsToConfig(params: EngineParam[]): Record<string, unkn
 export function configToServerParams(cfg: Record<string, unknown>): EngineParam[] {
   const out: EngineParam[] = [];
   for (const [key, value] of Object.entries(cfg)) {
-    if (ENGINE_KEYS.has(key) || !SERVER_CONFIG_KEYS.has(key)) continue;
+    if (STRUCTURAL_KEYS.has(key)) continue;
+    if (!SERVER_CONFIG_KEYS.has(key) && !DEPLOYMENT_KEYS.has(key)) continue;
     const flag = serverFlagFor(key);
     if (typeof value === 'boolean') {
       // A false boolean is a disabled option: keep the row visible but off.
@@ -189,34 +211,48 @@ export function paramsToArgv(params: EngineParam[]): string[] {
 }
 
 /**
- * Normalize a raw vision object, preserving unknown keys in `extra`.
- * Accepts both the config-file spelling (`max_tokens`) and the stored
- * StrataConfig spelling (`maxTokens`), since it runs on imported files and on
- * values read back from engines.json.
+ * Vision rows -> the config's `vision` object. These keys are config keys, not
+ * flags, so a row name is used verbatim and its value keeps its JSON type. A
+ * disabled row omits the key; a row explicitly holding `false` re-emits
+ * `false`, because the server distinguishes `"gpu": false` from a missing gpu
+ * when it builds the encoder command line.
  */
+export function visionParamsToConfig(params: EngineParam[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const p of params) {
+    const key = p.key.trim();
+    if (!key) continue;
+    if (p.value === undefined || p.value === '') {
+      if (p.disabled) continue;
+      out[key] = true;
+      continue;
+    }
+    out[key] = parseConfigValue(p.value);
+  }
+  return out;
+}
+
+/**
+ * Normalize a vision block. The stored form is `{ args: EngineParam[] }`; a
+ * pre-upgrade engines.json (or a raw config section) holding named keys is
+ * folded into rows, so old files keep loading unchanged. `maxTokens` was the
+ * old stored spelling of the `max_tokens` config key, so it is renamed back.
+ */
+const LEGACY_VISION_KEYS: Record<string, string> = { maxTokens: 'max_tokens' };
+
 export function normalizeVision(raw: unknown): StrataVisionConfig | null {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const v = raw as Record<string, unknown>;
-  const known = new Set(['exe', 'mmproj', 'model', 'gpu', 'max_tokens', 'maxTokens', 'extra']);
-  const extra: Record<string, unknown> = {};
-  for (const [k, val] of Object.entries(v)) if (!known.has(k)) extra[k] = val;
-  // A stored StrataVisionConfig carries its preserved keys under `extra`; fold
-  // them back in so re-normalizing an already-normalized block is idempotent.
-  if (v.extra && typeof v.extra === 'object' && !Array.isArray(v.extra)) {
-    Object.assign(extra, v.extra as Record<string, unknown>);
-  }
-  const gpu = typeof v.gpu === 'number' ? v.gpu : v.gpu === false ? false : true;
-  const maxTokens = typeof v.max_tokens === 'number'
-    ? v.max_tokens
-    : typeof v.maxTokens === 'number' ? v.maxTokens : 1024;
-  return {
-    exe: typeof v.exe === 'string' ? v.exe : '',
-    mmproj: typeof v.mmproj === 'string' ? v.mmproj : '',
-    model: typeof v.model === 'string' ? v.model : '',
-    gpu,
-    maxTokens,
-    extra,
-  };
+  if (Array.isArray(v.args)) return { args: normalizeEngineParams(v.args) };
+  const rowOf = ([key, value]: [string, unknown]): EngineParam => ({
+    key: LEGACY_VISION_KEYS[key] ?? key,
+    value: formatConfigValue(value),
+  });
+  const rows = Object.entries(v).filter(([k]) => k !== 'extra').map(rowOf);
+  const extraRows = v.extra && typeof v.extra === 'object' && !Array.isArray(v.extra)
+    ? Object.entries(v.extra as Record<string, unknown>).map(rowOf)
+    : [];
+  return { args: normalizeEngineParams([...rows, ...extraRows]) };
 }
 
 /** Split a raw config object into the strata block the UI edits. */
@@ -228,15 +264,11 @@ export function strataFromConfig(cfg: Record<string, unknown>): StrataConfig {
   const extra: Record<string, unknown> = {};
   const serverCfg: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(cfg)) {
-    if (ENGINE_KEYS.has(k)) continue;
-    if (SERVER_CONFIG_KEYS.has(k) || k === 'port') serverCfg[k] = v;
+    if (STRUCTURAL_KEYS.has(k)) continue;
+    if (SERVER_CONFIG_KEYS.has(k) || DEPLOYMENT_KEYS.has(k) || k === 'port') serverCfg[k] = v;
     else extra[k] = v;
   }
   return {
-    exe: typeof cfg.exe === 'string' ? cfg.exe : '',
-    cwd: typeof cfg.cwd === 'string' ? cfg.cwd : '',
-    tokenizer: typeof cfg.tokenizer === 'string' ? cfg.tokenizer : '',
-    modelName: typeof cfg.model_name === 'string' ? cfg.model_name : '',
     engineArgs: argvToParams(cfg.args),
     serverArgs: configToServerParams(serverCfg),
     vision: normalizeVision(cfg.vision),
@@ -247,21 +279,11 @@ export function strataFromConfig(cfg: Record<string, unknown>): StrataConfig {
 /** Render the strata block back to the `strata-<model>.json` shape. */
 export function strataToConfig(s: StrataConfig): Record<string, unknown> {
   const out: Record<string, unknown> = { ...s.extra };
-  if (s.exe) out.exe = s.exe;
-  if (s.cwd) out.cwd = s.cwd;
-  if (s.tokenizer) out.tokenizer = s.tokenizer;
-  if (s.modelName) out.model_name = s.modelName;
   out.args = paramsToArgv(s.engineArgs);
+  // The deployment keys (exe, cwd, tokenizer, model_name) ride in the server
+  // rows, so they are emitted by the same conversion as the server options.
   Object.assign(out, serverParamsToConfig(s.serverArgs));
-  if (s.vision) {
-    const v: Record<string, unknown> = { ...s.vision.extra };
-    if (s.vision.exe) v.exe = s.vision.exe;
-    if (s.vision.mmproj) v.mmproj = s.vision.mmproj;
-    if (s.vision.model) v.model = s.vision.model;
-    v.gpu = s.vision.gpu;
-    v.max_tokens = s.vision.maxTokens;
-    out.vision = v;
-  }
+  if (s.vision) out.vision = visionParamsToConfig(s.vision.args);
   return out;
 }
 
@@ -273,12 +295,14 @@ export function strataConfigPath(instanceId: string): string {
 /** Blank strata block for a new instance. */
 export function blankStrataConfig(): StrataConfig {
   return {
-    exe: '',
-    cwd: '',
-    tokenizer: '',
-    modelName: '',
     engineArgs: [],
+    // The deployment keys lead the Server tab as ordinary rows: a new engine
+    // only needs paths filled in, no separate form to discover them.
     serverArgs: [
+      { key: 'cwd', value: '' },
+      { key: 'exe', value: '' },
+      { key: 'tokenizer', value: '' },
+      { key: 'model_name', value: '' },
       { key: '--host', value: '127.0.0.1' },
       { key: '--port', value: '8095' },
     ],
@@ -294,18 +318,39 @@ export function blankStrataConfig(): StrataConfig {
 export function normalizeStrataConfig(raw: unknown): StrataConfig | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const c = raw as Record<string, unknown>;
+  const serverArgs = normalizeEngineParams(c.serverArgs);
+  // engines.json written while the deployment keys were dedicated fields:
+  // fold them into server rows so the row list is the single source.
+  const legacyField = (key: string, value: unknown): void => {
+    if (typeof value !== 'string' || !value || serverArgs.some((p) => p.key === key)) return;
+    serverArgs.push({ key, value });
+  };
+  legacyField('exe', c.exe);
+  legacyField('cwd', c.cwd);
+  legacyField('tokenizer', c.tokenizer);
+  legacyField('model_name', c.modelName ?? c.model_name);
   return {
-    exe: typeof c.exe === 'string' ? c.exe : '',
-    cwd: typeof c.cwd === 'string' ? c.cwd : '',
-    tokenizer: typeof c.tokenizer === 'string' ? c.tokenizer : '',
-    modelName: typeof c.modelName === 'string' ? c.modelName : '',
     engineArgs: normalizeEngineParams(c.engineArgs),
-    serverArgs: normalizeEngineParams(c.serverArgs),
+    serverArgs,
     vision: normalizeVision(c.vision),
     extra: c.extra && typeof c.extra === 'object' && !Array.isArray(c.extra)
       ? { ...(c.extra as Record<string, unknown>) }
       : {},
   };
+}
+
+/**
+ * Value of a deployment row (enabled only), e.g. the repo folder a strata
+ * instance launches from. Empty when the row is missing, blank or off.
+ */
+export function deploymentValue(s: StrataConfig | undefined, key: string): string {
+  const raw = s?.serverArgs.find((p) => p.key === key && !p.disabled)?.value;
+  return typeof raw === 'string' ? raw.trim() : '';
+}
+
+/** The Strata repo folder: the `cwd` deployment row, the launch working dir. */
+export function strataRepoRoot(s: StrataConfig | undefined): string {
+  return deploymentValue(s, 'cwd');
 }
 
 /** Port a strata instance listens on, from its --port server row. */

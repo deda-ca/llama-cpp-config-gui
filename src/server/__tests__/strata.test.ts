@@ -8,10 +8,12 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  DEPLOYMENT_KEYS,
   SERVER_CONFIG_KEYS,
   argvToParams,
   blankStrataConfig,
   configToServerParams,
+  deploymentValue,
   formatConfigValue,
   normalizeStrataConfig,
   normalizeVision,
@@ -22,10 +24,11 @@ import {
   strataConfigPath,
   strataFromConfig,
   strataPort,
+  strataRepoRoot,
   strataToConfig,
+  visionParamsToConfig,
 } from '../engines/strata.js';
 import { strataDriver, strataLevel, parseStrataLine } from '../engines/strataDriver.js';
-import type { StrataConfig } from '../engines/types.js';
 
 /** Trimmed stand-in for the user's real strata-iq3_s.json. */
 const realConfig = {
@@ -152,16 +155,37 @@ describe('server params <-> config keys', () => {
       expect(SERVER_CONFIG_KEYS.has(key)).toBe(false);
     }
   });
+
+  it('edits the deployment keys as config-key rows, not flags', () => {
+    expect(serverFlagFor('cwd')).toBe('cwd');
+    expect(serverFlagFor('model_name')).toBe('model_name');
+    expect(configToServerParams({ exe: '/e/strata', cwd: '/r', model_name: 'm' })).toEqual([
+      { key: 'exe', value: '/e/strata' },
+      { key: 'cwd', value: '/r' },
+      { key: 'model_name', value: 'm' },
+    ]);
+    // An empty deployment row means "not set", not a boolean flag.
+    expect(
+      serverParamsToConfig([
+        { key: 'cwd', value: '' },
+        { key: 'exe', value: '/e/strata' },
+        { key: 'cwd', disabled: true },
+      ]),
+    ).toEqual({ exe: '/e/strata' });
+    for (const key of ['exe', 'cwd', 'tokenizer', 'model_name']) {
+      expect(DEPLOYMENT_KEYS.has(key)).toBe(true);
+    }
+  });
 });
 
 describe('strataFromConfig / strataToConfig', () => {
   const s = strataFromConfig(realConfig as Record<string, unknown>);
 
-  it('extracts the engine basics', () => {
-    expect(s.exe).toBe('/home/u/Strata/engine/strata');
-    expect(s.cwd).toBe('/home/u/Strata');
-    expect(s.tokenizer).toBe('/home/u/Strata-data/tokenizers/qwen3');
-    expect(s.modelName).toBe('qwen3.8');
+  it('extracts the engine basics, deployment keys as server rows', () => {
+    expect(deploymentValue(s, 'exe')).toBe('/home/u/Strata/engine/strata');
+    expect(strataRepoRoot(s)).toBe('/home/u/Strata');
+    expect(deploymentValue(s, 'tokenizer')).toBe('/home/u/Strata-data/tokenizers/qwen3');
+    expect(deploymentValue(s, 'model_name')).toBe('qwen3.8');
     expect(s.engineArgs).toHaveLength(7);
     expect(s.engineArgs[0]).toEqual({ key: '--pack', value: '/home/u/Strata-data/packs/iq3_s' });
   });
@@ -184,11 +208,15 @@ describe('strataFromConfig / strataToConfig', () => {
     });
   });
 
-  it('parses the vision block', () => {
+  it('parses the vision section into rows, in the file key order', () => {
     expect(s.vision).not.toBeNull();
-    expect(s.vision?.mmproj).toBe('/home/u/models/mmproj-BF16.gguf');
-    expect(s.vision?.gpu).toBe(true);
-    expect(s.vision?.maxTokens).toBe(1024);
+    expect(s.vision?.args).toEqual([
+      { key: 'exe', value: '/home/u/Strata/engine/strata-vision' },
+      { key: 'mmproj', value: '/home/u/models/mmproj-BF16.gguf' },
+      { key: 'model', value: '/home/u/models/Qwen-00001-of-00002.gguf' },
+      { key: 'gpu', value: 'true' },
+      { key: 'max_tokens', value: '1024' },
+    ]);
   });
 
   it('round-trips without losing or inventing a key', () => {
@@ -204,21 +232,41 @@ describe('strataFromConfig / strataToConfig', () => {
 });
 
 describe('blankStrataConfig / normalizeStrataConfig', () => {
-  it('seeds host and port so a new engine is launchable', () => {
+  it('seeds deployment rows plus host and port so a new engine is launchable', () => {
     const blank = blankStrataConfig();
-    expect(blank.serverArgs.map((p) => p.key)).toEqual(['--host', '--port']);
+    expect(blank.serverArgs.map((p) => p.key)).toEqual([
+      'cwd', 'exe', 'tokenizer', 'model_name', '--host', '--port',
+    ]);
     expect(strataPort(blank)).toBe(8095);
+    expect(strataRepoRoot(blank)).toBe('');
     expect(blank.vision).toBeNull();
+    // Empty deployment rows stay out of the generated file.
+    expect(strataToConfig(blank)).toEqual({ args: [], host: '127.0.0.1', port: 8095 });
   });
 
   it('rejects non-objects and fills missing fields', () => {
     expect(normalizeStrataConfig(undefined)).toBeUndefined();
     expect(normalizeStrataConfig([])).toBeUndefined();
-    const s = normalizeStrataConfig({ exe: '/x', engineArgs: [{ key: '--ctx', value: '1' }] });
-    expect(s?.exe).toBe('/x');
+    const s = normalizeStrataConfig({ engineArgs: [{ key: '--ctx', value: '1' }] });
     expect(s?.engineArgs).toEqual([{ key: '--ctx', value: '1' }]);
     expect(s?.serverArgs).toEqual([]);
     expect(s?.extra).toEqual({});
+  });
+
+  it('folds the old dedicated deployment fields into server rows', () => {
+    const s = normalizeStrataConfig({
+      exe: '/x',
+      cwd: '/r',
+      modelName: 'm',
+      serverArgs: [{ key: '--port', value: '1234' }],
+    });
+    expect(s?.serverArgs).toEqual([
+      { key: '--port', value: '1234' },
+      { key: 'exe', value: '/x' },
+      { key: 'cwd', value: '/r' },
+      { key: 'model_name', value: 'm' },
+    ]);
+    expect(strataRepoRoot(s)).toBe('/r');
   });
 
   it('survives a JSON round-trip, which is how engines.json stores it', () => {
@@ -228,17 +276,49 @@ describe('blankStrataConfig / normalizeStrataConfig', () => {
 });
 
 describe('normalizeVision', () => {
-  it('keeps unknown vision keys in extra', () => {
+  it('folds a raw config section (named keys) into rows', () => {
     const v = normalizeVision({ mmproj: '/m.gguf', gpu: 2, crop: 'top' });
-    expect(v?.gpu).toBe(2);
-    expect(v?.maxTokens).toBe(1024);
-    expect(v?.extra).toEqual({ crop: 'top' });
+    expect(v?.args).toEqual([
+      { key: 'mmproj', value: '/m.gguf' },
+      { key: 'gpu', value: '2' },
+      { key: 'crop', value: 'top' },
+    ]);
   });
 
-  it('treats a false gpu as CPU and a missing one as the engine GPU', () => {
-    expect(normalizeVision({ gpu: false })?.gpu).toBe(false);
-    expect(normalizeVision({})?.gpu).toBe(true);
+  it('renames the old stored maxTokens key back to the config spelling', () => {
+    const legacy = normalizeVision({ exe: '/e', maxTokens: 300 });
+    expect(legacy?.args).toEqual([
+      { key: 'exe', value: '/e' },
+      { key: 'max_tokens', value: '300' },
+    ]);
+  });
+
+  it('passes stored rows through untouched and rejects non-objects', () => {
+    const v = normalizeVision({ args: [{ key: 'threads', value: '16' }] });
+    expect(v?.args).toEqual([{ key: 'threads', value: '16' }]);
     expect(normalizeVision('nope')).toBeNull();
+    expect(normalizeVision([])).toBeNull();
+  });
+});
+
+describe('visionParamsToConfig', () => {
+  it('keeps JSON types and omits a disabled row', () => {
+    const out = visionParamsToConfig([
+      { key: 'exe', value: '/e' },
+      { key: 'gpu', value: 'false' },
+      { key: 'elastic', disabled: true },
+      { key: 'elastic_mib', value: '2048' },
+    ]);
+    expect(out).toEqual({ exe: '/e', gpu: false, elastic_mib: 2048 });
+  });
+
+  it('re-emits an explicit false gpu, which the server reads as CPU', () => {
+    const rows = normalizeVision({ exe: '/e', gpu: false })!.args;
+    expect(visionParamsToConfig(rows)).toEqual({ exe: '/e', gpu: false });
+  });
+
+  it('a bare enabled row means true, matching a "gpu": true file', () => {
+    expect(visionParamsToConfig([{ key: 'gpu' }])).toEqual({ gpu: true });
   });
 });
 
@@ -305,7 +385,7 @@ describe('strata instance isolation', () => {
     const b = strataFromConfig({ ...realConfig, port: 5457, model_name: 'other' });
     strataToConfig(a);
     expect(strataPort(b)).toBe(5457);
-    expect(b.modelName).toBe('other');
-    expect((a as StrataConfig).modelName).toBe('qwen3.8');
+    expect(deploymentValue(b, 'model_name')).toBe('other');
+    expect(deploymentValue(a, 'model_name')).toBe('qwen3.8');
   });
 });

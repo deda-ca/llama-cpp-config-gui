@@ -19,8 +19,8 @@ import {
   normalizeEnvVars,
 } from './engines/store.js';
 import { loadTemplate, saveTemplate } from './engines/template.js';
-import { normalizeStrataConfig, strataConfigPath, strataFromConfig, strataToConfig } from './engines/strata.js';
-import { STRATA_SERVER_PARAMS } from './engines/strataServerParams.js';
+import { normalizeStrataConfig, strataConfigPath, strataFromConfig, strataRepoRoot, strataToConfig } from './engines/strata.js';
+import { STRATA_SERVER_PARAMS, STRATA_VISION_PARAMS } from './engines/strataServerParams.js';
 import { isEngineKind, type EngineDefinition, type EngineInstance, type EnginesFile } from './engines/types.js';
 import { getDriver } from './engines/driver.js';
 import type { WsMessage, LlamaConfig, GpuInfo, LlamaDevice, GpuSortMode, SystemStats } from './types.js';
@@ -975,7 +975,7 @@ async function buildLaunchSpec(
   let generatedConfigPath: string | undefined;
   if (kind === 'strata') {
     if (!inst.strata) return { error: 'This strata engine has no configuration yet' };
-    if (!inst.strata.cwd.trim()) return { error: 'Set the Strata repo folder before launching' };
+    if (!strataRepoRoot(inst.strata)) return { error: 'Set the Strata repo folder before launching' };
     generatedConfigPath = strataConfigPath(inst.id);
     try {
       fs.mkdirSync(path.dirname(generatedConfigPath), { recursive: true });
@@ -1312,6 +1312,12 @@ app.get('/api/params', (req, res) => {
 // server's own argparse block, so it ships with the app instead of .config.
 app.get('/api/params/strata-server', (_req, res) => {
   res.json(STRATA_SERVER_PARAMS);
+});
+
+// The vision encoder option list (strata kind's "Vision" group). These are the
+// keys of the config's "vision" object, read by serve/server.py's Vision class.
+app.get('/api/params/strata-vision', (_req, res) => {
+  res.json(STRATA_VISION_PARAMS);
 });
 
 app.post('/api/params/refresh', async (_req, res) => {

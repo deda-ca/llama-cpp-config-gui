@@ -143,27 +143,23 @@ export interface EngineInstance {
  * one JSON file: the strata engine binary + its `strata generate` flags, the
  * `serve/server.py` server options, and an optional vision encoder. `extra`
  * holds keys the UI has no field for, preserved verbatim on export.
+ * The deployment keys (`exe`, `cwd`, `tokenizer`, `model_name`) are ordinary
+ * rows in `serverArgs`, keyed by their config name.
  */
 export interface StrataConfig {
-  exe: string;
-  cwd: string;
-  tokenizer: string;
-  modelName: string;
   engineArgs: EngineParam[];
   serverArgs: EngineParam[];
   vision: StrataVisionConfig | null;
   extra: Record<string, unknown>;
 }
 
-/** The config's "vision" object: strata-vision encoder settings. */
+/**
+ * The config's "vision" object: strata-vision encoder settings. An ordered row
+ * list like the engine/server groups — keys are config keys (`exe`, `gpu`,
+ * `elastic_mib`, …), so any of them can be added, edited, disabled or reordered.
+ */
 export interface StrataVisionConfig {
-  exe: string;
-  mmproj: string;
-  model: string;
-  /** true = engine's GPU, false = CPU, or a device index. */
-  gpu: boolean | number;
-  maxTokens: number;
-  extra: Record<string, unknown>;
+  args: EngineParam[];
 }
 
 export interface EnginesResponse {

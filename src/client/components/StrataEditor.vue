@@ -19,7 +19,7 @@
 import { computed, ref, watch, onMounted } from 'vue';
 import Dialog from './ui/Dialog.vue';
 import ParamRows from './ui/ParamRows.vue';
-import type { EngineInstance, EngineParam, ParamDef, StrataConfig, StrataVisionConfig } from '../types';
+import type { EngineInstance, EngineParam, ParamDef, StrataConfig } from '../types';
 
 const props = defineProps<{
   /** Existing instance, or a blank draft for a new engine (not yet saved). */
@@ -42,12 +42,12 @@ const form = ref({
 
 function blankStrata(): StrataConfig {
   return {
-    exe: '',
-    cwd: '',
-    tokenizer: '',
-    modelName: '',
     engineArgs: [],
     serverArgs: [
+      { key: 'cwd', value: '' },
+      { key: 'exe', value: '' },
+      { key: 'tokenizer', value: '' },
+      { key: 'model_name', value: '' },
       { key: '--host', value: '127.0.0.1' },
       { key: '--port', value: '8095' },
     ],
@@ -61,15 +61,18 @@ const strata = ref<StrataConfig>({ ...blankStrata(), ...(props.instance.strata ?
 // --- Catalogs ---
 const engineCatalog = ref<ParamDef[]>([]);
 const serverCatalog = ref<ParamDef[]>([]);
+const visionCatalog = ref<ParamDef[]>([]);
 
 async function loadCatalogs() {
   try {
-    const [engineRes, serverRes] = await Promise.all([
+    const [engineRes, serverRes, visionRes] = await Promise.all([
       fetch('/api/params?kind=strata'),
       fetch('/api/params/strata-server'),
+      fetch('/api/params/strata-vision'),
     ]);
     engineCatalog.value = engineRes.ok ? await engineRes.json() : [];
     serverCatalog.value = serverRes.ok ? await serverRes.json() : [];
+    visionCatalog.value = visionRes.ok ? await visionRes.json() : [];
   } catch {
     /* catalogs are optional decoration — rows still edit without them */
   }
@@ -94,6 +97,7 @@ const ENGINE_CATEGORY_LABELS: Record<string, string> = {
 };
 
 const SERVER_CATEGORY_LABELS: Record<string, string> = {
+  deployment: 'Deployment',
   network: 'Network',
   gpu: 'GPU & Slots',
   queue: 'Queue & Overload',
@@ -101,16 +105,28 @@ const SERVER_CATEGORY_LABELS: Record<string, string> = {
   tools: 'Tools & Observability',
 };
 
+const VISION_CATEGORY_LABELS: Record<string, string> = {
+  encoder: 'Encoder & Files',
+  device: 'Device & Threads',
+  tokens: 'Image Tokens',
+  vram: 'Elastic VRAM',
+};
+
 // --- Tabs ---
-type Tab = 'engine' | 'server' | 'vision' | 'json' | 'command';
-const activeTab = ref<Tab>('engine');
+// Server first: the deployment paths and the serve/server.py options are what a
+// new strata engine needs; the engine's own flags come after them.
+type Tab = 'server' | 'engine' | 'vision' | 'json' | 'command';
+const activeTab = ref<Tab>('server');
 
 // --- Vision ---
+// The section is a row list like the engine/server groups: "no vision" is a null
+// block, "vision configured" is a block whose rows the encoder command is built
+// from. gpu/threads/elastic and any other key are ordinary rows.
 const visionEnabled = ref(strata.value.vision !== null);
 
 function enableVision() {
   if (!strata.value.vision) {
-    strata.value.vision = { exe: '', mmproj: '', model: '', gpu: true, maxTokens: 1024, extra: {} };
+    strata.value.vision = { args: [] };
   }
   visionEnabled.value = true;
 }
@@ -118,17 +134,6 @@ function enableVision() {
 function disableVision() {
   strata.value.vision = null;
   visionEnabled.value = false;
-}
-
-const visionGpuMode = computed(() => {
-  const g = strata.value.vision?.gpu;
-  return g === false ? 'cpu' : typeof g === 'number' ? 'index' : 'engine';
-});
-
-function setVisionGpuMode(mode: string) {
-  const v = strata.value.vision;
-  if (!v) return;
-  v.gpu = mode === 'cpu' ? false : mode === 'index' ? 0 : true;
 }
 
 // --- Raw JSON view ---
@@ -204,10 +209,6 @@ async function onFileChosen(e: Event) {
 
 async function exportJson() {
   const body = {
-    exe: strata.value.exe,
-    cwd: strata.value.cwd,
-    tokenizer: strata.value.tokenizer,
-    model_name: strata.value.modelName,
     engineArgs: strata.value.engineArgs,
     serverArgs: strata.value.serverArgs,
     vision: strata.value.vision,
@@ -297,18 +298,6 @@ function copyCommand() {
   });
 }
 
-// --- Port shown in the header (strata keeps it in the server group) ---
-const portValue = computed(() => {
-  const row = strata.value.serverArgs.find((p) => p.key === '--port' && !p.disabled);
-  return row?.value ?? '';
-});
-
-function setPort(value: string) {
-  const row = strata.value.serverArgs.find((p) => p.key === '--port');
-  if (row) row.value = value;
-  else strata.value.serverArgs.push({ key: '--port', value });
-}
-
 // --- Dirty tracking ---
 const dirty = ref(false);
 let snapshot = '';
@@ -333,11 +322,6 @@ function cleanRows(rows: EngineParam[]): EngineParam[] {
     }));
 }
 
-function visionPayload(v: StrataVisionConfig | null): StrataVisionConfig | null {
-  if (!v) return null;
-  return { ...v, exe: v.exe.trim(), mmproj: v.mmproj.trim(), model: v.model.trim() };
-}
-
 async function save() {
   saving.value = true;
   error.value = '';
@@ -347,13 +331,9 @@ async function save() {
       return;
     }
     const strataBody: StrataConfig = {
-      exe: strata.value.exe.trim(),
-      cwd: strata.value.cwd.trim(),
-      tokenizer: strata.value.tokenizer.trim(),
-      modelName: strata.value.modelName.trim(),
       engineArgs: cleanRows(strata.value.engineArgs),
       serverArgs: cleanRows(strata.value.serverArgs),
-      vision: visionPayload(strata.value.vision),
+      vision: strata.value.vision ? { args: cleanRows(strata.value.vision.args) } : null,
       extra: strata.value.extra ?? {},
     };
 
@@ -420,14 +400,6 @@ snapshot = currentState();
           <label>Engine Name</label>
           <input v-model="form.name" type="text" placeholder="strata-iq3_s" />
         </div>
-        <div class="field field-narrow">
-          <label>Port</label>
-          <input :value="portValue" type="number" @input="setPort(($event.target as HTMLInputElement).value)" />
-        </div>
-        <div class="field field-narrow">
-          <label>Python</label>
-          <input v-model="form.binary" type="text" placeholder="python3" />
-        </div>
       </div>
 
       <div class="field">
@@ -435,27 +407,10 @@ snapshot = currentState();
         <textarea v-model="form.notes" rows="2" placeholder="Which GPUs this deployment owns, quant, trade-offs..."></textarea>
       </div>
 
-      <div class="field-row field-basics">
-        <div class="field">
-          <label>Strata Repo Folder</label>
-          <input v-model="strata.cwd" type="text" placeholder="/home/user/Programs/AI/Strata" />
-          <small>Working directory; <code>serve.server</code> is imported from here</small>
-        </div>
-        <div class="field">
-          <label>Engine Executable</label>
-          <input v-model="strata.exe" type="text" placeholder="/home/user/Programs/AI/Strata/engine/strata" />
-        </div>
-      </div>
-
-      <div class="field-row">
-        <div class="field">
-          <label>Tokenizer Directory</label>
-          <input v-model="strata.tokenizer" type="text" placeholder="/path/to/tokenizer" />
-        </div>
-        <div class="field">
-          <label>Model Name</label>
-          <input v-model="strata.modelName" type="text" placeholder="advertised on GET /v1/models" />
-        </div>
+      <div class="field">
+        <label>Python Interpreter</label>
+        <input v-model="form.binary" type="text" placeholder="python3"
+          title="Interpreter that runs serve.server.py; point it at the venv holding Strata's Python deps" />
       </div>
 
       <label class="check-row">
@@ -472,28 +427,33 @@ snapshot = currentState();
       </div>
 
       <div class="tab-bar">
-        <button class="tab-btn" :class="{ active: activeTab === 'engine' }" @click="activeTab = 'engine'">Engine</button>
         <button class="tab-btn" :class="{ active: activeTab === 'server' }" @click="activeTab = 'server'">Server</button>
+        <button class="tab-btn" :class="{ active: activeTab === 'engine' }" @click="activeTab = 'engine'">Engine</button>
         <button class="tab-btn" :class="{ active: activeTab === 'vision' }" @click="activeTab = 'vision'">Vision</button>
         <button class="tab-btn" :class="{ active: activeTab === 'json' }" @click="activeTab = 'json'">Other Keys</button>
         <button class="tab-btn" :class="{ active: activeTab === 'command' }" @click="activeTab = 'command'">Command</button>
       </div>
 
-      <template v-if="activeTab === 'engine'">
+      <template v-if="activeTab === 'server'">
+        <small class="tab-hint">
+          Options for <code>serve/server.py</code>, including the deployment paths
+          (<code>cwd</code>, <code>exe</code>, <code>tokenizer</code>, <code>model_name</code>).
+          <code>--port</code> is always passed on the command line — the config's
+          <code>port</code> key is ignored by the server.
+        </small>
+        <ParamRows
+          v-model="strata.serverArgs"
+          :catalog="serverCatalog"
+          :category-labels="SERVER_CATEGORY_LABELS"
+        />
+      </template>
+
+      <template v-else-if="activeTab === 'engine'">
         <small class="tab-hint">Flags passed to the <code>strata</code> engine (the config's <code>args</code> array).</small>
         <ParamRows
           v-model="strata.engineArgs"
           :catalog="engineCatalog"
           :category-labels="ENGINE_CATEGORY_LABELS"
-        />
-      </template>
-
-      <template v-else-if="activeTab === 'server'">
-        <small class="tab-hint">Options for <code>serve/server.py</code>. <code>--port</code> is always passed on the command line — the config's <code>port</code> key is ignored by the server.</small>
-        <ParamRows
-          v-model="strata.serverArgs"
-          :catalog="serverCatalog"
-          :category-labels="SERVER_CATEGORY_LABELS"
         />
       </template>
 
@@ -503,43 +463,20 @@ snapshot = currentState();
           <button class="btn btn-primary" @click="enableVision">+ Add Vision Encoder</button>
         </div>
         <template v-else>
-          <div class="field-row">
-            <div class="field">
-              <label>Encoder Executable</label>
-              <input v-model="strata.vision!.exe" type="text" placeholder="/path/to/strata-vision" />
-            </div>
-            <div class="field">
-              <label>mmproj File</label>
-              <input v-model="strata.vision!.mmproj" type="text" placeholder="/path/to/mmproj.gguf" />
-            </div>
+          <div class="vision-hint-row">
+            <small class="tab-hint">
+              Keys of the config's <code>vision</code> object; <code>serve/server.py</code> builds the
+              <code>strata-vision</code> command from them. <code>exe</code>, <code>mmproj</code> and
+              <code>model</code> are required — a row switched <code>off</code> is left out of the file.
+            </small>
+            <button class="btn" @click="disableVision">Remove Vision</button>
           </div>
-          <div class="field-row">
-            <div class="field">
-              <label>Vision Model</label>
-              <input v-model="strata.vision!.model" type="text" placeholder="/path/to/model.gguf" />
-            </div>
-            <div class="field field-narrow">
-              <label>Max Tokens</label>
-              <input v-model.number="strata.vision!.maxTokens" type="number" />
-            </div>
-          </div>
-          <div class="field-row">
-            <div class="field">
-              <label>Encoder GPU</label>
-              <select :value="visionGpuMode" @change="setVisionGpuMode(($event.target as HTMLSelectElement).value)">
-                <option value="engine">Engine's GPU</option>
-                <option value="cpu">CPU</option>
-                <option value="index">Specific index</option>
-              </select>
-            </div>
-            <div v-if="visionGpuMode === 'index'" class="field field-narrow">
-              <label>GPU Index</label>
-              <input v-model.number="(strata.vision!.gpu as number)" type="number" min="0" />
-            </div>
-            <div class="field field-narrow vision-remove">
-              <button class="btn" @click="disableVision">Remove Vision</button>
-            </div>
-          </div>
+          <ParamRows
+            v-model="strata.vision!.args"
+            :catalog="visionCatalog"
+            :category-labels="VISION_CATEGORY_LABELS"
+            flag-placeholder="key (e.g. threads)"
+          />
         </template>
       </template>
 
@@ -643,7 +580,6 @@ snapshot = currentState();
 }
 
 .field-row .field { flex: 1; min-width: 0; }
-.field-narrow { flex: 0 0 150px !important; }
 
 .check-row {
   display: flex;
@@ -704,9 +640,14 @@ snapshot = currentState();
   color: #8b949e;
 }
 
-.vision-remove {
-  align-self: flex-end;
+.vision-hint-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
 }
+
+.vision-hint-row .tab-hint { flex: 1; }
 
 .json-area {
   background: #0d1117;

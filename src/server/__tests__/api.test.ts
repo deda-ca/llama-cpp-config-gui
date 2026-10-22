@@ -487,6 +487,18 @@ describe('Strata Engine API', () => {
     ]));
   });
 
+  it('GET /api/params/strata-vision returns the vision encoder catalog', async () => {
+    const res = await request(app).get('/api/params/strata-vision');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    // Vision options are config keys, so flag === key (no leading dashes).
+    expect(res.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'exe', flag: 'exe', category: 'encoder' }),
+      expect.objectContaining({ key: 'max_tokens', flag: 'max_tokens' }),
+      expect.objectContaining({ key: 'elastic', inputType: 'toggle' }),
+    ]));
+  });
+
   it('GET /api/engines/instances/draft?kind=strata seeds a strata block without saving', async () => {
     const before = (await request(app).get('/api/engines')).body.instances.length;
     const res = await request(app).get('/api/engines/instances/draft?kind=strata');
@@ -517,20 +529,26 @@ describe('Strata Engine API', () => {
     const res = await request(app).post('/api/engines/strata/import').send({ json: JSON.stringify(file) });
     expect(res.status).toBe(200);
     const s = res.body.strata;
-    expect(s.exe).toBe('/home/u/Strata/engine/strata');
-    expect(s.modelName).toBe('qwen3.8');
     expect(s.engineArgs).toEqual([
       { key: '--pack', value: '/p/iq3_s' },
       { key: '--ctx', value: '262144' },
       { key: '--metrics' },
     ]);
-    // port becomes a --port server row; gpu is a server option; gpus_asked rides in extra.
+    // The deployment keys, port and gpu are all ordinary server rows now.
     expect(s.serverArgs).toEqual(expect.arrayContaining([
+      { key: 'exe', value: '/home/u/Strata/engine/strata' },
+      { key: 'cwd', value: '/home/u/Strata' },
+      { key: 'tokenizer', value: '/home/u/tok' },
+      { key: 'model_name', value: 'qwen3.8' },
       { key: '--port', value: '5456' },
       { key: '--gpu', value: '1,2,3' },
     ]));
     expect(s.extra).toEqual({ gpus_asked: 3 });
-    expect(s.vision?.maxTokens).toBe(1024);
+    // The vision section becomes editable rows, one per config key.
+    expect(s.vision?.args).toEqual(expect.arrayContaining([
+      { key: 'mmproj', value: '/m.gguf' },
+      { key: 'max_tokens', value: '1024' },
+    ]));
   });
 
   it('POST /api/engines/strata/import rejects invalid JSON and non-objects', async () => {
@@ -555,12 +573,15 @@ describe('Strata Engine API', () => {
 
   it('PUT /api/engines/instances/:id round-trips the strata block and autoLaunch', async () => {
     const block = {
-      exe: '/home/u/Strata/engine/strata',
-      cwd: '/home/u/Strata',
-      tokenizer: '/home/u/tok',
-      modelName: 'qwen3.8',
       engineArgs: [{ key: '--ctx', value: '262144' }],
-      serverArgs: [{ key: '--host', value: '0.0.0.0' }, { key: '--port', value: '8123' }],
+      serverArgs: [
+        { key: 'exe', value: '/home/u/Strata/engine/strata' },
+        { key: 'cwd', value: '/home/u/Strata' },
+        { key: 'tokenizer', value: '/home/u/tok' },
+        { key: 'model_name', value: 'qwen3.8' },
+        { key: '--host', value: '0.0.0.0' },
+        { key: '--port', value: '8123' },
+      ],
       vision: null,
       extra: { gpus_asked: 3 },
     };
@@ -621,7 +642,7 @@ describe('Strata Engine API', () => {
         kind: 'strata',
         instanceId: strataId,
         executable: '/usr/bin/python3',
-        strata: { cwd: '/home/u/Strata', serverArgs: [{ key: '--port', value: '8123' }] },
+        strata: { serverArgs: [{ key: 'cwd', value: '/home/u/Strata' }, { key: '--port', value: '8123' }] },
       });
     expect(res.status).toBe(200);
     // A strata preview keeps the interpreter path verbatim — there is no
@@ -656,7 +677,7 @@ describe('Strata Engine API', () => {
     const inst = get.body.instances.find((i: any) => i.id === strataId);
     await request(app)
       .put(`/api/engines/instances/${strataId}`)
-      .send({ strata: { ...inst.strata, cwd: '' } });
+      .send({ strata: { ...inst.strata, serverArgs: inst.strata.serverArgs.filter((p: any) => p.key !== 'cwd') } });
     const res = await request(app).post(`/api/engines/instances/${strataId}/launch`);
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('repo folder');

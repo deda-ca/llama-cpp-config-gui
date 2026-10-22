@@ -11,7 +11,7 @@
 import { DEFAULT_CONFIG } from '../config.js';
 import type { LlamaConfig } from '../types.js';
 import { paramsToArgs } from './args.js';
-import { strataPort } from './strata.js';
+import { strataPort, strataRepoRoot } from './strata.js';
 import { paramValue, paramValueAny } from './store.js';
 import type { EngineDefinition, EngineInstance } from './types.js';
 
@@ -39,9 +39,9 @@ export function instanceToLlamaConfig(
   const kind = instance.kind || definition.kind;
   return {
     ...DEFAULT_CONFIG,
-    // A strata instance carries its own repo root in `strata.cwd`; the
-    // definition's build folder is a llama.cpp concept.
-    llamaCppPath: strata ? strata.cwd : definition.buildPath,
+    // A strata instance carries its own repo root in the `cwd` deployment row;
+    // the definition's build folder is a llama.cpp concept.
+    llamaCppPath: strata ? strataRepoRoot(strata) : definition.buildPath,
     modelsDir: '',
     routerIniPath: routerIniPath ?? '',
     strataConfigPath: strataConfigPath ?? '',

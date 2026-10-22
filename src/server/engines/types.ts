@@ -66,22 +66,19 @@ export interface EngineParam {
  * encoder. Nothing is inherited from an EngineDefinition, so two strata
  * instances never affect each other (docs/todo.md #21, #22).
  *
+ * The deployment keys (config `exe`, `cwd`, `tokenizer`, `model_name`) are
+ * ordinary rows in `serverArgs` — `serve/server.py` reads them straight from
+ * the config, so a row is keyed by the config name verbatim.
+ *
  * `extra` preserves keys the UI has no field for (gpus_asked, gpu_order,
  * layer_split, lib_dirs, …) verbatim so an import/export round-trip never
  * loses data.
  */
 export interface StrataConfig {
-  /** Path to the strata engine executable (config "exe"). */
-  exe: string;
-  /** Working directory for the engine + server (config "cwd"). */
-  cwd: string;
-  /** Pack tokenizer directory (config "tokenizer"). */
-  tokenizer: string;
-  /** Model name advertised on GET /v1/models (config "model_name"). */
-  modelName: string;
   /** `strata generate` flags — the config's "args" array as flat argv tokens. */
   engineArgs: EngineParam[];
-  /** `serve/server.py` options (host, port, api_key, gpu, lazy_load, …). */
+  /** `serve/server.py` options (host, port, api_key, gpu, lazy_load, …) plus
+   * the deployment keys (exe, cwd, tokenizer, model_name) as config-key rows. */
   serverArgs: EngineParam[];
   /** Vision encoder (config "vision"); null = no vision section. */
   vision: StrataVisionConfig | null;
@@ -89,16 +86,15 @@ export interface StrataConfig {
   extra: Record<string, unknown>;
 }
 
-/** The config's "vision" object: strata-vision encoder settings. */
+/**
+ * The config's "vision" object: strata-vision encoder settings. Like the
+ * engine and server groups it is an ordered row list, so every key the encoder
+ * understands (and any the UI has no catalog entry for) can be added, edited,
+ * disabled or reordered. Values keep their JSON type through `parseConfigValue`
+ * (`gpu: true`, `elastic_mib: 2048`), and a disabled row omits the key.
+ */
 export interface StrataVisionConfig {
-  exe: string;
-  mmproj: string;
-  model: string;
-  /** GPU for the encoder: true = engine's GPU, false = CPU, or a device index. */
-  gpu: boolean | number;
-  maxTokens: number;
-  /** Vision keys with no UI field, preserved verbatim. */
-  extra: Record<string, unknown>;
+  args: EngineParam[];
 }
 
 /** A launchable engine: definition + runtime settings + model selection. */

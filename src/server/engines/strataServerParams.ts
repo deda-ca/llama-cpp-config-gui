@@ -9,13 +9,22 @@
  *
  * `flag` is the CLI spelling the row shows; the config key it maps to is
  * derived by strata.ts (`--idle-unload` -> `idle_unload`, with a few documented
- * aliases). `inputType: 'toggle'` rows are bare on/off flags; the rest take a
- * value.
+ * aliases). The `deployment` entries are the exception: `cwd`, `exe`,
+ * `tokenizer` and `model_name` are config keys the server reads directly, so
+ * their row name is the key verbatim (`flag` === `key`).
+ * `inputType: 'toggle'` rows are bare on/off flags; the rest take a value.
  */
 
 import type { ParamDef } from '../modelConfig.js';
 
 export const STRATA_SERVER_PARAMS: ParamDef[] = [
+  // --- Deployment (config keys, not CLI flags: the server reads these straight
+  // from the config, so the row name is the key verbatim) ---
+  { flag: 'cwd', key: 'cwd', label: 'Strata Repo Folder', description: 'Working directory; serve.server is imported from here and relative paths in the config resolve against it', category: 'deployment', inputType: 'path' },
+  { flag: 'exe', key: 'exe', label: 'Engine Executable', description: 'The strata engine binary the server keeps resident; a component reference resolves against the engine component', category: 'deployment', inputType: 'path' },
+  { flag: 'tokenizer', key: 'tokenizer', label: 'Tokenizer Directory', description: 'Pack tokenizer directory (vocab.json + merges.txt); overrides the --tokenizer flag', category: 'deployment', inputType: 'path' },
+  { flag: 'model_name', key: 'model_name', label: 'Model Name', description: 'Name advertised on GET /v1/models; falls back to the family name when absent', category: 'deployment', inputType: 'text' },
+
   // --- Network ---
   { flag: '--host', key: 'host', label: 'Host', description: 'Address to listen on: 127.0.0.1 = this PC only, 0.0.0.0 = also other devices (set an API key)', category: 'network', inputType: 'text', default: '127.0.0.1' },
   { flag: '--port', key: 'port', label: 'Port', description: 'HTTP port to bind (CLI-only: the config "port" key is ignored)', category: 'network', inputType: 'number', default: '8095' },
@@ -29,7 +38,6 @@ export const STRATA_SERVER_PARAMS: ParamDef[] = [
   { flag: '--parallel', key: 'parallel', label: 'Parallel Slots', description: 'Request this many simultaneous engine slots without changing the saved config', category: 'gpu', inputType: 'number' },
   { flag: '--batch-groups', key: 'batch-groups', label: 'Batch Groups', description: 'Pipeline groups: "auto" or a positive integer, without changing the saved config', category: 'gpu', inputType: 'text' },
   { flag: '--replicas', key: 'replicas', label: 'Replicas', description: 'Data-parallel replicas: cut the GPU list into N equal groups, one engine each', category: 'gpu', inputType: 'number' },
-  { flag: '--tokenizer', key: 'tokenizer', label: 'Tokenizer Dir', description: 'Pack tokenizer directory (falls back to a byte tokenizer if absent)', category: 'gpu', inputType: 'path' },
 
   // --- Queue / overload ---
   { flag: '--max-queue', key: 'max-queue', label: 'Max Queue', description: 'Max inference calls waiting beyond engine slots; 0 refuses overload', category: 'queue', inputType: 'number' },
@@ -50,4 +58,34 @@ export const STRATA_SERVER_PARAMS: ParamDef[] = [
   { flag: '--api-monitor', key: 'api-monitor', label: 'API Monitor', description: 'Request monitor at /api-monitor: keeps the last 100 requests in memory', category: 'tools', inputType: 'toggle', default: 'off' },
   { flag: '--mcp-config', key: 'mcp-config', label: 'MCP Config', description: 'JSON file with MCP servers in Claude Desktop format; the chat can use their tools', category: 'tools', inputType: 'path' },
   { flag: '--ready-file', key: 'ready-file', label: 'Ready File', description: 'Write a JSON instance record once the API is bound and model state is known', category: 'tools', inputType: 'path' },
+];
+
+/**
+ * Vision encoder options (the config's `vision` object). Unlike the server
+ * options these are **config keys, not CLI flags** — `serve/server.py` reads the
+ * section and builds the `strata-vision` command line itself (`Vision.
+ * reader_args`), so a row's name is the config key verbatim and a disabled row
+ * simply omits the key. Keys the server does not know still ride through
+ * untouched, which is why the editor offers custom rows here too.
+ */
+export const STRATA_VISION_PARAMS: ParamDef[] = [
+  // --- Encoder & files ---
+  { flag: 'exe', key: 'exe', label: 'Encoder Executable', description: 'strata-vision binary; a component reference resolves against the engine component', category: 'encoder', inputType: 'path' },
+  { flag: 'mmproj', key: 'mmproj', label: 'mmproj File', description: 'Multimodal projector .gguf for the encoder', category: 'encoder', inputType: 'path' },
+  { flag: 'model', key: 'model', label: 'Vision Model', description: 'Model .gguf the encoder reads embeddings from', category: 'encoder', inputType: 'path' },
+  { flag: 'cpu_exe', key: 'cpu_exe', label: 'CPU Fallback Executable', description: 'CPU reader started instead when the GPU reader will not start (AMD/hip setups)', category: 'encoder', inputType: 'path' },
+
+  // --- Device ---
+  { flag: 'gpu', key: 'gpu', label: 'GPU', description: 'true = the engine GPU, false = CPU, a number = that device index', category: 'device', inputType: 'text', default: 'true' },
+  { flag: 'cuda_device', key: 'cuda_device', label: 'CUDA Device', description: 'Pin the encoder to one device via its environment instead of the engine default', category: 'device', inputType: 'number' },
+  { flag: 'threads', key: 'threads', label: 'Threads', description: 'CPU threads for the encoder (--threads on strata-vision)', category: 'device', inputType: 'number' },
+
+  // --- Tokens ---
+  { flag: 'max_tokens', key: 'max_tokens', label: 'Max Tokens', description: 'Image token budget (--max-tokens)', category: 'tokens', inputType: 'number', default: '1024' },
+  { flag: 'min_tokens', key: 'min_tokens', label: 'Min Tokens', description: 'mtmd image_min_tokens floor (--min-tokens)', category: 'tokens', inputType: 'number' },
+
+  // --- Elastic VRAM ---
+  { flag: 'elastic', key: 'elastic', label: 'Elastic', description: 'Start the encoder with the first picture and stop it when idle; needs "vram_elastic": true at the top level', category: 'vram', inputType: 'toggle', default: 'off' },
+  { flag: 'elastic_mib', key: 'elastic_mib', label: 'Elastic VRAM (MiB)', description: 'VRAM the expert cache keeps free for the encoder while it waits (default 2048)', category: 'vram', inputType: 'number' },
+  { flag: 'elastic_idle_s', key: 'elastic_idle_s', label: 'Elastic Idle (s)', description: 'Idle seconds before an elastic encoder stops (default 120)', category: 'vram', inputType: 'number' },
 ];
