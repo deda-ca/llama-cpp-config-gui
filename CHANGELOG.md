@@ -1,3 +1,10 @@
+# [0.13.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.12.0...v0.13.0) (2026-10-22)
+
+
+### Features
+
+* strata engine kind with self-contained config, JSON import/export, autoLaunch and create-on-save ([f485b4c](https://github.com/deda-ca/llama-cpp-config-gui/commit/f485b4c19a8d449dfa0e62f6590e8cbd3fb4d51e))
+
 # [0.12.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.11.0...v0.12.0) (2026-10-22)
 
 
