@@ -5,6 +5,7 @@
 /** Determines endpoint compatibility and usage-capture behavior. */
 export type ProxyBackendKind =
   | 'llamacpp'
+  | 'strata'
   | 'audio'
   | 'sdiffusion'
   | 'embeddings'
@@ -17,6 +18,7 @@ export type ProxyBackendKind =
  *  fallback for requests that match no route, prefix or path convention. */
 export const BACKEND_KINDS: ProxyBackendKind[] = [
   'llamacpp',
+  'strata',
   'embeddings',
   'audio',
   'sdiffusion',

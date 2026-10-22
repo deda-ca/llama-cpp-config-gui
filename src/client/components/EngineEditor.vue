@@ -252,7 +252,26 @@ const CATEGORY_LABELS: Record<string, string> = {
   other: 'Other',
   unknown: 'Unknown',
 };
-const CATEGORY_ORDER = ['gpu', 'context', 'sampling', 'reasoning', 'speculative', 'other', 'unknown'];
+
+// The llama.cpp categories, in display order. A kind's own catalog may name
+// others (strata's ple/kv/experts/native/…): those follow, in the order the
+// catalog lists them, so the JSON file controls its own grouping. 'unknown'
+// (flags outside the catalog) always comes last.
+const BASE_CATEGORY_ORDER = ['gpu', 'context', 'sampling', 'reasoning', 'speculative', 'other'];
+
+const categoryOrder = computed(() => {
+  const extra: string[] = [];
+  for (const d of catalog.value) {
+    if (!BASE_CATEGORY_ORDER.includes(d.category) && d.category !== 'unknown' && !extra.includes(d.category)) {
+      extra.push(d.category);
+    }
+  }
+  return [...BASE_CATEGORY_ORDER, ...extra, 'unknown'];
+});
+
+function categoryLabel(cat: string): string {
+  return CATEGORY_LABELS[cat] || cat;
+}
 
 interface ParamRow {
   param: EngineParam;
@@ -270,9 +289,9 @@ const groupedParams = computed(() => {
     if (!groups[cat]) groups[cat] = [];
     groups[cat].push({ param, index, def });
   });
-  return CATEGORY_ORDER.filter((cat) => groups[cat]?.length).map((cat) => ({
+  return categoryOrder.value.filter((cat) => groups[cat]?.length).map((cat) => ({
     cat,
-    label: CATEGORY_LABELS[cat] || cat,
+    label: categoryLabel(cat),
     rows: groups[cat],
   }));
 });
@@ -309,9 +328,9 @@ const pickerGroups = computed(() => {
     if (!groups[d.category]) groups[d.category] = [];
     groups[d.category].push(d);
   }
-  return CATEGORY_ORDER.filter((cat) => groups[cat]?.length).map((cat) => ({
+  return categoryOrder.value.filter((cat) => groups[cat]?.length).map((cat) => ({
     cat,
-    label: CATEGORY_LABELS[cat] || cat,
+    label: categoryLabel(cat),
     defs: groups[cat],
   }));
 });

@@ -1,12 +1,19 @@
 // --- Model Config Types ---
 
+/**
+ * Grouping key for a parameter. The llama.cpp categories are listed for
+ * autocomplete, but per-kind catalogs (`.config/params.<kind>.json`) are plain
+ * user-editable JSON, so any category string is accepted — the editor renders
+ * unknown ones as extra groups (see EngineEditor's categoryOrder).
+ */
 export type ParamCategory =
   | 'gpu'
   | 'context'
   | 'sampling'
   | 'reasoning'
   | 'speculative'
-  | 'other';
+  | 'other'
+  | (string & {});
 
 export type ParamInputType =
   | 'text'

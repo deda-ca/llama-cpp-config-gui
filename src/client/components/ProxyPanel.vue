@@ -566,6 +566,7 @@ onUnmounted(() => {
           <span>Type</span>
           <select v-model="editForm.kind">
             <option value="llamacpp">llama.cpp (text)</option>
+            <option value="strata">strata (text)</option>
             <option value="embeddings">embeddings</option>
             <option value="audio">audio</option>
             <option value="sdiffusion">image (stable-diffusion)</option>

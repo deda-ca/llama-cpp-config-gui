@@ -21,6 +21,7 @@ export type EngineKind = ProxyBackendKind;
 
 export const ENGINE_KINDS: EngineKind[] = [
   'llamacpp',
+  'strata',
   'audio',
   'sdiffusion',
   'embeddings',

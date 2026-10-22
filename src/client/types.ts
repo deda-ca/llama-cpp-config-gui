@@ -76,6 +76,7 @@ export interface LogEntry {
 /** Engine kinds that can be spawned (mirrors src/server/engines/types.ts). */
 export type EngineKind =
   | 'llamacpp'
+  | 'strata'
   | 'audio'
   | 'sdiffusion'
   | 'embeddings'
@@ -86,6 +87,7 @@ export type EngineKind =
 
 export const ENGINE_KIND_LABELS: Record<EngineKind, string> = {
   llamacpp: 'llama.cpp',
+  strata: 'strata',
   audio: 'audio.cpp',
   sdiffusion: 'stable-diffusion.cpp',
   embeddings: 'embeddings',
@@ -155,6 +157,7 @@ export interface ModelStatusData {
 /** Proxy gateway settings (mirrors src/server/proxy/types.ts). */
 export type ProxyBackendKind =
   | 'llamacpp'
+  | 'strata'
   | 'audio'
   | 'sdiffusion'
   | 'embeddings'

@@ -521,6 +521,14 @@ kind gets preferential treatment.
   Legacy `POST /api/launch` (settings.json) leaves the flag unset and keeps the
   default injection. `paramValueAny`/`paramFlagAliases` resolve a flag under
   any accepted spelling (`--port`/`-p`, `--ctx-size`/`-c`, …) for port lookup.
+- **strata kind + catalog:** `strata` is a valid engine/proxy kind, with a
+  144-entry parameter catalog at `.config/params.strata.json` (generated from
+  `docs/strata-parameters.md`) served by `GET /api/params?kind=strata`. It uses
+  its own categories (`model`, `ple`, `kv`, `experts`, `cpu`, `serve`,
+  `prefill`, `steering`, `native`, `debug`); `ParamCategory` is an open string
+  union and the editor appends catalog-only categories after the llama.cpp ones,
+  so each kind's JSON controls its own grouping. No strata driver yet — it
+  launches through the passthrough driver (Phase 4 will add log parsing/version).
 
 ### Phase 4 — real non-llama kinds
 audio.cpp, stable-diffusion.cpp, strata drivers + auto-registration as proxy backends.
