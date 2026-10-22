@@ -101,16 +101,18 @@ export class EngineManager {
   }
 
   /**
-   * Driver for an instance, from its definition's kind. Instances that are not
-   * in the engines file yet (the legacy /api/launch alias before migration,
-   * or a caller-supplied id) keep llama.cpp behavior for parity.
+   * Driver for an instance, from its own kind (falling back to its
+   * definition's kind for files written before instances carried one).
+   * Instances that are not in the engines file yet (the legacy /api/launch
+   * alias before migration, or a caller-supplied id) keep llama.cpp behavior
+   * for parity.
    */
   driverFor(instanceId: string): EngineDriver {
     const data = this.engines;
     const inst = data.instances.find((i) => i.id === instanceId);
     if (!inst) return getDriver('llamacpp');
     const def = data.definitions.find((d) => d.id === inst.definitionId);
-    return getDriver(def?.kind);
+    return getDriver(inst.kind || def?.kind);
   }
 
   private createInstance(instanceId: string): ManagedInstance {

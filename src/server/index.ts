@@ -19,7 +19,9 @@ import {
   normalizeEnvVars,
 } from './engines/store.js';
 import { loadTemplate, saveTemplate } from './engines/template.js';
-import { isEngineKind, type EngineDefinition, type EngineInstance } from './engines/types.js';
+import { normalizeStrataConfig, strataConfigPath, strataFromConfig, strataToConfig } from './engines/strata.js';
+import { STRATA_SERVER_PARAMS } from './engines/strataServerParams.js';
+import { isEngineKind, type EngineDefinition, type EngineInstance, type EnginesFile } from './engines/types.js';
 import { getDriver } from './engines/driver.js';
 import type { WsMessage, LlamaConfig, GpuInfo, LlamaDevice, GpuSortMode, SystemStats } from './types.js';
 import { loadModels, saveModels, loadParams, saveParams, generateId, type ModelConfig, type ConfigTemplate, type ParamDef } from './modelConfig.js';
@@ -707,21 +709,31 @@ app.post('/api/engines/command', (req, res) => {
     return;
   }
   const kind = isEngineKind(body.kind) ? body.kind : def?.kind ?? 'llamacpp';
-  const buildPath = path.dirname(executable);
-  const binary = path.basename(executable);
   const driver = getDriver(kind);
+  // llama.cpp-style kinds run `<buildPath>/<binary>`, so the executable splits
+  // into folder + name. A kind with its own spawn plan (strata: a Python
+  // interpreter run from the repo root) has no build folder, so the executable
+  // is used verbatim — otherwise the preview would show `python` for a path.
+  const customLaunch = driver.buildLaunch !== undefined;
+  const buildPath = customLaunch ? '' : path.dirname(executable);
+  const binary = customLaunch ? executable : path.basename(executable);
+
+  const previewInstance = {
+    id: '__preview__',
+    name: '__preview__',
+    notes: '',
+    kind,
+    definitionId: def?.id ?? 'default',
+    binary,
+    params: normalizeEngineParams(body.params),
+    routerMode: false,
+    modelConfigIds: [],
+    autoLaunch: false,
+    ...(body.strata ? { strata: normalizeStrataConfig(body.strata) } : {}),
+  } as EngineInstance;
 
   const spec = instanceToLlamaConfig(
-    {
-      id: '__preview__',
-      name: '__preview__',
-      notes: '',
-      definitionId: def?.id ?? 'default',
-      binary,
-      params: normalizeEngineParams(body.params),
-      routerMode: false,
-      modelConfigIds: [],
-    } as EngineInstance,
+    previewInstance,
     {
       id: def?.id ?? '__preview__',
       name: def?.name ?? 'preview',
@@ -729,7 +741,26 @@ app.post('/api/engines/command', (req, res) => {
       buildPath,
       envVars: normalizeEnvVars(body.envVars),
     },
+    undefined,
+    // A strata preview points at the file a real launch would write, so the
+    // --config argument shown matches what runs.
+    kind === 'strata' ? strataConfigPath(body.instanceId ?? '__preview__') : undefined,
   );
+
+  // Kinds with a custom spawn plan (strata) preview that exact command; others
+  // keep the <buildPath>/<binary> + buildArgs layout.
+  const launch = driver.buildLaunch?.(spec);
+  if (launch) {
+    res.json({
+      binaryPath: launch.command,
+      args: launch.args,
+      envVars: spec.envVars,
+      cwd: launch.cwd,
+      // A PATH-resolved interpreter (python) can't be stat'd relative to cwd.
+      exists: path.isAbsolute(launch.command) ? fs.existsSync(launch.command) : true,
+    });
+    return;
+  }
 
   const args = driver.buildArgs(spec);
   res.json({
@@ -754,20 +785,45 @@ app.put('/api/engines/templates/:kind', (req, res) => {
   res.json({ kind, params });
 });
 
+// A blank, unsaved instance for the "New engine" dialog: the same seeding
+// blankInstance() does (kind template, free --port), but nothing is written.
+// The engine is only created when the dialog's Save button posts it.
+app.get('/api/engines/instances/draft', (req, res) => {
+  const data = engines.getEngines();
+  const kind = isEngineKind(req.query.kind) ? req.query.kind : 'llamacpp';
+  const name = typeof req.query.name === 'string' && req.query.name.trim()
+    ? req.query.name.trim()
+    : `engine-${data.instances.length + 1}`;
+  // A strata draft is self-contained: it must not inherit a definition of a
+  // different kind, or blankInstance() would seed the wrong kind's template.
+  const def = kind === 'strata'
+    ? undefined
+    : data.definitions.find((d) => d.kind === kind) ?? data.definitions[0];
+  const draft = blankInstance(name, def ?? { id: '', name, kind, buildPath: '', envVars: {} }, data);
+  draft.kind = kind;
+  // A draft has no definition unless the kind needs one (strata is self-contained).
+  if (kind === 'strata') draft.definitionId = '';
+  res.json(draft);
+});
+
 app.post('/api/engines/instances', (req, res) => {
   const data = engines.getEngines();
   const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
-  const def = data.definitions.find((d) => d.id === req.body?.definitionId);
   if (!name) {
     res.status(400).json({ error: 'name is required' });
     return;
   }
-  if (!def) {
+  // A strata instance is self-contained (its whole config lives on the
+  // instance), so it needs no shared definition. Other kinds attach to one.
+  const kind = isEngineKind(req.body?.kind) ? req.body.kind : 'llamacpp';
+  const def = data.definitions.find((d) => d.id === req.body?.definitionId);
+  if (!def && kind !== 'strata') {
     res.status(400).json({ error: 'a valid definitionId is required' });
     return;
   }
-  const inst = blankInstance(name, def, data);
-  const port = instancePort(inst.params);
+  const inst = blankInstance(name, def ?? { id: '', name, kind, buildPath: '', envVars: {} }, data);
+  inst.kind = kind;
+  const port = instancePort(inst);
   if (port !== null && isPortTaken(data, port)) {
     res.status(409).json({ error: `Port ${port} is already used by another instance` });
     return;
@@ -789,24 +845,75 @@ app.put('/api/engines/instances/:id', (req, res) => {
   // --port is a plain param; conflict-check it against the other instances
   // *before* touching the stored instance, so a rejected edit leaves no trace.
   const nextParams = body.params !== undefined ? normalizeEngineParams(body.params) : inst.params;
-  const nextPort = instancePort(nextParams);
+  const nextStrata = body.strata !== undefined ? normalizeStrataConfig(body.strata) : inst.strata;
+  const nextPort = instancePort({ params: nextParams, strata: nextStrata });
   if (nextPort !== null && isPortTaken(data, nextPort, inst.id)) {
     res.status(409).json({ error: `Port ${nextPort} is already used by another instance` });
     return;
   }
   if (typeof body.name === 'string' && body.name.trim()) inst.name = body.name.trim();
   if (typeof body.notes === 'string') inst.notes = body.notes;
+  if (isEngineKind(body.kind)) inst.kind = body.kind;
   if (typeof body.binary === 'string' && body.binary) inst.binary = body.binary;
   if (typeof body.routerMode === 'boolean') inst.routerMode = body.routerMode;
+  if (typeof body.autoLaunch === 'boolean') inst.autoLaunch = body.autoLaunch;
   if (Array.isArray(body.modelConfigIds)) inst.modelConfigIds = body.modelConfigIds.filter((x: unknown): x is string => typeof x === 'string');
   if (typeof body.modelPath === 'string') inst.modelPath = body.modelPath || undefined;
   if (typeof body.mmproj === 'string') inst.mmproj = body.mmproj || undefined;
   inst.params = nextParams;
-  if (typeof body.definitionId === 'string' && data.definitions.some((d) => d.id === body.definitionId)) {
+  if (body.strata !== undefined) inst.strata = nextStrata;
+  // '' clears the link: a self-contained (strata) instance has no definition.
+  if (typeof body.definitionId === 'string'
+    && (body.definitionId === '' || data.definitions.some((d) => d.id === body.definitionId))) {
     inst.definitionId = body.definitionId;
   }
   engines.saveEngines(data);
   res.json(inst);
+});
+
+// Import a strata JSON config file (the `strata-<model>.json` shape) into the
+// editable block the dialog shows. Unknown keys ride along untouched, so an
+// import → export round-trip is lossless.
+app.post('/api/engines/strata/import', (req, res) => {
+  const raw = typeof req.body?.json === 'string' ? req.body.json : '';
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    res.status(400).json({ error: `Invalid JSON: ${(e as Error).message}` });
+    return;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    res.status(400).json({ error: 'Expected a JSON object' });
+    return;
+  }
+  res.json({ strata: strataFromConfig(parsed as Record<string, unknown>) });
+});
+
+// Render a *draft* strata block (unsaved dialog edits included) to the
+// `strata-<model>.json` shape, so Export works before the instance is saved.
+app.post('/api/engines/strata/render', (req, res) => {
+  const s = normalizeStrataConfig(req.body);
+  if (!s) {
+    res.status(400).json({ error: 'A strata configuration object is required' });
+    return;
+  }
+  res.json(strataToConfig(s));
+});
+
+// Export an instance's strata block back to the `strata-<model>.json` shape.
+app.get('/api/engines/instances/:id/strata/export', (req, res) => {
+  const inst = engines.getEngines().instances.find((i) => i.id === req.params.id);
+  if (!inst) {
+    res.status(404).json({ error: `Instance "${req.params.id}" not found` });
+    return;
+  }
+  if (!inst.strata) {
+    res.status(400).json({ error: 'Instance has no strata configuration' });
+    return;
+  }
+  res.setHeader('Content-Disposition', `attachment; filename="strata-${inst.id}.json"`);
+  res.json(strataToConfig(inst.strata));
 });
 
 app.delete('/api/engines/instances/:id', (req, res) => {
@@ -824,6 +931,64 @@ app.delete('/api/engines/instances/:id', (req, res) => {
   res.json({ status: 'deleted' });
 });
 
+// Build the launch spec for an instance, writing any generated files the
+// launch needs (llama.cpp router INI, strata config JSON). Returns an error
+// message instead of a spec when the instance is not launchable. Shared by the
+// launch endpoint and startup auto-launch so both paths behave identically.
+async function buildLaunchSpec(
+  inst: EngineInstance,
+  data: EnginesFile,
+): Promise<{ spec?: LlamaConfig; error?: string; routerIniPath?: string; strataConfigPath?: string }> {
+  const kind = inst.kind || 'llamacpp';
+  const def = data.definitions.find((d) => d.id === inst.definitionId);
+  // A strata instance carries its own config, so it needs no definition; every
+  // other kind launches through one (build folder + env).
+  if (!def && kind !== 'strata') {
+    return { error: `Instance references missing definition "${inst.definitionId}"` };
+  }
+  const effDef: EngineDefinition = def ?? { id: '', name: inst.name, kind, buildPath: '', envVars: {} };
+  // Non-llama kinds launch the executable named on the instance (passthrough
+  // driver), so a binary must be set — llama.cpp falls back to llama-server.
+  if (kind !== 'llamacpp' && !inst.binary.trim()) {
+    return { error: 'Set an executable name for this engine before launching' };
+  }
+
+  let routerIniPath: string | undefined;
+  // Router mode is a llama.cpp feature (--models-preset); other kinds ignore it.
+  if (inst.routerMode && kind === 'llamacpp') {
+    const modelsData = loadModels();
+    const selected = modelsData.configs.filter((c) => inst.modelConfigIds.includes(c.id));
+    if (selected.length === 0) {
+      return { error: 'Router mode requires at least one model config' };
+    }
+    routerIniPath = path.join(path.resolve(process.cwd(), '.config'), `router-${inst.id}.ini`);
+    try {
+      fs.mkdirSync(path.dirname(routerIniPath), { recursive: true });
+      fs.writeFileSync(routerIniPath, exportRouterIni(selected, loadParams()), 'utf-8');
+    } catch (e) {
+      return { error: `Failed to write router INI: ${e}` };
+    }
+  }
+
+  // Strata launches from a generated config file (like the router INI): the
+  // dialog edits the block, the launch writes the JSON the server reads.
+  let generatedConfigPath: string | undefined;
+  if (kind === 'strata') {
+    if (!inst.strata) return { error: 'This strata engine has no configuration yet' };
+    if (!inst.strata.cwd.trim()) return { error: 'Set the Strata repo folder before launching' };
+    generatedConfigPath = strataConfigPath(inst.id);
+    try {
+      fs.mkdirSync(path.dirname(generatedConfigPath), { recursive: true });
+      fs.writeFileSync(generatedConfigPath, JSON.stringify(strataToConfig(inst.strata), null, 2), 'utf-8');
+    } catch (e) {
+      return { error: `Failed to write strata config: ${e}` };
+    }
+  }
+
+  const spec = instanceToLlamaConfig(inst, effDef, routerIniPath, generatedConfigPath);
+  return { spec, routerIniPath, strataConfigPath: generatedConfigPath };
+}
+
 // Launch an engine instance from its stored definition + settings.
 app.post('/api/engines/instances/:id/launch', async (req, res) => {
   const id = req.params.id;
@@ -833,43 +998,20 @@ app.post('/api/engines/instances/:id/launch', async (req, res) => {
     res.status(404).json({ error: `Instance "${id}" not found` });
     return;
   }
-  const def = data.definitions.find((d) => d.id === inst.definitionId);
-  if (!def) {
-    res.status(400).json({ error: `Instance references missing definition "${inst.definitionId}"` });
+  const built = await buildLaunchSpec(inst, data);
+  if (!built.spec) {
+    res.status(400).json({ error: built.error });
     return;
   }
-  // Non-llama kinds launch the executable named on the instance (passthrough
-  // driver), so a binary must be set — llama.cpp falls back to llama-server.
-  if (def.kind !== 'llamacpp' && !inst.binary.trim()) {
-    res.status(400).json({ error: 'Set an executable name for this engine before launching' });
-    return;
-  }
-
-  let routerIniPath: string | undefined;
-  // Router mode is a llama.cpp feature (--models-preset); other kinds ignore it.
-  if (inst.routerMode && def.kind === 'llamacpp') {
-    const modelsData = loadModels();
-    const selected = modelsData.configs.filter((c) => inst.modelConfigIds.includes(c.id));
-    if (selected.length === 0) {
-      res.status(400).json({ error: 'Router mode requires at least one model config' });
-      return;
-    }
-    routerIniPath = path.join(path.resolve(process.cwd(), '.config'), `router-${inst.id}.ini`);
-    try {
-      fs.mkdirSync(path.dirname(routerIniPath), { recursive: true });
-      fs.writeFileSync(routerIniPath, exportRouterIni(selected, loadParams()), 'utf-8');
-    } catch (e) {
-      res.status(500).json({ error: `Failed to write router INI: ${e}` });
-      return;
-    }
-  }
-
-  const spec = instanceToLlamaConfig(inst, def, routerIniPath);
   await refreshDeviceMatch();
   metricsPoller.reset();
   startMetricsPolling();
-  engines.launch(id, spec);
-  res.json({ status: engines.getStatus(id), routerIniPath: routerIniPath ?? null });
+  engines.launch(id, built.spec);
+  res.json({
+    status: engines.getStatus(id),
+    routerIniPath: built.routerIniPath ?? null,
+    strataConfigPath: built.strataConfigPath ?? null,
+  });
 });
 
 app.post('/api/engines/instances/:id/stop', (req, res) => {
@@ -1164,6 +1306,12 @@ app.delete('/api/models/templates/:id', (req, res) => {
 app.get('/api/params', (req, res) => {
   const kind = isEngineKind(req.query.kind) ? req.query.kind : undefined;
   res.json(loadParams(kind));
+});
+
+// The serve/server.py option list (strata kind's "Server" group). Fixed by the
+// server's own argparse block, so it ships with the app instead of .config.
+app.get('/api/params/strata-server', (_req, res) => {
+  res.json(STRATA_SERVER_PARAMS);
 });
 
 app.post('/api/params/refresh', async (_req, res) => {
@@ -1589,10 +1737,33 @@ function openBrowser(url: string): void {
   }
 }
 
+// Launch every instance flagged autoLaunch, after the HTTP server is up so the
+// UI is already reachable when their log lines start arriving. Uses the same
+// buildLaunchSpec path as the manual launch endpoint, so an auto-started engine
+// gets the identical command line (generated router INI / strata config).
+async function autoLaunchEngines(): Promise<void> {
+  const data = engines.getEngines();
+  const targets = data.instances.filter((i) => i.autoLaunch);
+  if (targets.length === 0) return;
+  for (const inst of targets) {
+    const built = await buildLaunchSpec(inst, data);
+    if (!built.spec) {
+      console.warn(`[server] auto-launch "${inst.name}" skipped: ${built.error}`);
+      continue;
+    }
+    engines.launch(inst.id, built.spec);
+    console.log(`[server] auto-launched engine "${inst.name}" (${inst.id})`);
+  }
+  await refreshDeviceMatch();
+  metricsPoller.reset();
+  startMetricsPolling();
+}
+
 server.listen(PORT, () => {
   const url = `http://localhost:${PORT}`;
   console.log(`[server] llama.cpp Config GUI v${APP_VERSION} — listening on ${url}`);
   if (proxySettings.autoStart) startProxy();
+  void autoLaunchEngines();
 
   // Auto-launch browser only in release mode (compiled binary) and when NO_BROWSER is not set
   if (embeddedClient.size > 0 && !process.env.NO_BROWSER) {

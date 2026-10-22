@@ -27,6 +27,7 @@ import {
   makeEngineId,
 } from '../engines/store.js';
 import { splitArgs, tokensToParams, paramsToArgs } from '../engines/args.js';
+import { blankStrataConfig } from '../engines/strata.js';
 import { DEFAULT_CONFIG } from '../config.js';
 import type { EnginesFile } from '../engines/types.js';
 
@@ -58,11 +59,13 @@ describe('loadEngines / saveEngines', () => {
           id: 'llama-main',
           name: 'llama-main',
           notes: 'main box',
+          kind: 'llamacpp',
           definitionId: 'default',
           binary: 'llama-server',
           params: [{ key: '--host', value: '0.0.0.0' }, { key: '--port', value: '8080' }, { key: '--api-key', value: 'secret' }, { key: '--metrics' }],
           routerMode: true,
           modelConfigIds: ['cfg1', 'cfg2'],
+          autoLaunch: false,
         },
       ],
       defaultInstanceId: 'llama-main',
@@ -99,11 +102,13 @@ describe('normalizeEngines', () => {
       id: 'inst-0',
       name: 'Inst',
       notes: '',
+      kind: 'llamacpp',
       definitionId: 'def-0',
       binary: 'llama-server',
       params: [],
       routerMode: false,
       modelConfigIds: [],
+      autoLaunch: false,
     });
     expect(normalized.defaultInstanceId).toBe('inst-0');
   });
@@ -201,6 +206,7 @@ describe('migrateLegacyConfig', () => {
       id: 'default',
       name: 'default',
       notes: '',
+      kind: 'llamacpp',
       definitionId: 'default',
       binary: 'llama-server',
       params: [
@@ -212,6 +218,7 @@ describe('migrateLegacyConfig', () => {
       ],
       routerMode: false,
       modelConfigIds: [],
+      autoLaunch: false,
       modelPath: '/models/a.gguf',
       mmproj: '/models/a-mmproj.gguf',
     });
@@ -228,26 +235,35 @@ describe('port allocation', () => {
   const data: EnginesFile = {
     definitions: [],
     instances: [
-      { id: 'a', name: 'a', notes: '', definitionId: 'default', binary: 'llama-server', params: [{ key: '--port', value: '8080' }], routerMode: false, modelConfigIds: [] },
-      { id: 'b', name: 'b', notes: '', definitionId: 'default', binary: 'llama-server', params: [{ key: '--port', value: '8082' }], routerMode: false, modelConfigIds: [] },
+      { id: 'a', name: 'a', notes: '', kind: 'llamacpp', definitionId: 'default', binary: 'llama-server', params: [{ key: '--port', value: '8080' }], routerMode: false, modelConfigIds: [], autoLaunch: false },
+      { id: 'b', name: 'b', notes: '', kind: 'llamacpp', definitionId: 'default', binary: 'llama-server', params: [{ key: '--port', value: '8082' }], routerMode: false, modelConfigIds: [], autoLaunch: false },
     ],
     defaultInstanceId: 'a',
   };
 
   it('instancePort reads --port from params', () => {
-    expect(instancePort([{ key: '--port', value: '8080' }])).toBe(8080);
-    expect(instancePort([{ key: '-p', value: '5000' }])).toBe(5000);
-    expect(instancePort([{ key: '--port', value: 'nope' }])).toBeNull();
-    expect(instancePort([])).toBeNull();
+    expect(instancePort({ params: [{ key: '--port', value: '8080' }] })).toBe(8080);
+    expect(instancePort({ params: [{ key: '-p', value: '5000' }] })).toBe(5000);
+    expect(instancePort({ params: [{ key: '--port', value: 'nope' }] })).toBeNull();
+    expect(instancePort({ params: [] })).toBeNull();
   });
 
   it('instancePort ignores a disabled --port row', () => {
-    expect(instancePort([{ key: '--port', value: '8080', disabled: true }])).toBeNull();
+    expect(instancePort({ params: [{ key: '--port', value: '8080', disabled: true }] })).toBeNull();
     // A later enabled row still wins
-    expect(instancePort([
-      { key: '--port', value: '8080', disabled: true },
-      { key: '--port', value: '9090' },
-    ])).toBe(9090);
+    expect(instancePort({
+      params: [
+        { key: '--port', value: '8080', disabled: true },
+        { key: '--port', value: '9090' },
+      ],
+    })).toBe(9090);
+  });
+
+  it('instancePort falls back to the strata --port server row', () => {
+    expect(instancePort({
+      params: [],
+      strata: { ...blankStrataConfig(), serverArgs: [{ key: '--port', value: '5456' }] },
+    })).toBe(5456);
   });
 
   it('isPortTaken ignores the excluded instance', () => {
@@ -277,7 +293,7 @@ describe('blankInstance / makeEngineId', () => {
     const inst = blankInstance('My Engine', def, emptyEngines);
     expect(inst.id).toBe('my-engine');
     // New instances are seeded from the kind's parameter template
-    expect(instancePort(inst.params)).toBe(8080);
+    expect(instancePort(inst)).toBe(8080);
     expect(inst.params[0]).toEqual({ key: '--host', value: '127.0.0.1' });
     expect(inst.binary).toBe('llama-server');
     expect(inst.definitionId).toBe('default');
@@ -289,7 +305,7 @@ describe('blankInstance / makeEngineId', () => {
       instances: [{ id: 'x', params: [{ key: '--port', value: '8080' }] }],
     });
     const inst = blankInstance('Another', def, existing);
-    expect(instancePort(inst.params)).toBe(8081);
+    expect(instancePort(inst)).toBe(8081);
   });
 
   it('uniquifies ids against existing instances', () => {
@@ -350,7 +366,7 @@ describe('disabled param rows', () => {
     const data: EnginesFile = {
       definitions: [],
       instances: [
-        { id: 'a', name: 'a', notes: '', definitionId: 'default', binary: 'llama-server', params: [{ key: '--metrics', disabled: true }], routerMode: false, modelConfigIds: [] },
+        { id: 'a', name: 'a', notes: '', kind: 'llamacpp', definitionId: 'default', binary: 'llama-server', params: [{ key: '--metrics', disabled: true }], routerMode: false, modelConfigIds: [], autoLaunch: false },
       ],
       defaultInstanceId: 'a',
     };

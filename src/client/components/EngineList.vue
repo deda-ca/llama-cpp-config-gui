@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import EngineEditor from './EngineEditor.vue';
-import type { EngineDefinition, EngineInstance, EngineParam } from '../types';
+import StrataEditor from './StrataEditor.vue';
+import type { EngineDefinition, EngineInstance, EngineKind, EngineParam } from '../types';
 import { ENGINE_KIND_LABELS } from '../types';
 
 interface ModelOption {
@@ -27,8 +28,16 @@ const busyId = ref<string | null>(null);
 
 // Inline drawer expansion
 const expandedId = ref<string | null>(null);
-// Editor dialog
+// Editor dialog (null = closed). `isNew` marks a draft the server has not seen
+// yet — the engine is only created when the dialog's Save button is used.
 const editingInstance = ref<EngineInstance | null>(null);
+const isNewInstance = ref(false);
+
+// The kind to create, chosen from the toolbar dropdown before the dialog opens.
+const newKind = ref<EngineKind>('llamacpp');
+// Only kinds with a real driver get offered; the rest stay in the generic
+// editor's kind list for advanced use.
+const creatableKinds: EngineKind[] = ['llamacpp', 'strata'];
 
 const statusOf = (i: EngineInstance) => props.statuses?.[i.id] ?? i.status ?? 'stopped';
 const isLive = (i: EngineInstance) => {
@@ -36,10 +45,15 @@ const isLive = (i: EngineInstance) => {
   return s === 'running' || s === 'starting';
 };
 
+const kindOf = (i: EngineInstance): EngineKind =>
+  i.kind || definitionOf(i)?.kind || 'custom';
+
 // --port is a plain parameter now; the list column reads it back out.
 // Disabled rows never reach the command line, so they don't count here either.
+// strata keeps its port in the separate server-arg list instead.
 const portOf = (i: EngineInstance) => {
-  const p = i.params.find((x) => (x.key === '--port' || x.key === '-p') && !x.disabled);
+  const p = i.params.find((x) => (x.key === '--port' || x.key === '-p') && !x.disabled)
+    ?? i.strata?.serverArgs.find((x) => x.key === '--port' && !x.disabled);
   return p?.value ? `:${p.value}` : '';
 };
 
@@ -77,26 +91,24 @@ async function postJson(url: string, method: string, body?: unknown) {
 async function newEngine() {
   error.value = '';
   try {
-    // Ensure there is at least one definition to attach the instance to
-    if (definitions.value.length === 0) {
-      const def = await postJson('/api/engines/definitions', 'POST', {
-        name: 'default',
-        kind: 'llamacpp',
-        buildPath: '',
-        envVars: {},
-      });
-      definitions.value.push(def);
+    // Ask the server for a blank draft of the chosen kind (template params + a
+    // free port). Nothing is stored yet: the editor's Save creates the engine.
+    const res = await fetch(`/api/engines/instances/draft?kind=${newKind.value}`);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      error.value = data.error || `Could not start a new engine (${res.status})`;
+      return;
     }
-    const base = definitions.value[0];
-    const inst = await postJson('/api/engines/instances', 'POST', {
-      name: `engine-${instances.value.length + 1}`,
-      definitionId: base.id,
-    });
-    instances.value.push(inst);
-    editingInstance.value = inst;
+    editingInstance.value = data;
+    isNewInstance.value = true;
   } catch (e) {
     error.value = (e as Error).message;
   }
+}
+
+function editInstance(inst: EngineInstance) {
+  editingInstance.value = inst;
+  isNewInstance.value = false;
 }
 
 async function launchInstance(id: string) {
@@ -131,18 +143,25 @@ async function duplicateInstance(inst: EngineInstance) {
     const portKey = (p: EngineParam) => (p.key === '--port' || p.key === '-p') && !p.disabled;
     const taken = new Set(
       instances.value
-        .map((i) => Number(i.params.find(portKey)?.value))
+        .map((i) => Number(i.params.find(portKey)?.value ?? i.strata?.serverArgs.find(portKey)?.value))
         .filter((n) => Number.isFinite(n)),
     );
     const params = inst.params.map((p) => ({ ...p }));
     const portRow = params.find(portKey);
-    if (portRow) {
-      let port = Number(portRow.value) || 8080;
+    const strata = inst.strata
+      ? { ...inst.strata, engineArgs: inst.strata.engineArgs.map((p) => ({ ...p })), serverArgs: inst.strata.serverArgs.map((p) => ({ ...p })) }
+      : undefined;
+    const strataPortRow = strata?.serverArgs.find(portKey);
+    const currentPort = Number(portRow?.value ?? strataPortRow?.value);
+    if (portRow || strataPortRow) {
+      let port = Number.isFinite(currentPort) ? currentPort : (inst.kind === 'strata' ? 8095 : 8080);
       while (taken.has(port)) port++;
-      portRow.value = String(port);
+      if (portRow) portRow.value = String(port);
+      if (strataPortRow) strataPortRow.value = String(port);
     }
     const copy = await postJson('/api/engines/instances', 'POST', {
       name: `${inst.name}-copy`,
+      kind: inst.kind,
       definitionId: inst.definitionId,
     });
     await postJson(`/api/engines/instances/${copy.id}`, 'PUT', {
@@ -153,6 +172,8 @@ async function duplicateInstance(inst: EngineInstance) {
       modelConfigIds: inst.modelConfigIds,
       modelPath: inst.modelPath ?? '',
       mmproj: inst.mmproj ?? '',
+      autoLaunch: false,
+      ...(strata ? { strata } : {}),
     });
     await loadData();
   } catch (e) {
@@ -176,6 +197,7 @@ async function deleteInstance(id: string) {
 function onEditorSaved(updated: EngineInstance) {
   const idx = instances.value.findIndex((i) => i.id === updated.id);
   if (idx !== -1) instances.value[idx] = { ...instances.value[idx], ...updated };
+  else instances.value.push(updated);
   // Definition edits happen inside the editor — refresh the shared list
   fetch('/api/engines')
     .then((r) => (r.ok ? r.json() : null))
@@ -231,6 +253,9 @@ onUnmounted(() => es?.close());
     <div class="toolbar">
       <h2 class="section-title">Engines</h2>
       <div class="toolbar-actions">
+        <select v-model="newKind" class="kind-select" title="Engine type to create">
+          <option v-for="k in creatableKinds" :key="k" :value="k">{{ ENGINE_KIND_LABELS[k] }}</option>
+        </select>
         <button class="btn btn-sm btn-primary" @click="newEngine">+ New engine</button>
       </div>
     </div>
@@ -238,7 +263,7 @@ onUnmounted(() => es?.close());
     <div v-if="error" class="engine-error">{{ error }}</div>
 
     <div v-if="instances.length === 0" class="empty-hint">
-      No engine instances yet. Click <strong>+ New engine</strong> to create one.
+      No engine instances yet. Pick a type and click <strong>+ New engine</strong> to create one.
     </div>
 
     <div class="engine-items">
@@ -250,7 +275,7 @@ onUnmounted(() => es?.close());
           <span class="engine-name">{{ inst.name }}</span>
           <span class="status-dot" :class="statusOf(inst)"></span>
           <span class="engine-status">{{ statusOf(inst) }}</span>
-          <span class="engine-kind">{{ ENGINE_KIND_LABELS[definitionOf(inst)?.kind ?? 'custom'] }}</span>
+          <span class="engine-kind">{{ ENGINE_KIND_LABELS[kindOf(inst)] }}</span>
           <span class="engine-port">{{ portOf(inst) }}</span>
           <div class="engine-actions">
             <button
@@ -267,7 +292,7 @@ onUnmounted(() => es?.close());
               @click="stopInstance(inst.id)"
               title="Stop this engine"
             >⏹</button>
-            <button class="row-btn" @click="editingInstance = inst" title="Configure">⚙</button>
+            <button class="row-btn" @click="editInstance(inst)" title="Configure">⚙</button>
             <button class="row-btn" @click="duplicateInstance(inst)" title="Duplicate">⧉</button>
             <button class="row-btn danger" @click="deleteInstance(inst.id)" title="Delete">✕</button>
           </div>
@@ -283,9 +308,17 @@ onUnmounted(() => es?.close());
             <span class="drawer-label">Env</span>
             <code>{{ fmtEnv(definitionOf(inst)) }}</code>
           </div>
+          <div v-if="inst.strata" class="drawer-section">
+            <span class="drawer-label">Strata</span>
+            <code>{{ inst.strata.exe || '(no engine exe)' }} · cwd {{ inst.strata.cwd || '(not set)' }}</code>
+          </div>
           <div v-if="inst.params.length" class="drawer-section">
             <span class="drawer-label">Params</span>
             <code>{{ fmtParams(inst.params) }}</code>
+          </div>
+          <div v-if="inst.strata" class="drawer-section">
+            <span class="drawer-label">Server</span>
+            <code>{{ fmtParams(inst.strata.serverArgs) || '(defaults)' }}</code>
           </div>
           <div v-if="inst.routerMode" class="drawer-section">
             <span class="drawer-label">Router</span>
@@ -299,10 +332,18 @@ onUnmounted(() => es?.close());
       </div>
     </div>
 
+    <StrataEditor
+      v-if="editingInstance && kindOf(editingInstance) === 'strata'"
+      :instance="editingInstance"
+      :is-new="isNewInstance"
+      @saved="onEditorSaved"
+      @close="editingInstance = null"
+    />
     <EngineEditor
-      v-if="editingInstance"
+      v-else-if="editingInstance"
       :instance="editingInstance"
       :definitions="definitions"
+      :is-new="isNewInstance"
       @saved="onEditorSaved"
       @close="editingInstance = null"
     />
@@ -330,6 +371,21 @@ onUnmounted(() => es?.close());
 .toolbar-actions {
   display: flex;
   gap: 8px;
+  align-items: center;
+}
+
+.kind-select {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 5px 8px;
+  color: #e1e4e8;
+  font-size: 0.78rem;
+}
+
+.kind-select:focus {
+  outline: none;
+  border-color: #58a6ff;
 }
 
 .engine-error {

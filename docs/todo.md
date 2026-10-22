@@ -531,11 +531,49 @@ kind gets preferential treatment.
   launches through the passthrough driver (Phase 4 will add log parsing/version).
 
 ### Phase 4 — real non-llama kinds
-audio.cpp, stable-diffusion.cpp, strata drivers + auto-registration as proxy backends.
+audio.cpp, stable-diffusion.cpp drivers + auto-registration as proxy backends.
 Blocked on the proxy Phase 0 spike (fixtures for their HTTP APIs).
 
-**Open questions to resolve before Phase 3/4** (spec §4): audio.cpp / sd.cpp HTTP vs
-CLI-only, what strata actually is, per-instance GPU allocation UX.
+**strata kind ✅** — the first *specialized* engine kind: a strata deployment is
+described by one JSON file (`strata-<model>.json`) covering the `strata` engine
+binary + `strata generate` flags, the `serve/server.py` HTTP options, and an
+optional `vision` encoder, so it is **self-contained** (no shared definition).
+- **Data model:** `EngineInstance` gained a self-describing `kind` (a `''` value
+  falls back to the definition's kind, so existing files keep working) and
+  `autoLaunch` on **every** kind. A `StrataConfig` block (`exe`/`cwd`/`tokenizer`/
+  `modelName` + `engineArgs[]` / `serverArgs[]` / `vision` / `extra`) lives on the
+  instance in `engines.json`; several strata configs can run side by side.
+- **Mapping** (`engines/strata.ts`): lossless import/export of the real file shape.
+  Unknown keys (`gpus_asked`, `gpu_order`, `layer_split`, `lib_dirs`, `log`,
+  `sampling`, …) ride in `extra` untouched, so import → export is byte-equivalent
+  in content. `port` is modelled as a `--port` server row because `serve/server.py`
+  reads it **only** from the CLI, never the config.
+- **Driver** (`engines/strataDriver.ts`): a `buildLaunch` spawn plan — the worker
+  layer stays generic while strata runs `python -m serve.server --engine strata
+  --config <generated.json> --port <p>` from the repo root. `--host`/`--api-key`
+  are deliberately not repeated (the server reads them from the config). Log level
+  coloring + prefill/generation tok/s metrics included.
+- **Launch:** the launch endpoint writes `.config/strata-<id>.json` from the block
+  (same pattern as the router INI), so the Command tab and the real spawn agree.
+  `autoLaunchEngines()` starts every `autoLaunch` instance on server startup.
+- **API:** `POST /api/engines/strata/import`, `POST /api/engines/strata/render`,
+  `GET /api/engines/instances/:id/strata/export`,
+  `GET /api/engines/instances/draft?kind=` (unsaved draft — an engine is only
+  created on Save), `GET /api/params/strata-server` (the fixed `serve/server.py`
+  option catalog), and `kind`/`autoLaunch`/`strata` on instance POST/PUT.
+- **UI:** `+ New Engine` is now a **kind dropdown** (`llama.cpp` / `strata` /
+  custom); picking a kind fetches a draft and opens the matching dialog, and
+  nothing is written until Save. `StrataEditor.vue` edits basics + Engine/Server/
+  Vision tabs, an **Other Keys** raw-JSON tab for `extra`, Import/Export of the
+  strata file, and a Command preview. `ui/ParamRows.vue` is the shared
+  catalog-driven row editor (grouping, add-from-catalog, custom flag, paste args,
+  drag-reorder, on/off toggle) reused by both editors.
+- **Tests:** `strata.test.ts` (mapping round-trip + driver) and a `Strata Engine
+  API` block in `api.test.ts` (draft, import, create, PUT round-trip, export,
+  render, command preview, launch writing the generated file, port conflicts).
+
+**Open questions to resolve before remaining Phase 4 kinds** (spec §4): audio.cpp /
+sd.cpp HTTP vs CLI-only, per-instance GPU allocation UX.
 
 ## 22. Serve the llama.cpp Web UI from the GUI server 🚧
 

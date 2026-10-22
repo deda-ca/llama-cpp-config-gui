@@ -473,3 +473,197 @@ describe('Engine API', () => {
     expect(del.status).toBe(200);
   });
 });
+
+describe('Strata Engine API', () => {
+  let strataId: string;
+
+  it('GET /api/params/strata-server returns the serve/server.py catalog', async () => {
+    const res = await request(app).get('/api/params/strata-server');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'port', flag: '--port' }),
+      expect.objectContaining({ key: 'host', flag: '--host' }),
+    ]));
+  });
+
+  it('GET /api/engines/instances/draft?kind=strata seeds a strata block without saving', async () => {
+    const before = (await request(app).get('/api/engines')).body.instances.length;
+    const res = await request(app).get('/api/engines/instances/draft?kind=strata');
+    expect(res.status).toBe(200);
+    expect(res.body.kind).toBe('strata');
+    // Self-contained: a strata draft has no definition link.
+    expect(res.body.definitionId).toBe('');
+    expect(res.body.strata).toBeTruthy();
+    expect(res.body.strata.serverArgs).toEqual(expect.arrayContaining([
+      { key: '--host', value: '127.0.0.1' },
+    ]));
+    const after = (await request(app).get('/api/engines')).body.instances.length;
+    expect(after).toBe(before);
+  });
+
+  it('POST /api/engines/strata/import maps a strata-<model>.json into the editable block', async () => {
+    const file = {
+      exe: '/home/u/Strata/engine/strata',
+      args: ['--pack', '/p/iq3_s', '--ctx', '262144', '--metrics'],
+      cwd: '/home/u/Strata',
+      tokenizer: '/home/u/tok',
+      model_name: 'qwen3.8',
+      port: 5456,
+      gpu: [1, 2, 3],
+      gpus_asked: 3,
+      vision: { exe: '/home/u/Strata/engine/strata-vision', mmproj: '/m.gguf', model: '/m.gguf', gpu: true, max_tokens: 1024 },
+    };
+    const res = await request(app).post('/api/engines/strata/import').send({ json: JSON.stringify(file) });
+    expect(res.status).toBe(200);
+    const s = res.body.strata;
+    expect(s.exe).toBe('/home/u/Strata/engine/strata');
+    expect(s.modelName).toBe('qwen3.8');
+    expect(s.engineArgs).toEqual([
+      { key: '--pack', value: '/p/iq3_s' },
+      { key: '--ctx', value: '262144' },
+      { key: '--metrics' },
+    ]);
+    // port becomes a --port server row; gpu is a server option; gpus_asked rides in extra.
+    expect(s.serverArgs).toEqual(expect.arrayContaining([
+      { key: '--port', value: '5456' },
+      { key: '--gpu', value: '1,2,3' },
+    ]));
+    expect(s.extra).toEqual({ gpus_asked: 3 });
+    expect(s.vision?.maxTokens).toBe(1024);
+  });
+
+  it('POST /api/engines/strata/import rejects invalid JSON and non-objects', async () => {
+    expect((await request(app).post('/api/engines/strata/import').send({ json: '{' })).status).toBe(400);
+    expect((await request(app).post('/api/engines/strata/import').send({ json: '[1,2]' })).status).toBe(400);
+  });
+
+  it('POST /api/engines/instances accepts kind=strata without a definitionId', async () => {
+    const res = await request(app)
+      .post('/api/engines/instances')
+      .send({ name: 'Strata Qwen', kind: 'strata' });
+    expect(res.status).toBe(200);
+    expect(res.body.kind).toBe('strata');
+    expect(res.body.definitionId).toBe('');
+    expect(res.body.autoLaunch).toBe(false);
+    // The blank strata block seeds --host/--port and the python binary.
+    expect(res.body.binary).toBe('python3');
+    const port = res.body.strata.serverArgs.find((p: any) => p.key === '--port').value;
+    expect(Number(port)).toBeGreaterThanOrEqual(8095);
+    strataId = res.body.id;
+  });
+
+  it('PUT /api/engines/instances/:id round-trips the strata block and autoLaunch', async () => {
+    const block = {
+      exe: '/home/u/Strata/engine/strata',
+      cwd: '/home/u/Strata',
+      tokenizer: '/home/u/tok',
+      modelName: 'qwen3.8',
+      engineArgs: [{ key: '--ctx', value: '262144' }],
+      serverArgs: [{ key: '--host', value: '0.0.0.0' }, { key: '--port', value: '8123' }],
+      vision: null,
+      extra: { gpus_asked: 3 },
+    };
+    const res = await request(app)
+      .put(`/api/engines/instances/${strataId}`)
+      .send({ strata: block, autoLaunch: true });
+    expect(res.status).toBe(200);
+    expect(res.body.autoLaunch).toBe(true);
+    expect(res.body.strata).toEqual(block);
+
+    // The strata --port participates in the port conflict check like a param.
+    const clash = await request(app)
+      .put(`/api/engines/instances/${strataId}`)
+      .send({ strata: { ...block, serverArgs: [{ key: '--port', value: '8080' }] } });
+    expect(clash.status).toBe(409);
+  });
+
+  it('GET /api/engines/instances/:id/strata/export renders the file shape', async () => {
+    const res = await request(app).get(`/api/engines/instances/${strataId}/strata/export`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-disposition']).toContain(`strata-${strataId}.json`);
+    expect(res.body).toMatchObject({
+      exe: '/home/u/Strata/engine/strata',
+      cwd: '/home/u/Strata',
+      model_name: 'qwen3.8',
+      args: ['--ctx', '262144'],
+      host: '0.0.0.0',
+      port: 8123,
+      gpus_asked: 3,
+    });
+  });
+
+  it('export 400s for an instance without a strata block', async () => {
+    const res = await request(app).get('/api/engines/instances/default/strata/export');
+    expect(res.status).toBe(400);
+  });
+
+  it('POST /api/engines/strata/render round-trips a draft block losslessly', async () => {
+    const imported = await request(app)
+      .post('/api/engines/strata/import')
+      .send({ json: JSON.stringify({ exe: '/e', cwd: '/c', port: 5456, gpu: [1, 2], layer_split: [10, 8] }) });
+    const res = await request(app).post('/api/engines/strata/render').send(imported.body.strata);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      exe: '/e',
+      cwd: '/c',
+      args: [],
+      port: 5456,
+      gpu: [1, 2],
+      layer_split: [10, 8],
+    });
+  });
+
+  it('POST /api/engines/command previews the python -m serve.server spawn plan', async () => {
+    const res = await request(app)
+      .post('/api/engines/command')
+      .send({
+        kind: 'strata',
+        instanceId: strataId,
+        executable: '/usr/bin/python3',
+        strata: { cwd: '/home/u/Strata', serverArgs: [{ key: '--port', value: '8123' }] },
+      });
+    expect(res.status).toBe(200);
+    // A strata preview keeps the interpreter path verbatim — there is no
+    // build-folder/binary split for a kind with its own spawn plan.
+    expect(res.body.binaryPath).toBe('/usr/bin/python3');
+    expect(res.body.cwd).toBe('/home/u/Strata');
+    expect(res.body.args).toEqual([
+      '-m', 'serve.server', '--engine', 'strata',
+      '--config', expect.stringContaining(`strata-${strataId}.json`),
+      '--port', '8123',
+    ]);
+  });
+
+  it('launching a strata instance writes the generated config file', async () => {
+    const res = await request(app).post(`/api/engines/instances/${strataId}/launch`);
+    expect(res.status).toBe(200);
+    expect(res.body.routerIniPath).toBeNull();
+    const generated = res.body.strataConfigPath;
+    expect(generated).toContain(`strata-${strataId}.json`);
+    const written = JSON.parse(fs.readFileSync(generated, 'utf-8'));
+    expect(written).toMatchObject({
+      exe: '/home/u/Strata/engine/strata',
+      model_name: 'qwen3.8',
+      port: 8123,
+      gpus_asked: 3,
+    });
+    await request(app).post(`/api/engines/instances/${strataId}/stop`);
+  });
+
+  it('launch rejects a strata instance without a repo folder', async () => {
+    const get = await request(app).get('/api/engines');
+    const inst = get.body.instances.find((i: any) => i.id === strataId);
+    await request(app)
+      .put(`/api/engines/instances/${strataId}`)
+      .send({ strata: { ...inst.strata, cwd: '' } });
+    const res = await request(app).post(`/api/engines/instances/${strataId}/launch`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('repo folder');
+  });
+
+  it('deletes the strata instance', async () => {
+    const res = await request(app).delete(`/api/engines/instances/${strataId}`);
+    expect(res.status).toBe(200);
+  });
+});

@@ -63,6 +63,12 @@ export interface LlamaConfig {
   gpuOrder: number[]; // manual order of SMI indices; empty = use sort mode
   /** OpenAI-compatible proxy gateway settings (docs/proxy-server.md) */
   proxy?: import('./proxy/types.js').ProxySettings;
+  /**
+   * strata kind: the generated `strata-<instance>.json` the Python server is
+   * launched with (`--config`). Written by the launch endpoint, like
+   * `routerIniPath`, so the driver itself stays side-effect free.
+   */
+  strataConfigPath?: string;
 }
 
 export interface PerfMetrics {

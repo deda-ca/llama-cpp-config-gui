@@ -61,15 +61,24 @@ export class ProcessWorker {
       this.stop();
     }
 
-    const binaryPath = path.join(spec.llamaCppPath, this.driver.binaryName(spec));
+    // A driver with a custom launch plan (strata: a Python module run from the
+    // repo root) supplies command/args/cwd directly; the default is the
+    // llama.cpp layout of <buildPath>/<binary> with cwd = buildPath.
+    const custom = this.driver.buildLaunch?.(spec);
+    const binaryPath = custom
+      ? custom.command
+      : path.join(spec.llamaCppPath, this.driver.binaryName(spec));
 
-    if (!fs.existsSync(binaryPath)) {
+    // PATH-resolved commands (python, node) are not checked for existence —
+    // spawn reports a clear ENOENT for those.
+    if (!custom && !fs.existsSync(binaryPath)) {
       this.setStatus('error');
       this.onLogLine?.(`[ERROR] Binary not found: ${binaryPath}`);
       return;
     }
 
-    const args = this.driver.buildArgs(spec);
+    const args = custom ? custom.args : this.driver.buildArgs(spec);
+    const cwd = custom ? custom.cwd : spec.llamaCppPath;
     this.metrics = { ...EMPTY_METRICS };
 
     this.setStatus('starting');
@@ -82,7 +91,7 @@ export class ProcessWorker {
     }
 
     const child = spawn(binaryPath, args, {
-      cwd: spec.llamaCppPath,
+      cwd,
       env,
     });
 

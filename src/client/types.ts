@@ -121,6 +121,8 @@ export interface EngineInstance {
   name: string;
   /** Free-form notes shown in the editor (not part of the launch). */
   notes: string;
+  /** Engine family this instance belongs to; decides which editor opens. */
+  kind: EngineKind;
   definitionId: string;
   binary: string;
   params: EngineParam[];
@@ -128,8 +130,40 @@ export interface EngineInstance {
   modelConfigIds: string[];
   modelPath?: string;
   mmproj?: string;
+  /** Start this engine when the application boots (all kinds). */
+  autoLaunch: boolean;
+  /** strata only: self-contained engine/server/vision config. */
+  strata?: StrataConfig;
   /** Live process status, added by GET /api/engines. */
   status?: 'stopped' | 'starting' | 'running' | 'exited' | 'error';
+}
+
+/**
+ * Strata engine config (mirrors src/server/engines/types.ts). Three layers in
+ * one JSON file: the strata engine binary + its `strata generate` flags, the
+ * `serve/server.py` server options, and an optional vision encoder. `extra`
+ * holds keys the UI has no field for, preserved verbatim on export.
+ */
+export interface StrataConfig {
+  exe: string;
+  cwd: string;
+  tokenizer: string;
+  modelName: string;
+  engineArgs: EngineParam[];
+  serverArgs: EngineParam[];
+  vision: StrataVisionConfig | null;
+  extra: Record<string, unknown>;
+}
+
+/** The config's "vision" object: strata-vision encoder settings. */
+export interface StrataVisionConfig {
+  exe: string;
+  mmproj: string;
+  model: string;
+  /** true = engine's GPU, false = CPU, or a device index. */
+  gpu: boolean | number;
+  maxTokens: number;
+  extra: Record<string, unknown>;
 }
 
 export interface EnginesResponse {

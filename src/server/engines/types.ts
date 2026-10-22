@@ -57,6 +57,50 @@ export interface EngineParam {
   disabled?: boolean;
 }
 
+/**
+ * Strata-specific launch config (kind 'strata'). A strata deployment is three
+ * programs' worth of settings in one JSON file (`strata-<model>.json`), so it
+ * gets its own self-contained block instead of the generic
+ * definition+params shape: the strata engine binary and its `strata generate`
+ * flags, the `serve/server.py` HTTP server flags, and an optional vision
+ * encoder. Nothing is inherited from an EngineDefinition, so two strata
+ * instances never affect each other (docs/todo.md #21, #22).
+ *
+ * `extra` preserves keys the UI has no field for (gpus_asked, gpu_order,
+ * layer_split, lib_dirs, …) verbatim so an import/export round-trip never
+ * loses data.
+ */
+export interface StrataConfig {
+  /** Path to the strata engine executable (config "exe"). */
+  exe: string;
+  /** Working directory for the engine + server (config "cwd"). */
+  cwd: string;
+  /** Pack tokenizer directory (config "tokenizer"). */
+  tokenizer: string;
+  /** Model name advertised on GET /v1/models (config "model_name"). */
+  modelName: string;
+  /** `strata generate` flags — the config's "args" array as flat argv tokens. */
+  engineArgs: EngineParam[];
+  /** `serve/server.py` options (host, port, api_key, gpu, lazy_load, …). */
+  serverArgs: EngineParam[];
+  /** Vision encoder (config "vision"); null = no vision section. */
+  vision: StrataVisionConfig | null;
+  /** Config keys with no UI field, preserved verbatim and re-emitted on export. */
+  extra: Record<string, unknown>;
+}
+
+/** The config's "vision" object: strata-vision encoder settings. */
+export interface StrataVisionConfig {
+  exe: string;
+  mmproj: string;
+  model: string;
+  /** GPU for the encoder: true = engine's GPU, false = CPU, or a device index. */
+  gpu: boolean | number;
+  maxTokens: number;
+  /** Vision keys with no UI field, preserved verbatim. */
+  extra: Record<string, unknown>;
+}
+
 /** A launchable engine: definition + runtime settings + model selection. */
 export interface EngineInstance {
   /** Stable slug id, derived from name on creation. */
@@ -64,7 +108,11 @@ export interface EngineInstance {
   name: string;
   /** Free-form notes shown in the editor (not part of the launch). */
   notes: string;
-  /** EngineDefinition this instance launches from. */
+  /** Engine family this instance launches (see EngineKind). Owned by the
+   * instance so every engine is configured in isolation; files written before
+   * this field existed fall back to their definition's kind. */
+  kind: EngineKind;
+  /** EngineDefinition this instance launches from ('' = self-contained, e.g. strata). */
   definitionId: string;
   /** Executable name inside the build folder (llama.cpp: "llama-server" | "llama-cli"). */
   binary: string;
@@ -79,6 +127,10 @@ export interface EngineInstance {
   modelPath?: string;
   /** llama.cpp only (non-router): multimodal projector file. */
   mmproj?: string;
+  /** Start this engine when the application boots (all kinds). */
+  autoLaunch: boolean;
+  /** strata only: self-contained engine/server/vision config (see StrataConfig). */
+  strata?: StrataConfig;
 }
 
 export interface EnginesFile {
@@ -99,6 +151,10 @@ export function defaultBinaryForKind(kind: EngineKind): string {
   switch (kind) {
     case 'llamacpp':
       return 'llama-server';
+    case 'strata':
+      // serve/server.py is a Python module, so the "executable" is the
+      // interpreter the driver runs `-m serve.server` with.
+      return 'python3';
     default:
       return '';
   }

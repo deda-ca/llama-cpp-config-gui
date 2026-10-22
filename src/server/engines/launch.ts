@@ -11,12 +11,14 @@
 import { DEFAULT_CONFIG } from '../config.js';
 import type { LlamaConfig } from '../types.js';
 import { paramsToArgs } from './args.js';
+import { strataPort } from './strata.js';
 import { paramValue, paramValueAny } from './store.js';
 import type { EngineDefinition, EngineInstance } from './types.js';
 
 /**
  * `routerIniPath` is passed in by the caller because generating it requires
  * reading model configs and writing a file (side effects kept out of here).
+ * `strataConfigPath` is likewise caller-generated for strata instances.
  *
  * host/port/api-key are plain params on the instance; the llama.cpp driver
  * still expects them as spec fields (legacy launch parity), so they are read
@@ -29,24 +31,32 @@ export function instanceToLlamaConfig(
   instance: EngineInstance,
   definition: EngineDefinition,
   routerIniPath?: string,
+  strataConfigPath?: string,
 ): LlamaConfig {
   const portParam = paramValueAny(instance.params, '--port');
   const port = Number(portParam);
+  const strata = instance.strata;
+  const kind = instance.kind || definition.kind;
   return {
     ...DEFAULT_CONFIG,
-    llamaCppPath: definition.buildPath,
+    // A strata instance carries its own repo root in `strata.cwd`; the
+    // definition's build folder is a llama.cpp concept.
+    llamaCppPath: strata ? strata.cwd : definition.buildPath,
     modelsDir: '',
     routerIniPath: routerIniPath ?? '',
+    strataConfigPath: strataConfigPath ?? '',
     envVars: definition.envVars,
     // llama.cpp kinds pick one of the two known binaries; other kinds launch
     // whatever executable the instance names (passthrough driver).
-    binary: definition.kind === 'llamacpp'
+    binary: kind === 'llamacpp'
       ? (instance.binary === 'llama-cli' ? 'llama-cli' : 'llama-server')
       : instance.binary,
     modelPath: instance.routerMode ? '' : (instance.modelPath ?? ''),
     mmproj: instance.routerMode ? undefined : instance.mmproj,
     host: paramValue(instance.params, '--host') ?? '',
-    port: Number.isInteger(port) && port > 0 ? port : DEFAULT_CONFIG.port,
+    port: Number.isInteger(port) && port > 0
+      ? port
+      : (strataPort(strata) ?? DEFAULT_CONFIG.port),
     apiKey: paramValue(instance.params, '--api-key') ?? '',
     extraArgs: paramsToArgs(instance.params),
     paramsOnly: true,

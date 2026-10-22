@@ -13,6 +13,7 @@ import path from 'path';
 import { configDir } from '../config.js';
 import type { LlamaConfig } from '../types.js';
 import { splitArgs, tokensToParams } from './args.js';
+import { blankStrataConfig, normalizeStrataConfig, strataPort } from './strata.js';
 import { loadTemplate } from './template.js';
 import {
   EMPTY_ENGINES,
@@ -20,6 +21,7 @@ import {
   isEngineKind,
   type EngineDefinition,
   type EngineInstance,
+  type EngineKind,
   type EngineParam,
   type EnginesFile,
 } from './types.js';
@@ -113,11 +115,13 @@ export function paramValueAny(params: EngineParam[], flag: string): string | und
   return undefined;
 }
 
-/** Port an instance listens on, read from its --port/-p param (null = unset). */
-export function instancePort(params: EngineParam[]): number | null {
-  const raw = paramValueAny(params, '--port');
+/** Port an instance listens on: its --port/-p param, or for strata the
+ * server-arg --port row (null = unset). */
+export function instancePort(inst: Pick<EngineInstance, 'params' | 'strata'>): number | null {
+  const raw = paramValueAny(inst.params, '--port');
   const n = Number(raw);
-  return Number.isInteger(n) && n > 0 && n <= 65535 ? n : null;
+  if (Number.isInteger(n) && n > 0 && n <= 65535) return n;
+  return strataPort(inst.strata);
 }
 
 function normalizeInstance(raw: unknown, index: number): EngineInstance | null {
@@ -144,6 +148,7 @@ function normalizeInstance(raw: unknown, index: number): EngineInstance | null {
     id,
     name: typeof i.name === 'string' && i.name ? i.name : id,
     notes: typeof i.notes === 'string' ? i.notes : '',
+    kind: isEngineKind(i.kind) ? i.kind : ('' as EngineKind),
     definitionId: typeof i.definitionId === 'string' ? i.definitionId : 'default',
     binary: typeof i.binary === 'string' && i.binary ? i.binary : 'llama-server',
     params,
@@ -153,6 +158,8 @@ function normalizeInstance(raw: unknown, index: number): EngineInstance | null {
       : [],
     ...(typeof i.modelPath === 'string' && i.modelPath ? { modelPath: i.modelPath } : {}),
     ...(typeof i.mmproj === 'string' && i.mmproj ? { mmproj: i.mmproj } : {}),
+    autoLaunch: i.autoLaunch === true,
+    ...(normalizeStrataConfig(i.strata) ? { strata: normalizeStrataConfig(i.strata) } : {}),
   };
 }
 
@@ -164,6 +171,14 @@ export function normalizeEngines(data: unknown): EnginesFile {
   const instances = (Array.isArray(raw.instances) ? raw.instances : [])
     .map((i, idx) => normalizeInstance(i, idx))
     .filter((i): i is EngineInstance => i !== null);
+
+  // Files written before instances carried their own kind: inherit it from the
+  // definition so the UI and launch path can treat every instance uniformly.
+  for (const i of instances) {
+    if (!i.kind) {
+      i.kind = definitions.find((d) => d.id === i.definitionId)?.kind ?? 'llamacpp';
+    }
+  }
 
   // Enforce unique ids on both lists (later duplicates get a suffixed id).
   const defIds = new Set<string>();
@@ -241,11 +256,13 @@ export function migrateLegacyConfig(legacy: LlamaConfig): EnginesFile | null {
     id: 'default',
     name: 'default',
     notes: '',
+    kind: 'llamacpp',
     definitionId: 'default',
     binary: legacy.binary || 'llama-server',
     params: [...prefix, ...params],
     routerMode: false,
     modelConfigIds: [],
+    autoLaunch: false,
     ...(legacy.modelPath ? { modelPath: legacy.modelPath } : {}),
     ...(legacy.mmproj ? { mmproj: legacy.mmproj } : {}),
   };
@@ -255,14 +272,14 @@ export function migrateLegacyConfig(legacy: LlamaConfig): EnginesFile | null {
 
 /** True when `port` is used by another instance (optionally excluding one). */
 export function isPortTaken(data: EnginesFile, port: number, excludeInstanceId?: string): boolean {
-  return data.instances.some((i) => instancePort(i.params) === port && i.id !== excludeInstanceId);
+  return data.instances.some((i) => instancePort(i) === port && i.id !== excludeInstanceId);
 }
 
 /** First free port at or after `base`, avoiding all instances plus `reserved`. */
 export function findFreePort(data: EnginesFile, base: number, reserved: number[] = []): number {
   let port = base;
   const taken = new Set([
-    ...data.instances.map((i) => instancePort(i.params)).filter((p): p is number => p !== null),
+    ...data.instances.map((i) => instancePort(i)).filter((p): p is number => p !== null),
     ...reserved,
   ]);
   while (taken.has(port)) port++;
@@ -274,16 +291,26 @@ export function blankInstance(name: string, def: EngineDefinition, existing: Eng
   // New instances start from the kind's parameter template; the --port row is
   // nudged to a free port so parallel instances don't collide.
   const params = loadTemplate(def.kind);
+  // Strata keeps its port in a separate server-arg list, so it gets the same
+  // free-port treatment there.
+  const strata = def.kind === 'strata' ? blankStrataConfig() : undefined;
   const portRow = params.find((p) => p.key === '--port' || p.key === '-p');
-  if (portRow) portRow.value = String(findFreePort(existing, instancePort(params) ?? 8080));
+  if (portRow) portRow.value = String(findFreePort(existing, instancePort({ params, strata }) ?? 8080));
+  if (strata) {
+    const row = strata.serverArgs.find((p) => p.key === '--port');
+    if (row) row.value = String(findFreePort(existing, strataPort(strata) ?? 8095));
+  }
   return {
     id: makeEngineId(name, existing.instances),
     name,
     notes: '',
+    kind: def.kind,
     definitionId: def.id,
     binary: defaultBinaryForKind(def.kind),
     params,
     routerMode: false,
     modelConfigIds: [],
+    autoLaunch: false,
+    ...(strata ? { strata } : {}),
   };
 }

@@ -20,6 +20,7 @@ import type { LlamaConfig, LlamaDevice, PerfMetrics } from '../types.js';
 import type { LogEntry, ParsedLog } from './llama.js';
 import type { EngineKind } from './types.js';
 import { llamaDriver } from './llama.js';
+import { strataDriver } from './strataDriver.js';
 import { passthroughDriver } from './passthrough.js';
 
 /** Result of probing a build folder for version/build info. */
@@ -32,6 +33,16 @@ export interface DriverVersionInfo {
   raw: string[];
 }
 
+/** How a driver wants its process spawned, when the default layout does not fit. */
+export interface DriverLaunch {
+  /** Executable to spawn (absolute, or resolved from PATH). */
+  command: string;
+  /** Full argv after the command. */
+  args: string[];
+  /** Working directory for the child. */
+  cwd: string;
+}
+
 export interface EngineDriver {
   /** Engine family this driver implements. */
   kind: EngineKind;
@@ -39,6 +50,13 @@ export interface EngineDriver {
   binaryName(spec: LlamaConfig): string;
   /** Full CLI arguments for a launch (excluding the binary itself). */
   buildArgs(spec: LlamaConfig): string[];
+  /**
+   * Complete spawn plan, for kinds that do not follow the llama.cpp layout of
+   * `<buildPath>/<binary>` run with `cwd = buildPath` (strata runs a Python
+   * module from the repo root). When present the worker uses this instead of
+   * `binaryName`/`buildArgs`, so the process layer stays generic.
+   */
+  buildLaunch?(spec: LlamaConfig): DriverLaunch;
   /** Probe `<buildPath>/<binary> --version`. Absent = no version support. */
   getVersion?(buildPath: string): Promise<DriverVersionInfo>;
   /** List devices the build reports. Absent = no device listing. */
@@ -53,6 +71,7 @@ export interface EngineDriver {
 
 const drivers = new Map<EngineKind, EngineDriver>([
   [llamaDriver.kind, llamaDriver],
+  [strataDriver.kind, strataDriver],
 ]);
 
 /** Look up the driver for a kind; unknown kinds get the passthrough driver. */

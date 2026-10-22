@@ -31,6 +31,7 @@ const form = ref({
   notes: props.instance.notes ?? '',
   definitionId: props.instance.definitionId,
   binary: props.instance.binary,
+  autoLaunch: props.instance.autoLaunch === true,
 });
 const params = ref<EngineParam[]>(
   props.instance.params.map((p) => ({ key: p.key, value: p.value })),
@@ -534,7 +535,26 @@ async function save() {
       definitionId: defId,
       params: cleanParams,
     };
-    const res = await fetch(`/api/engines/instances/${props.instance.id}`, {
+    // A draft from the kind dropdown has no row on the server yet: create it,
+    // then write the dialog's edits onto it. Existing instances update in place.
+    let targetId = props.instance.id;
+    if (props.isNew) {
+      const created = await fetch('/api/engines/instances', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: form.value.name.trim() || 'engine',
+          kind: defKind.value,
+          definitionId: defId,
+        }),
+      });
+      if (!created.ok) {
+        error.value = (await created.json().catch(() => ({}))).error || `Create failed (${created.status})`;
+        return;
+      }
+      targetId = (await created.json()).id;
+    }
+    const res = await fetch(`/api/engines/instances/${targetId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -590,6 +610,11 @@ snapshot = currentState();
           placeholder="What this engine is for, GPU it sits on, trade-offs..."
         ></textarea>
       </div>
+
+      <label class="check-row">
+        <input v-model="form.autoLaunch" type="checkbox" />
+        <span>Start this engine when the application launches</span>
+      </label>
 
       <!-- Tabs: launch settings vs the command that would actually run -->
       <div class="tab-bar">
@@ -832,6 +857,14 @@ snapshot = currentState();
   width: 180px;
   flex-shrink: 0;
   flex-grow: 0 !important;
+}
+
+.check-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+  color: #8b949e;
 }
 
 .version-info {
