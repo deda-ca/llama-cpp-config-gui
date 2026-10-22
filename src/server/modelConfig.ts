@@ -78,9 +78,12 @@ export interface ModelsFile {
 
 import fs from 'fs';
 import path from 'path';
+import { configDir } from './config.js';
 
-const CONFIG_DIR = path.resolve(process.cwd(), '.config');
-const MODELS_FILE = path.join(CONFIG_DIR, 'models.json');
+// Paths resolve at call time so tests can isolate .config by changing cwd.
+function modelsFile(): string {
+  return path.join(configDir(), 'models.json');
+}
 
 export function normalizeModelsFile(data: any): ModelsFile {
   const configs = Array.isArray(data?.configs) ? data.configs : [];
@@ -125,7 +128,7 @@ export function normalizeModelsFile(data: any): ModelsFile {
 
 export function loadModels(): ModelsFile {
   try {
-    const raw = fs.readFileSync(MODELS_FILE, 'utf-8');
+    const raw = fs.readFileSync(modelsFile(), 'utf-8');
     return normalizeModelsFile(JSON.parse(raw));
   } catch {
     return { configs: [], templates: [], defaultConfigId: null, configOrder: [] };
@@ -134,17 +137,21 @@ export function loadModels(): ModelsFile {
 
 export function saveModels(data: ModelsFile): void {
   const normalized = normalizeModelsFile(data);
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(MODELS_FILE, JSON.stringify(normalized, null, 2));
+  fs.mkdirSync(configDir(), { recursive: true });
+  fs.writeFileSync(modelsFile(), JSON.stringify(normalized, null, 2));
 }
 
 // --- Params Reference ---
 
-const PARAMS_FILE = path.join(CONFIG_DIR, 'params.json');
+const PARAMS_FILE_NAME = 'params.json';
+
+function paramsFile(): string {
+  return path.join(configDir(), PARAMS_FILE_NAME);
+}
 
 export function loadParams(): ParamDef[] {
   try {
-    const raw = fs.readFileSync(PARAMS_FILE, 'utf-8');
+    const raw = fs.readFileSync(paramsFile(), 'utf-8');
     return JSON.parse(raw);
   } catch {
     return [];
@@ -152,8 +159,8 @@ export function loadParams(): ParamDef[] {
 }
 
 export function saveParams(params: ParamDef[]): void {
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(PARAMS_FILE, JSON.stringify(params, null, 2));
+  fs.mkdirSync(configDir(), { recursive: true });
+  fs.writeFileSync(paramsFile(), JSON.stringify(params, null, 2));
 }
 
 // --- ID generation ---

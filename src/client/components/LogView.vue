@@ -7,9 +7,20 @@ const props = defineProps<{
   metrics: { prefillTokensPerSec: number | null; generationTokensPerSec: number | null };
   /** Whether the log body is hidden (the whole panel collapses in the parent) */
   collapsed?: boolean;
+  /** When set, a selector filters logs by engine instance ('all' = merged) */
+  instances?: { id: string; name: string }[];
+  /** Current instance filter ('all' or an instance id) */
+  instanceFilter?: string;
 }>();
 
-const emit = defineEmits(['toggle-collapse', 'clear-logs']);
+const emit = defineEmits(['toggle-collapse', 'clear-logs', 'instance-filter']);
+
+// instanceId → name, for tagging merged lines
+function instanceTag(line: LogEntry): string | null {
+  if (!props.instances || !line.instanceId) return null;
+  if (props.instanceFilter !== 'all') return null;
+  return props.instances.find((i) => i.id === line.instanceId)?.name ?? line.instanceId;
+}
 
 const containerRef = ref<HTMLElement | null>(null);
 const autoScroll = ref(true);
@@ -48,6 +59,16 @@ function onScroll() {
         </div>
       </div>
       <div class="log-actions">
+        <select
+          v-if="instances"
+          class="instance-select"
+          :value="instanceFilter ?? 'all'"
+          @change="emit('instance-filter', ($event.target as HTMLSelectElement).value)"
+          title="Filter logs by engine instance"
+        >
+          <option value="all">All</option>
+          <option v-for="i in instances" :key="i.id" :value="i.id">{{ i.name }}</option>
+        </select>
         <button v-if="!props.collapsed && lines.length > 0" class="collapse-btn" @click="emit('clear-logs')" title="Clear all logs">✕ Clear</button>
         <button class="collapse-btn" @click="emit('toggle-collapse')" :title="props.collapsed ? 'Expand logs' : 'Collapse logs'">
           {{ props.collapsed ? '▸ Expand' : '▾ Collapse' }}
@@ -62,7 +83,7 @@ function onScroll() {
         :key="i"
         class="log-line"
         :class="'level-' + line.level"
-      >{{ line.raw }}</div>
+      ><span v-if="instanceTag(line)" class="log-instance">{{ instanceTag(line) }}</span>{{ line.raw }}</div>
     </div>
   </div>
 </template>
@@ -135,6 +156,34 @@ function onScroll() {
   display: flex;
   gap: 6px;
   flex-shrink: 0;
+  align-items: center;
+}
+
+.instance-select {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  color: #e1e4e8;
+  font-size: 0.72rem;
+  font-family: inherit;
+  padding: 3px 6px;
+  cursor: pointer;
+}
+
+.instance-select:focus { outline: none; border-color: #58a6ff; }
+
+.log-instance {
+  display: inline-block;
+  min-width: 70px;
+  margin-right: 8px;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: #388bfd15;
+  border: 1px solid #388bfd33;
+  color: #79c0ff;
+  font-size: 0.68rem;
+  text-align: center;
+  vertical-align: baseline;
 }
 
 .collapse-btn:hover {

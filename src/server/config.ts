@@ -2,8 +2,15 @@ import fs from 'fs';
 import path from 'path';
 import type { LlamaConfig } from './types.js';
 
-const CONFIG_DIR = path.resolve(process.cwd(), '.config');
-const CONFIG_FILE = path.join(CONFIG_DIR, 'settings.json');
+// Resolved at call time (not import time) so tests can isolate the config
+// directory by changing cwd before exercising the API.
+export function configDir(): string {
+  return path.resolve(process.cwd(), '.config');
+}
+
+function configFile(): string {
+  return path.join(configDir(), 'settings.json');
+}
 
 export const DEFAULT_CONFIG: LlamaConfig = {
   llamaCppPath: '',
@@ -29,7 +36,7 @@ export const DEFAULT_CONFIG: LlamaConfig = {
 
 export function loadConfig(): LlamaConfig {
   try {
-    const raw = fs.readFileSync(CONFIG_FILE, 'utf-8');
+    const raw = fs.readFileSync(configFile(), 'utf-8');
     return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
   } catch {
     return { ...DEFAULT_CONFIG };
@@ -37,6 +44,6 @@ export function loadConfig(): LlamaConfig {
 }
 
 export function saveConfig(config: LlamaConfig): void {
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  fs.mkdirSync(configDir(), { recursive: true });
+  fs.writeFileSync(configFile(), JSON.stringify(config, null, 2));
 }

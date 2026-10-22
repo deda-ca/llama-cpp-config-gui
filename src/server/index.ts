@@ -6,7 +6,17 @@ import { spawn } from 'child_process';
 import { loadConfig, saveConfig } from './config.js';
 import { startGpuPolling } from './gpu.js';
 import { startSystemPolling } from './system.js';
-import { LlamaProcessManager, listLlamaDevices, matchCudaIndices, getLlamaVersion } from './llama.js';
+import { listLlamaDevices, matchCudaIndices, getLlamaVersion } from './llama.js';
+import { EngineManager } from './engines/manager.js';
+import { instanceToLlamaConfig } from './engines/launch.js';
+import {
+  blankInstance,
+  isPortTaken,
+  makeEngineId,
+  normalizeEngineParams,
+  normalizeEnvVars,
+} from './engines/store.js';
+import { isEngineKind, type EngineDefinition } from './engines/types.js';
 import type { WsMessage, LlamaConfig, GpuInfo, LlamaDevice, GpuSortMode, SystemStats } from './types.js';
 import { loadModels, saveModels, loadParams, saveParams, generateId, type ModelConfig, type ConfigTemplate, type ParamDef } from './modelConfig.js';
 import { DEFAULT_PARAMS } from './params-default.js';
@@ -59,7 +69,35 @@ app.use(express.json());
 
 // --- State ---
 let config = loadConfig();
-const llama = new LlamaProcessManager();
+
+// Engine process registry (todo #21 Phase 1). During the transition the legacy
+// endpoints (/api/launch, /api/stop, /api/status) operate on the *default
+// instance*, whose id comes from the engines file (seeded from settings.json).
+const engines = new EngineManager({
+  onLogLine: (instanceId, line) => {
+    const entry = toLogEntry(line);
+    engines.pushLog(instanceId, entry);
+    broadcast({ type: 'log-line', payload: { ...entry, instanceId } });
+
+    // Extract timing data for the Model Status panel
+    const parsed = parseLogLine(line);
+    if (parsed && parsed.func === 'print_timing') {
+      const timing = parseTimingMessage(parsed.message);
+      if (timing) {
+        updateModelStatus(timing);
+        broadcast({ type: 'model-status', payload: { ...modelStatus, instanceId } });
+      }
+    }
+  },
+  onStatusChange: (instanceId, status) => broadcast({ type: 'process-status', payload: { instanceId, status } }),
+  onMetrics: (instanceId, metrics) => broadcast({ type: 'metrics', payload: { ...metrics, instanceId } }),
+});
+engines.migrateFromLegacy(config);
+
+/** Instance backing the legacy launch/stop/status endpoints. */
+function defaultInstanceId(): string {
+  return engines.getDefaultInstanceId() ?? 'default';
+}
 
 // --- Proxy gateway (docs/proxy-server.md) ---
 const proxyRouter = new ModelRouter();
@@ -239,10 +277,6 @@ function proxyHealthProbe(baseUrl: string): Promise<boolean> {
 }
 let gpuIntervalMs = config.gpuIntervalMs || 2000;
 
-// In-memory cache of recent log entries, replayed to clients on (re)connect
-const LOG_CACHE_SIZE = 1024;
-const logCache: LogEntry[] = [];
-
 // --- SSE setup ---
 const server = http.createServer(app);
 const sseClients = new Set<http.ServerResponse>();
@@ -254,9 +288,11 @@ app.get('/api/events', (req, res) => {
     'Connection': 'keep-alive',
     'X-Accel-Buffering': 'no',
   });
-  // Replay log history on connect
-  if (logCache.length > 0) {
-    res.write(`event: log-history\ndata: ${JSON.stringify([...logCache])}\n\n`);
+  // Replay log history on connect (default instance — per-instance replay lands
+  // with the client Engines tab)
+  const history = engines.getLogCache(defaultInstanceId());
+  if (history.length > 0) {
+    res.write(`event: log-history\ndata: ${JSON.stringify([...history])}\n\n`);
   }
   if (proxyLogCache.length > 0) {
     res.write(`event: proxy-log-history\ndata: ${JSON.stringify([...proxyLogCache])}\n\n`);
@@ -335,26 +371,6 @@ function updateModelStatus(timing: TimingData): void {
       break;
   }
 }
-
-// Wire up llama process events → broadcast
-llama.onLogLine = (line) => {
-  const entry = toLogEntry(line);
-  logCache.push(entry);
-  if (logCache.length > LOG_CACHE_SIZE) logCache.shift();
-  broadcast({ type: 'log-line', payload: entry });
-
-  // Extract timing data for the Model Status panel
-  const parsed = parseLogLine(line);
-  if (parsed && parsed.func === 'print_timing') {
-    const timing = parseTimingMessage(parsed.message);
-    if (timing) {
-      updateModelStatus(timing);
-      broadcast({ type: 'model-status', payload: { ...modelStatus } });
-    }
-  }
-};
-llama.onStatusChange = (status) => broadcast({ type: 'process-status', payload: status });
-llama.onMetrics = (metrics) => broadcast({ type: 'metrics', payload: metrics });
 
 // --- Device detection & CUDA matching ---
 let cudaMatchMap: Map<number, number> = new Map();
@@ -448,7 +464,7 @@ app.post('/api/restart', (_req, res) => {
     client.end();
   }
   sseClients.clear();
-  llama.stop();
+  engines.stopAll();
   if (embeddedClient.size > 0) {
     try {
       const child = spawn(process.execPath, process.argv.slice(1), {
@@ -525,6 +541,194 @@ app.put('/api/config', (req, res) => {
   res.json(config);
 });
 
+// --- Engine API (todo #21 Phase 1 step 3) ---
+// Definitions (build folder + env) and instances (launchable entries). The
+// legacy /api/launch, /api/stop and /api/status endpoints keep operating on the
+// default instance while the client migrates.
+
+app.get('/api/engines', (_req, res) => {
+  const data = engines.getEngines();
+  res.json({
+    ...data,
+    instances: data.instances.map((i) => ({
+      ...i,
+      status: engines.getStatus(i.id),
+    })),
+  });
+});
+
+app.post('/api/engines/definitions', (req, res) => {
+  const data = engines.getEngines();
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+  if (!name) {
+    res.status(400).json({ error: 'name is required' });
+    return;
+  }
+  const kind = isEngineKind(req.body?.kind) ? req.body.kind : 'llamacpp';
+  const def: EngineDefinition = {
+    id: makeEngineId(name, data.definitions),
+    name,
+    kind,
+    buildPath: typeof req.body?.buildPath === 'string' ? req.body.buildPath : '',
+    envVars: normalizeEnvVars(req.body?.envVars),
+  };
+  data.definitions.push(def);
+  engines.saveEngines(data);
+  res.json(def);
+});
+
+app.put('/api/engines/definitions/:id', (req, res) => {
+  const data = engines.getEngines();
+  const def = data.definitions.find((d) => d.id === req.params.id);
+  if (!def) {
+    res.status(404).json({ error: `Definition "${req.params.id}" not found` });
+    return;
+  }
+  if (typeof req.body?.name === 'string' && req.body.name.trim()) def.name = req.body.name.trim();
+  if (isEngineKind(req.body?.kind)) def.kind = req.body.kind;
+  if (typeof req.body?.buildPath === 'string') def.buildPath = req.body.buildPath;
+  if (req.body?.envVars !== undefined) def.envVars = normalizeEnvVars(req.body.envVars);
+  engines.saveEngines(data);
+  res.json(def);
+});
+
+app.delete('/api/engines/definitions/:id', (req, res) => {
+  const data = engines.getEngines();
+  const idx = data.definitions.findIndex((d) => d.id === req.params.id);
+  if (idx < 0) {
+    res.status(404).json({ error: `Definition "${req.params.id}" not found` });
+    return;
+  }
+  if (data.instances.some((i) => i.definitionId === req.params.id)) {
+    res.status(409).json({ error: 'Definition is used by an instance' });
+    return;
+  }
+  data.definitions.splice(idx, 1);
+  engines.saveEngines(data);
+  res.json({ status: 'deleted' });
+});
+
+app.post('/api/engines/instances', (req, res) => {
+  const data = engines.getEngines();
+  const name = typeof req.body?.name === 'string' ? req.body.name.trim() : '';
+  const def = data.definitions.find((d) => d.id === req.body?.definitionId);
+  if (!name) {
+    res.status(400).json({ error: 'name is required' });
+    return;
+  }
+  if (!def) {
+    res.status(400).json({ error: 'a valid definitionId is required' });
+    return;
+  }
+  const inst = blankInstance(name, def, data);
+  if (typeof req.body?.port === 'number') inst.port = req.body.port;
+  if (isPortTaken(data, inst.port)) {
+    res.status(409).json({ error: `Port ${inst.port} is already used by another instance` });
+    return;
+  }
+  data.instances.push(inst);
+  if (!data.defaultInstanceId) data.defaultInstanceId = inst.id;
+  engines.saveEngines(data);
+  res.json(inst);
+});
+
+app.put('/api/engines/instances/:id', (req, res) => {
+  const data = engines.getEngines();
+  const inst = data.instances.find((i) => i.id === req.params.id);
+  if (!inst) {
+    res.status(404).json({ error: `Instance "${req.params.id}" not found` });
+    return;
+  }
+  const body = req.body ?? {};
+  if (typeof body.name === 'string' && body.name.trim()) inst.name = body.name.trim();
+  if (typeof body.binary === 'string' && body.binary) inst.binary = body.binary;
+  if (typeof body.host === 'string' && body.host) inst.host = body.host;
+  if (typeof body.apiKey === 'string') inst.apiKey = body.apiKey;
+  if (typeof body.routerMode === 'boolean') inst.routerMode = body.routerMode;
+  if (Array.isArray(body.modelConfigIds)) inst.modelConfigIds = body.modelConfigIds.filter((x: unknown): x is string => typeof x === 'string');
+  if (typeof body.modelPath === 'string') inst.modelPath = body.modelPath || undefined;
+  if (typeof body.mmproj === 'string') inst.mmproj = body.mmproj || undefined;
+  if (body.params !== undefined) inst.params = normalizeEngineParams(body.params);
+  if (typeof body.port === 'number' && body.port !== inst.port) {
+    if (isPortTaken(data, body.port, inst.id)) {
+      res.status(409).json({ error: `Port ${body.port} is already used by another instance` });
+      return;
+    }
+    inst.port = body.port;
+  }
+  if (typeof body.definitionId === 'string' && data.definitions.some((d) => d.id === body.definitionId)) {
+    inst.definitionId = body.definitionId;
+  }
+  engines.saveEngines(data);
+  res.json(inst);
+});
+
+app.delete('/api/engines/instances/:id', (req, res) => {
+  const id = req.params.id;
+  const data = engines.getEngines();
+  const idx = data.instances.findIndex((i) => i.id === id);
+  if (idx < 0) {
+    res.status(404).json({ error: `Instance "${id}" not found` });
+    return;
+  }
+  engines.stop(id);
+  data.instances.splice(idx, 1);
+  if (data.defaultInstanceId === id) data.defaultInstanceId = data.instances[0]?.id ?? null;
+  engines.saveEngines(data);
+  res.json({ status: 'deleted' });
+});
+
+// Launch an engine instance from its stored definition + settings.
+app.post('/api/engines/instances/:id/launch', async (req, res) => {
+  const id = req.params.id;
+  const data = engines.getEngines();
+  const inst = data.instances.find((i) => i.id === id);
+  if (!inst) {
+    res.status(404).json({ error: `Instance "${id}" not found` });
+    return;
+  }
+  const def = data.definitions.find((d) => d.id === inst.definitionId);
+  if (!def) {
+    res.status(400).json({ error: `Instance references missing definition "${inst.definitionId}"` });
+    return;
+  }
+
+  let routerIniPath: string | undefined;
+  if (inst.routerMode) {
+    const modelsData = loadModels();
+    const selected = modelsData.configs.filter((c) => inst.modelConfigIds.includes(c.id));
+    if (selected.length === 0) {
+      res.status(400).json({ error: 'Router mode requires at least one model config' });
+      return;
+    }
+    routerIniPath = path.join(path.resolve(process.cwd(), '.config'), `router-${inst.id}.ini`);
+    try {
+      fs.mkdirSync(path.dirname(routerIniPath), { recursive: true });
+      fs.writeFileSync(routerIniPath, exportRouterIni(selected, loadParams()), 'utf-8');
+    } catch (e) {
+      res.status(500).json({ error: `Failed to write router INI: ${e}` });
+      return;
+    }
+  }
+
+  const spec = instanceToLlamaConfig(inst, def, routerIniPath);
+  await refreshDeviceMatch();
+  metricsPoller.reset();
+  startMetricsPolling();
+  engines.launch(id, spec);
+  res.json({ status: engines.getStatus(id), routerIniPath: routerIniPath ?? null });
+});
+
+app.post('/api/engines/instances/:id/stop', (req, res) => {
+  const id = req.params.id;
+  if (!engines.getEngines().instances.some((i) => i.id === id)) {
+    res.status(404).json({ error: `Instance "${id}" not found` });
+    return;
+  }
+  engines.stop(id);
+  res.json({ status: engines.getStatus(id) });
+});
+
 app.post('/api/launch', async (req, res) => {
   if (req.body) {
     config = { ...config, ...req.body };
@@ -533,8 +737,8 @@ app.post('/api/launch', async (req, res) => {
   await refreshDeviceMatch();
   metricsPoller.reset();
   startMetricsPolling();
-  llama.launch(config);
-  res.json({ status: llama.getStatus() });
+  engines.launch(defaultInstanceId(), config);
+  res.json({ status: engines.getStatus(defaultInstanceId()) });
 });
 
 // Launch router mode: generate a preset INI from the given model configs,
@@ -566,17 +770,17 @@ app.post('/api/launch-router', async (req, res) => {
   await refreshDeviceMatch();
   metricsPoller.reset();
   startMetricsPolling();
-  llama.launch({ ...config, routerIniPath: iniPath, modelPath: '' });
-  res.json({ status: llama.getStatus(), routerIniPath: iniPath, models: selected.map((c) => c.alias) });
+  engines.launch(defaultInstanceId(), { ...config, routerIniPath: iniPath, modelPath: '' });
+  res.json({ status: engines.getStatus(defaultInstanceId()), routerIniPath: iniPath, models: selected.map((c) => c.alias) });
 });
 
 app.post('/api/stop', (_req, res) => {
   metricsPoller.stop();
-  llama.stop();
-  res.json({ status: llama.getStatus() });
+  engines.stop(defaultInstanceId());
+  res.json({ status: engines.getStatus(defaultInstanceId()) });
 });
 
-// Full shutdown: stop the llama.cpp process and exit the Node server
+// Full shutdown: stop every engine instance and exit the Node server
 app.post('/api/shutdown', (_req, res) => {
   res.json({ ok: true });
   gpuPoller.stop();
@@ -585,15 +789,16 @@ app.post('/api/shutdown', (_req, res) => {
     client.end();
   }
   sseClients.clear();
-  llama.stop();
+  engines.stopAll();
   console.log('[server] shutdown requested, exiting…');
   setTimeout(() => process.exit(0), 300);
 });
 
 app.get('/api/status', (_req, res) => {
+  const id = defaultInstanceId();
   res.json({
-    status: llama.getStatus(),
-    metrics: llama.getMetrics(),
+    status: engines.getStatus(id),
+    metrics: engines.getMetrics(id),
     modelMetrics: metricsPoller.getMetrics(),
     systemStats: lastSystemStats,
     modelStatus: { ...modelStatus },
@@ -617,7 +822,7 @@ app.post('/api/model-status/clear', (_req, res) => {
 
 // Clear the server-side log cache (prevents replay on reconnect)
 app.post('/api/logs/clear', (_req, res) => {
-  logCache.length = 0;
+  engines.clearLogs(defaultInstanceId());
   res.json({ ok: true });
 });
 

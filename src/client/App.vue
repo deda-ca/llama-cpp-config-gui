@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import GpuMonitor from './components/GpuMonitor.vue';
 import SystemMonitor from './components/SystemMonitor.vue';
 import UsageStatus from './components/UsageStatus.vue';
 import ConfigList from './components/ConfigList.vue';
+import EngineList from './components/EngineList.vue';
 import LogView from './components/LogView.vue';
 import ProxyPanel from './components/ProxyPanel.vue';
 import ProxyUsagePanel from './components/ProxyUsagePanel.vue';
 import EnvironmentConfig from './components/EnvironmentConfig.vue';
-import type { SystemStats, LogEntry, ModelStatusData, UsageRecord } from './types';
+import type { SystemStats, LogEntry, ModelStatusData, UsageRecord, EngineInstance } from './types';
 
 const gpus = ref<any[]>([]);
 const systemStats = ref<SystemStats | null>(null);
@@ -85,15 +86,69 @@ async function applyUpdate() {
 }
 // Right-column tab selection, persisted across refreshes
 const TAB_KEY = 'llama-gui:right-tab';
-const TAB_VALUES = ['models', 'proxy', 'usage'] as const;
-const rightTab = ref<'models' | 'proxy' | 'usage'>(
+const TAB_VALUES = ['models', 'engines', 'proxy', 'usage'] as const;
+type RightTab = (typeof TAB_VALUES)[number];
+const rightTab = ref<RightTab>(
   (TAB_VALUES as readonly string[]).includes(localStorage.getItem(TAB_KEY) ?? '')
-    ? (localStorage.getItem(TAB_KEY) as 'models' | 'proxy' | 'usage')
+    ? (localStorage.getItem(TAB_KEY) as RightTab)
     : 'models',
 );
-function setRightTab(tab: 'models' | 'proxy' | 'usage') {
+function setRightTab(tab: RightTab) {
   rightTab.value = tab;
   localStorage.setItem(TAB_KEY, tab);
+}
+
+// --- Engine instances (todo #21 Phase 1 step 4) ---
+// Live statuses keyed by instance id, fed by SSE process-status events and
+// re-read from GET /api/engines on load / when the Engines tab changes state.
+const engineStatuses = ref<Record<string, string>>({});
+const engineInstances = ref<EngineInstance[]>([]);
+const defaultInstanceId = ref('default');
+// Per-instance log caches (SSE log-line carries instanceId). The default
+// instance also feeds `logLines` so the Models tab stream stays unchanged.
+const logsByInstance = ref<Record<string, LogEntry[]>>({});
+// Arrival-ordered merge of every instance's lines, used by the "All" log view
+const mergedLogs = ref<LogEntry[]>([]);
+const logInstanceFilter = ref('all');
+
+async function fetchEngines() {
+  try {
+    const res = await fetch('/api/engines');
+    if (!res.ok) return;
+    const data = await res.json();
+    engineInstances.value = data.instances || [];
+    if (data.defaultInstanceId) defaultInstanceId.value = data.defaultInstanceId;
+    const map: Record<string, string> = {};
+    for (const i of engineInstances.value) map[i.id] = i.status ?? 'stopped';
+    engineStatuses.value = map;
+  } catch { /* ignore */ }
+}
+
+const aggregate = computed(() => {
+  let running = 0;
+  let stopped = 0;
+  for (const inst of engineInstances.value) {
+    const s = engineStatuses.value[inst.id] ?? inst.status ?? 'stopped';
+    if (s === 'running' || s === 'starting') running++;
+    else stopped++;
+  }
+  return { running, stopped, total: engineInstances.value.length };
+});
+
+// Logs shown under the Engines tab: one instance, or every stream merged
+const engineLogLines = computed<LogEntry[]>(() =>
+  logInstanceFilter.value === 'all'
+    ? mergedLogs.value
+    : logsByInstance.value[logInstanceFilter.value] ?? [],
+);
+
+function clearEngineLogs() {
+  if (logInstanceFilter.value === 'all') {
+    mergedLogs.value = [];
+    logsByInstance.value = {};
+  } else {
+    logsByInstance.value[logInstanceFilter.value] = [];
+  }
 }
 // Proxy log stream + latest usage event (fed by SSE)
 const proxyLogLines = ref<LogEntry[]>([]);
@@ -115,12 +170,24 @@ function connect() {
     gpus.value = JSON.parse(e.data);
   });
   es.addEventListener('log-line', (e) => {
-    logLines.value.push(JSON.parse(e.data));
-    if (logLines.value.length > 2000) logLines.value.shift();
+    const entry = JSON.parse(e.data) as LogEntry;
+    const id = entry.instanceId ?? defaultInstanceId.value;
+    const cache = (logsByInstance.value[id] ??= []);
+    cache.push(entry);
+    if (cache.length > 2000) cache.shift();
+    mergedLogs.value.push(entry);
+    if (mergedLogs.value.length > 2000) mergedLogs.value.shift();
+    if (id === defaultInstanceId.value) {
+      logLines.value.push(entry);
+      if (logLines.value.length > 2000) logLines.value.shift();
+    }
   });
   es.addEventListener('log-history', (e) => {
-    // Server replays its in-memory cache on connect so logs survive refreshes
-    logLines.value = JSON.parse(e.data);
+    // Server replays the default instance's cache on connect so logs survive refreshes
+    const history = JSON.parse(e.data) as LogEntry[];
+    logLines.value = history;
+    logsByInstance.value = { [defaultInstanceId.value]: history };
+    mergedLogs.value = [...history];
   });
   es.addEventListener('metrics', (e) => {
     metrics.value = JSON.parse(e.data);
@@ -131,7 +198,13 @@ function connect() {
     );
   });
   es.addEventListener('process-status', (e) => {
-    processStatus.value = JSON.parse(e.data);
+    const data = JSON.parse(e.data);
+    // Payload is { instanceId, status }. The header badge aggregates every
+    // instance; the Models tab keeps tracking the default one.
+    const id = typeof data === 'string' ? defaultInstanceId.value : (data.instanceId ?? defaultInstanceId.value);
+    const status = typeof data === 'string' ? data : data.status;
+    engineStatuses.value = { ...engineStatuses.value, [id]: status };
+    if (id === defaultInstanceId.value) processStatus.value = status;
   });
   es.addEventListener('system-stats', (e) => {
     systemStats.value = JSON.parse(e.data);
@@ -204,6 +277,7 @@ onMounted(() => {
   connect();
   fetchAppVersion();
   fetchStatus();
+  fetchEngines();
 });
 
 onUnmounted(() => {
@@ -239,9 +313,21 @@ onUnmounted(() => {
           rel="noopener"
           title="Open the GitHub release page"
         >↗</a>
+        <span
+          v-else-if="updateInfo"
+          class="latest-pill"
+          :title="`v${updateInfo.current} is the latest version`"
+        >✓ latest</span>
       </h1>
       <div class="header-right">
-        <span class="status-badge" :class="processStatus">{{ processStatus }}</span>
+        <button
+          v-if="aggregate.total > 1"
+          class="status-badge aggregate"
+          :class="aggregate.running > 0 ? 'running' : 'stopped'"
+          @click="setRightTab('engines')"
+          :title="`Click to open the Engines tab`"
+        >{{ aggregate.running }} running / {{ aggregate.stopped }} stopped</button>
+        <span v-else class="status-badge" :class="processStatus">{{ processStatus }}</span>
         <button class="restart-btn" @click="restartServer" title="Restart the GUI server">⟳ Restart</button>
         <button class="shutdown-btn" @click="shutdownServer" title="Stop llama.cpp and shut down the server">⏻ Shutdown</button>
       </div>
@@ -267,6 +353,9 @@ onUnmounted(() => {
           <button class="tab" :class="{ active: rightTab === 'models' }" @click="setRightTab('models')">
             <span class="tab-icon">▤</span> Models
           </button>
+          <button class="tab" :class="{ active: rightTab === 'engines' }" @click="setRightTab('engines')">
+            <span class="tab-icon">⚙</span> Engines
+          </button>
           <button class="tab" :class="{ active: rightTab === 'proxy' }" @click="setRightTab('proxy')">
             <span class="tab-icon">⇄</span> Proxy
           </button>
@@ -286,6 +375,23 @@ onUnmounted(() => {
               :collapsed="logsCollapsed"
               @toggle-collapse="toggleLogsCollapsed"
               @clear-logs="logLines = []"
+            />
+          </section>
+        </template>
+        <template v-else-if="rightTab === 'engines'">
+          <section class="panel engine-section">
+            <EngineList :statuses="engineStatuses" @statuses-changed="fetchEngines" />
+          </section>
+          <section class="panel log-panel" :class="{ collapsed: logsCollapsed }">
+            <LogView
+              :lines="engineLogLines"
+              :metrics="metrics"
+              :collapsed="logsCollapsed"
+              :instances="engineInstances.map((i) => ({ id: i.id, name: i.name }))"
+              :instance-filter="logInstanceFilter"
+              @instance-filter="logInstanceFilter = $event"
+              @toggle-collapse="toggleLogsCollapsed"
+              @clear-logs="clearEngineLogs"
             />
           </section>
         </template>
@@ -425,6 +531,20 @@ body {
 .release-link:hover {
   color: #79c0ff;
   background: #30363d;
+}
+
+.latest-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  color: #8b949e;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 5px 11px;
 }
 
 .status-badge {
@@ -572,6 +692,13 @@ body {
 .config-section {
   flex: 1 1 50%;
   overflow: hidden;
+  min-height: 0;
+  min-width: 0;
+}
+
+.engine-section {
+  flex: 0 1 auto;
+  overflow-y: auto;
   min-height: 0;
   min-width: 0;
 }

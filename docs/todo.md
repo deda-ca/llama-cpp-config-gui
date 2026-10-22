@@ -151,7 +151,11 @@ interface SystemStats {
 
 ## 11. Add the ability to point to different llama.cpp builds for each model or when running.
 
+**Merged into item 21** (LLM Engines, Phase 2 — engine definitions).
+
 ## 12. Add the ability to run multiple llama.cpp instances for different models and builds (need review).
+
+**Reviewed — merged into item 21** (LLM Engines, Phase 1). See `docs/llm-engines.md`.
 
 ## 13. Auto launch browser with the correct url when the application is launched from an executable. ✅
 
@@ -367,6 +371,79 @@ timestamp into SQLite.
 clean, `npx vite build` clean. Shipped in v0.4.0 (proxy feature) and v0.5.0 (cached tokens,
 pricing & cost).
 
+## 21. LLM Engines — multiple engine instances, builds, and kinds 🚧
+
+Full specification: [docs/llm-engines.md](./llm-engines.md)
+
+**Goal:** spawn and monitor **multiple engine instances**, each with its own executable,
+parameters, env vars, and port. Generic starter (executable + env key/value pairs +
+params as `{ key, value? }`), with a llama.cpp-only block for router/model config.
+Supersedes items 11 and 12 and the Next Phase bullets for audio.cpp /
+stable-diffusion.cpp / strata.
+
+**UI direction (agreed, spec §6):** new **Engines** tab with one row per instance
+(`▸` drawer summary, `▶/⏹` start/stop, `⚙` configure dialog, `⧉` duplicate), the Logs &
+Metrics panel gains an instance selector (`All` merged + instance tag), header status
+badge becomes aggregate. Models tab stays as the config library.
+
+### Phase 1 — multi-instance, llama.cpp only (start here)
+
+1. ✅ **Data model + storage** (`src/server/engines/types.ts`, `src/server/engines/store.ts`)
+   - `EngineDefinition { id, name, kind, buildPath, envVars }` and
+     `EngineInstance { id, name, definitionId, port, host, apiKey, params[], modelConfigIds[], routerMode }`
+     — params as `{ key, value? }[]` (flag-only when `value` is undefined).
+   - New `.config/engines.json` with `loadEngines()/saveEngines()/normalizeEngines()`
+     following the `modelConfig.ts` pattern.
+   - **Non-destructive migration:** when `engines.json` is absent and `settings.json`
+     still has `llamaCppPath`/`port`, synthesize one `default` definition + one default
+     instance from it. Legacy fields are kept, not deleted.
+   - Tests: round-trip, migration from legacy `settings.json`, port conflict detection.
+
+2. ✅ **Process registry** (`src/server/engines/manager.ts`)
+   - Replace the `const llama = new LlamaProcessManager()` singleton in `index.ts` with
+     an `EngineManager` holding `Map<instanceId, ManagedInstance>`;
+     `LlamaProcessManager` stays mostly intact and becomes the per-instance worker.
+   - Per-instance log cache (replaces the single `logCache`); `stopAll()` wired into
+     `/api/shutdown` and `/api/restart`.
+   - Port auto-assign + conflict check against other instances, the GUI port, and the
+     proxy port.
+   - Tests: launch/stop two instances, per-instance status isolation, non-zero exit →
+     `error` status for that instance only.
+
+3. ✅ **`instanceId` through SSE + REST**
+   - Payloads become `{ instanceId, … }` for `log-line`, `process-status`, `metrics`,
+     `model-status`; `log-history` sends per-instance history.
+   - `GET /api/engines`, `POST/PUT/DELETE /api/engines/:id`,
+     `POST /api/engines/:id/launch|stop`; keep `/api/launch`, `/api/stop`, `/api/status`
+     as aliases bound to the default instance during transition.
+   - `modelStatus` and `metricsPoller` state keyed per instance.
+   - Tests: extend `api.test.ts` — two instances produce separate log streams and statuses.
+
+4. ✅ **Client: Engines tab** (mockup before implementing, per `agent.md`)
+   - `src/client/components/EngineList.vue` — rows + inline drawer + `⚙` dialog
+     (reuse `ui/Dialog.vue`), `+ New engine` with kind dropdown.
+   - Generic starter form: executable path + validate, port, env key/value rows, params
+     rows (key-only vs key+value), llama.cpp block (router mode + model selection reusing
+     the checkbox pattern from `ConfigList.vue`).
+   - `LogView.vue` instance selector (`All` merged with an instance tag column).
+   - Header aggregate badge (`2 running / 1 stopped`) replacing the single status.
+
+### Phase 2 — multiple engine definitions (builds) → old item 11
+`engines.json` UI in the Environment dialog (list of definitions, add/edit/remove),
+per-config `definitionId`, per-definition version validation.
+
+### Phase 3 — engine kind drivers
+`EngineDriver` interface (binary name, `buildArgs`, `getVersion`, `parseLogLine`,
+`metricsSource`); llama.cpp logic moved to `engines/llama.ts`; passthrough driver for
+custom binaries; per-kind param catalogs (`params.<kind>.json`).
+
+### Phase 4 — real non-llama kinds
+audio.cpp, stable-diffusion.cpp, strata drivers + auto-registration as proxy backends.
+Blocked on the proxy Phase 0 spike (fixtures for their HTTP APIs).
+
+**Open questions to resolve before Phase 3/4** (spec §4): audio.cpp / sd.cpp HTTP vs
+CLI-only, what strata actually is, per-instance GPU allocation UX.
+
 
 # Next Phase
 
@@ -378,11 +455,16 @@ pricing & cost).
 - ~~Add a refresh icon next to the title version to check if there is a new version available. This checks the github releases and if there is a new version available, it will show an upgrade icon with the latest version and clicking it will go to the github release page. Clicking on the upgrade icon will download the new version and replace the current version. Also add a restart button next to the shutdown button.~~
 - ~~Restart the service/program~~
 - ~~Usage status panel add settings gear icon to provide a setting of the max number of last used models within the list bellow. Something similar to the GPU monitor settings icon where it expands down the options. Also make the title size similar to the System monitor and also the same padding as the system monitor so that more space is given to the content.~~
+- ~~When refreshing version if there is no new version then show latest in the pill.~~
 
-- Add strata configuration and startup within the app.
+- Add strata configuration and startup within the app. → item 21 Phase 4
 - Ability to delete usage input.
-- Ability to start other .ccp apps with configs such as audio.cpp and stable-diffusion.ccp
+- Ability to start other .ccp apps with configs such as audio.cpp and stable-diffusion.ccp → item 21 Phase 4
 - Add configuration backup process.
+- The title bar has 'STARTING' which is always the same. Replace it with the current status of the models, and proxy.
+- For the different internal proxy services create a new url to proxy to the main pages of each UIs such as audio.cpp and stable-diffusion.cpp, llama.cpp or strata. Also show a button for each to jump to the main page of each UI.
+- Keep track of watts used for each active gpu for each request, average, and add a cost to the power including different times of day power and calculate the power usage in real time.
+
 
 
 

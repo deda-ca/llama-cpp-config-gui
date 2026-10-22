@@ -1,6 +1,24 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
 
+// Isolate the .config directory BEFORE the app module loads (its module-level
+// side effects — loadConfig, engines migration, params reseed — touch .config).
+// A legacy settings.json is seeded so the engines migration has a known start.
+const tmpDir = vi.hoisted(() => {
+  const fs = require('fs') as typeof import('fs');
+  const os = require('os') as typeof import('os');
+  const path = require('path') as typeof import('path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'llama-api-test-'));
+  fs.mkdirSync(path.join(dir, '.config'), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, '.config', 'settings.json'),
+    JSON.stringify({ llamaCppPath: '/opt/llama-test', port: 8080, host: '127.0.0.1' }),
+  );
+  (globalThis as any).__originalCwd = process.cwd();
+  process.chdir(dir);
+  return dir;
+});
+
 // Neutralize side-effectful modules BEFORE importing the app.
 vi.mock('../gpu.js', () => ({
   startGpuPolling: () => ({ stop: () => {}, setInterval: () => {} }),
@@ -46,22 +64,11 @@ vi.mock('http', async () => {
 
 import { app } from '../index.js';
 
-// Use an isolated temp dir for the .config files so tests don't clobber real config.
+// The temp dir was created and chdir'd in the hoisted block above.
 import fs from 'fs';
-import os from 'os';
-import path from 'path';
-
-let tmpDir: string;
-let originalCwd: string;
-
-beforeAll(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'llama-api-test-'));
-  originalCwd = process.cwd();
-  process.chdir(tmpDir);
-});
 
 afterAll(() => {
-  process.chdir(originalCwd);
+  process.chdir((globalThis as any).__originalCwd);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -206,5 +213,135 @@ describe('Logs API', () => {
     const res = await request(app).post('/api/logs/clear');
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
+  });
+});
+
+describe('Engine API', () => {
+  let defId: string;
+  let instId: string;
+
+  it('GET /api/engines returns definitions, instances and a default id', async () => {
+    const res = await request(app).get('/api/engines');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.definitions)).toBe(true);
+    expect(Array.isArray(res.body.instances)).toBe(true);
+    // Seeded from the legacy settings.json at startup
+    expect(res.body.defaultInstanceId).toBeTruthy();
+    expect(res.body.instances[0]).toHaveProperty('status');
+  });
+
+  it('POST /api/engines/definitions creates a definition', async () => {
+    const res = await request(app)
+      .post('/api/engines/definitions')
+      .send({ name: 'Build A', kind: 'llamacpp', buildPath: '/opt/llama', envVars: { CUDA_VISIBLE_DEVICES: '0' } });
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe('build-a');
+    expect(res.body.envVars).toEqual({ CUDA_VISIBLE_DEVICES: '0' });
+    defId = res.body.id;
+  });
+
+  it('POST /api/engines/definitions requires a name', async () => {
+    const res = await request(app).post('/api/engines/definitions').send({ kind: 'llamacpp' });
+    expect(res.status).toBe(400);
+  });
+
+  it('PUT /api/engines/definitions/:id updates fields', async () => {
+    const res = await request(app).put(`/api/engines/definitions/${defId}`).send({ buildPath: '/opt/llama2', envVars: {} });
+    expect(res.status).toBe(200);
+    expect(res.body.buildPath).toBe('/opt/llama2');
+    expect(res.body.envVars).toEqual({});
+  });
+
+  it('POST /api/engines/instances creates an instance with a free port', async () => {
+    const before = await request(app).get('/api/engines');
+    const taken = new Set(before.body.instances.map((i: any) => i.port));
+
+    const res = await request(app)
+      .post('/api/engines/instances')
+      .send({ name: 'My Engine', definitionId: defId });
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe('my-engine');
+    expect(res.body.definitionId).toBe(defId);
+    expect(taken.has(res.body.port)).toBe(false);
+    instId = res.body.id;
+  });
+
+  it('POST /api/engines/instances rejects an explicit port conflict', async () => {
+    const before = await request(app).get('/api/engines');
+    const used = before.body.instances[0].port;
+    const res = await request(app)
+      .post('/api/engines/instances')
+      .send({ name: 'Clash', definitionId: defId, port: used });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain(String(used));
+  });
+
+  it('POST /api/engines/instances requires a valid definitionId', async () => {
+    const res = await request(app).post('/api/engines/instances').send({ name: 'X', definitionId: 'nope' });
+    expect(res.status).toBe(400);
+  });
+
+  it('PUT /api/engines/instances/:id updates params and rejects port clashes', async () => {
+    const res = await request(app)
+      .put(`/api/engines/instances/${instId}`)
+      .send({
+        params: [{ key: '--host', value: '0.0.0.0' }, { key: '--metrics' }, { key: '  ' }],
+        routerMode: false,
+      });
+    expect(res.status).toBe(200);
+    expect(res.body.params).toEqual([
+      { key: '--host', value: '0.0.0.0' },
+      { key: '--metrics' },
+    ]);
+
+    const before = await request(app).get('/api/engines');
+    const otherPort = before.body.instances.find((i: any) => i.id !== instId).port;
+    const clash = await request(app).put(`/api/engines/instances/${instId}`).send({ port: otherPort });
+    expect(clash.status).toBe(409);
+  });
+
+  it('DELETE /api/engines/definitions/:id is blocked while an instance uses it', async () => {
+    const res = await request(app).delete(`/api/engines/definitions/${defId}`);
+    expect(res.status).toBe(409);
+  });
+
+  it('POST /api/engines/instances/:id/launch starts the instance', async () => {
+    const res = await request(app).post(`/api/engines/instances/${instId}/launch`);
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('status');
+    expect(res.body.routerIniPath).toBeNull();
+  });
+
+  it('POST /api/engines/instances/:id/launch rejects router mode without models', async () => {
+    await request(app).put(`/api/engines/instances/${instId}`).send({ routerMode: true, modelConfigIds: [] });
+    const res = await request(app).post(`/api/engines/instances/${instId}/launch`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('model config');
+    await request(app).put(`/api/engines/instances/${instId}`).send({ routerMode: false });
+  });
+
+  it('POST /api/engines/instances/:id/stop stops the instance', async () => {
+    const res = await request(app).post(`/api/engines/instances/${instId}/stop`);
+    expect(res.status).toBe(200);
+    expect(res.body.status).toBe('stopped');
+  });
+
+  it('unknown instance ids return 404', async () => {
+    expect((await request(app).put('/api/engines/instances/nope').send({})).status).toBe(404);
+    expect((await request(app).post('/api/engines/instances/nope/launch')).status).toBe(404);
+    expect((await request(app).post('/api/engines/instances/nope/stop')).status).toBe(404);
+    expect((await request(app).delete('/api/engines/instances/nope')).status).toBe(404);
+  });
+
+  it('DELETE /api/engines/instances/:id removes it and re-points the default', async () => {
+    const res = await request(app).delete(`/api/engines/instances/${instId}`);
+    expect(res.status).toBe(200);
+
+    const after = await request(app).get('/api/engines');
+    expect(after.body.instances.some((i: any) => i.id === instId)).toBe(false);
+    expect(after.body.defaultInstanceId).not.toBe(instId);
+
+    const del = await request(app).delete(`/api/engines/definitions/${defId}`);
+    expect(del.status).toBe(200);
   });
 });

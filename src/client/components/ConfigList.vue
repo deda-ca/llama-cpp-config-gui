@@ -93,7 +93,10 @@ async function fetchStatus() {
 function connectSse() {
   es = new EventSource('/api/events');
   es.addEventListener('process-status', (e) => {
-    processStatus.value = JSON.parse(e.data);
+    const data = JSON.parse(e.data);
+    // { instanceId, status } — this list drives the default instance only until
+    // the Engines tab lands.
+    processStatus.value = typeof data === 'string' ? data : data.status;
   });
 }
 

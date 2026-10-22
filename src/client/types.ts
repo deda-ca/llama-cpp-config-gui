@@ -67,6 +67,71 @@ export interface LogEntry {
   raw: string;
   /** Parsed log level, or 'plain' when the line is not structured */
   level: 'I' | 'W' | 'E' | 'F' | 'plain';
+  /** Engine instance the line came from (process-scoped streams only). */
+  instanceId?: string;
+  /** Display name of the originating instance (merged log view only). */
+  instanceLabel?: string;
+}
+
+/** Engine kinds that can be spawned (mirrors src/server/engines/types.ts). */
+export type EngineKind =
+  | 'llamacpp'
+  | 'audio'
+  | 'sdiffusion'
+  | 'embeddings'
+  | 'moderation'
+  | 'videos'
+  | 'default'
+  | 'custom';
+
+export const ENGINE_KIND_LABELS: Record<EngineKind, string> = {
+  llamacpp: 'llama.cpp',
+  audio: 'audio.cpp',
+  sdiffusion: 'stable-diffusion.cpp',
+  embeddings: 'embeddings',
+  moderation: 'moderation',
+  videos: 'videos',
+  default: 'default',
+  custom: 'custom',
+};
+
+/** A named build folder + environment, reusable across instances. */
+export interface EngineDefinition {
+  id: string;
+  name: string;
+  kind: EngineKind;
+  buildPath: string;
+  envVars: Record<string, string>;
+}
+
+/** One CLI argument: key + optional value (flag-only when value is undefined). */
+export interface EngineParam {
+  key: string;
+  value?: string;
+}
+
+/** A launchable engine instance, with its live process status. */
+export interface EngineInstance {
+  id: string;
+  name: string;
+  definitionId: string;
+  binary: string;
+  host: string;
+  port: number;
+  apiKey: string;
+  params: EngineParam[];
+  routerMode: boolean;
+  modelConfigIds: string[];
+  modelPath?: string;
+  mmproj?: string;
+  /** Live process status, added by GET /api/engines. */
+  status?: 'stopped' | 'starting' | 'running' | 'exited' | 'error';
+}
+
+export interface EnginesResponse {
+  definitions: EngineDefinition[];
+  instances: EngineInstance[];
+  defaultInstanceId: string | null;
 }
 
 /** Live model performance status extracted from print_timing log lines. */
