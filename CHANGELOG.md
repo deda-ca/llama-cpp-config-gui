@@ -1,3 +1,10 @@
+# [0.12.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.11.0...v0.12.0) (2026-10-22)
+
+
+### Features
+
+* strata engine kind with a per-kind parameter catalog ([3812a73](https://github.com/deda-ca/llama-cpp-config-gui/commit/3812a73dd339eaaf40b6cae16ff0b6a2344d230c))
+
 # [0.11.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.10.0...v0.11.0) (2026-10-22)
 
 
