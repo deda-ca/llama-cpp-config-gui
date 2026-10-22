@@ -428,9 +428,21 @@ badge becomes aggregate. Models tab stays as the config library.
    - `LogView.vue` instance selector (`All` merged with an instance tag column).
    - Header aggregate badge (`2 running / 1 stopped`) replacing the single status.
 
-### Phase 2 — multiple engine definitions (builds) → old item 11
-`engines.json` UI in the Environment dialog (list of definitions, add/edit/remove),
-per-config `definitionId`, per-definition version validation.
+### Phase 2 — multiple engine definitions (builds) → old item 11 ✅
+Environment dialog now edits the **list of engine builds** (definitions): add/edit/remove,
+kind dropdown, per-build env rows, and per-definition validation
+(`GET /api/engines/definitions/:id/version` — llama.cpp runs the `llama-server --version`
+probe, other kinds check folder existence until Phase 3 drivers land).
+The legacy single `llamaCppPath`/`envVars` fields were dropped from the dialog but stay
+in `settings.json` untouched (migration compatibility). Host/port/API key remain there as
+defaults for new instances. Host-level probes (`/api/devices`, CUDA matching,
+`/api/version`) and the legacy launch endpoints follow the **default definition's** build
+folder, so there is one source of truth.
+
+**Not done (deliberately):** per-model-config `definitionId`. In the engines model a build
+is chosen by the *instance*, so "different builds per model" is expressed as one instance
+per build — adding `definitionId` to model configs would reintroduce a second source of
+truth. Revisit if a per-model build override is actually wanted.
 
 ### Phase 3 — engine kind drivers
 `EngineDriver` interface (binary name, `buildArgs`, `getVersion`, `parseLogLine`,

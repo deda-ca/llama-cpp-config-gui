@@ -252,6 +252,50 @@ describe('Engine API', () => {
     expect(res.body.envVars).toEqual({});
   });
 
+  it('GET /api/engines/definitions/:id/version probes the saved build folder', async () => {
+    // The llama.js mock reports no version, so the path is considered invalid
+    const res = await request(app).get(`/api/engines/definitions/${defId}/version`);
+    expect(res.status).toBe(200);
+    expect(res.body.kind).toBe('llamacpp');
+    expect(res.body.valid).toBe(false);
+  });
+
+  it('GET /api/engines/definitions/:id/version 404s for an unknown definition', async () => {
+    const res = await request(app).get('/api/engines/definitions/nope/version');
+    expect(res.status).toBe(404);
+  });
+
+  it('GET /api/engines/definitions/:id/version reports missing buildPath', async () => {
+    const created = await request(app)
+      .post('/api/engines/definitions')
+      .send({ name: 'No Path', kind: 'llamacpp' });
+    const res = await request(app).get(`/api/engines/definitions/${created.body.id}/version`);
+    expect(res.status).toBe(200);
+    expect(res.body.valid).toBe(false);
+    expect(res.body.error).toContain('buildPath');
+    await request(app).delete(`/api/engines/definitions/${created.body.id}`);
+  });
+
+  it('non-llamacpp definitions validate by folder existence (no probe yet)', async () => {
+    const created = await request(app)
+      .post('/api/engines/definitions')
+      .send({ name: 'SD Build', kind: 'sdiffusion', buildPath: tmpDir });
+    expect(created.status).toBe(200);
+    const ok = await request(app).get(`/api/engines/definitions/${created.body.id}/version`);
+    expect(ok.status).toBe(200);
+    expect(ok.body.kind).toBe('sdiffusion');
+    expect(ok.body.valid).toBe(true);
+
+    const missing = await request(app)
+      .post('/api/engines/definitions')
+      .send({ name: 'SD Missing', kind: 'sdiffusion', buildPath: '/nonexistent/sd/build' });
+    const bad = await request(app).get(`/api/engines/definitions/${missing.body.id}/version`);
+    expect(bad.body.valid).toBe(false);
+
+    await request(app).delete(`/api/engines/definitions/${created.body.id}`);
+    await request(app).delete(`/api/engines/definitions/${missing.body.id}`);
+  });
+
   it('POST /api/engines/instances creates an instance with a free port', async () => {
     const before = await request(app).get('/api/engines');
     const taken = new Set(before.body.instances.map((i: any) => i.port));

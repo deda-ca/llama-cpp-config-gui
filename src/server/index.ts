@@ -99,6 +99,36 @@ function defaultInstanceId(): string {
   return engines.getDefaultInstanceId() ?? 'default';
 }
 
+/**
+ * Build folder used for host-level probes (device listing, CUDA matching).
+ * Follows the default instance's definition so multiple builds are supported
+ * (todo #21 Phase 2); falls back to the legacy settings.json path while the
+ * engines file has no definition yet.
+ */
+function defaultBuildPath(): string {
+  const data = engines.getEngines();
+  const inst = data.instances.find((i) => i.id === data.defaultInstanceId);
+  const def = data.definitions.find((d) => d.id === inst?.definitionId);
+  return def?.buildPath || config.llamaCppPath || '';
+}
+
+/**
+ * Overlay the default instance's definition (build folder + env vars) onto a
+ * legacy launch spec. The Environment dialog now edits definitions rather than
+ * settings.json, so the legacy /api/launch endpoints must follow them.
+ */
+function applyDefaultDefinition(spec: LlamaConfig): LlamaConfig {
+  const data = engines.getEngines();
+  const inst = data.instances.find((i) => i.id === data.defaultInstanceId);
+  const def = data.definitions.find((d) => d.id === inst?.definitionId);
+  if (!def) return spec;
+  return {
+    ...spec,
+    llamaCppPath: def.buildPath || spec.llamaCppPath,
+    envVars: Object.keys(def.envVars).length > 0 ? def.envVars : spec.envVars,
+  };
+}
+
 // --- Proxy gateway (docs/proxy-server.md) ---
 const proxyRouter = new ModelRouter();
 let proxyDb: UsageDb | null = null;
@@ -376,8 +406,9 @@ function updateModelStatus(timing: TimingData): void {
 let cudaMatchMap: Map<number, number> = new Map();
 
 async function refreshDeviceMatch(): Promise<void> {
-  if (!config.llamaCppPath) return;
-  const devices = await listLlamaDevices(config.llamaCppPath);
+  const buildPath = defaultBuildPath();
+  if (!buildPath) return;
+  const devices = await listLlamaDevices(buildPath);
   // We need current GPU names — query once
   const { queryGpus } = await import('./gpu.js');
   const gpus = await queryGpus();
@@ -405,11 +436,12 @@ const systemPoller = startSystemPolling((stats) => {
 }, 1000);
 
 app.get('/api/devices', async (_req, res) => {
-  if (!config.llamaCppPath) {
+  const buildPath = defaultBuildPath();
+  if (!buildPath) {
     res.json([]);
     return;
   }
-  const devices = await listLlamaDevices(config.llamaCppPath);
+  const devices = await listLlamaDevices(buildPath);
   res.json(devices);
 });
 
@@ -484,11 +516,12 @@ app.post('/api/restart', (_req, res) => {
 });
 
 app.get('/api/version', async (_req, res) => {
-  if (!config.llamaCppPath) {
+  const buildPath = defaultBuildPath();
+  if (!buildPath) {
     res.json({ version: null, commit: null, buildDate: null, backend: null, raw: [] });
     return;
   }
-  const info = await getLlamaVersion(config.llamaCppPath);
+  const info = await getLlamaVersion(buildPath);
   res.json(info);
 });
 
@@ -589,6 +622,8 @@ app.put('/api/engines/definitions/:id', (req, res) => {
   if (typeof req.body?.buildPath === 'string') def.buildPath = req.body.buildPath;
   if (req.body?.envVars !== undefined) def.envVars = normalizeEnvVars(req.body.envVars);
   engines.saveEngines(data);
+  // Device matching depends on the default definition's build folder
+  void refreshDeviceMatch();
   res.json(def);
 });
 
@@ -606,6 +641,27 @@ app.delete('/api/engines/definitions/:id', (req, res) => {
   data.definitions.splice(idx, 1);
   engines.saveEngines(data);
   res.json({ status: 'deleted' });
+});
+
+// Validate a definition's saved build folder (llama.cpp probe). Non-llama kinds
+// report valid when the folder exists — full per-kind probes land with drivers.
+app.get('/api/engines/definitions/:id/version', async (req, res) => {
+  const def = engines.getEngines().definitions.find((d) => d.id === req.params.id);
+  if (!def) {
+    res.status(404).json({ error: `Definition "${req.params.id}" not found` });
+    return;
+  }
+  if (!def.buildPath) {
+    res.json({ valid: false, error: 'buildPath is not set' });
+    return;
+  }
+  if (def.kind !== 'llamacpp') {
+    res.json({ valid: fs.existsSync(def.buildPath), kind: def.kind, note: 'no version probe for this kind yet' });
+    return;
+  }
+  const info = await getLlamaVersion(def.buildPath);
+  const valid = info.version !== null || info.build !== null;
+  res.json({ ...info, valid, kind: def.kind });
 });
 
 app.post('/api/engines/instances', (req, res) => {
@@ -737,7 +793,7 @@ app.post('/api/launch', async (req, res) => {
   await refreshDeviceMatch();
   metricsPoller.reset();
   startMetricsPolling();
-  engines.launch(defaultInstanceId(), config);
+  engines.launch(defaultInstanceId(), applyDefaultDefinition(config));
   res.json({ status: engines.getStatus(defaultInstanceId()) });
 });
 
@@ -770,7 +826,7 @@ app.post('/api/launch-router', async (req, res) => {
   await refreshDeviceMatch();
   metricsPoller.reset();
   startMetricsPolling();
-  engines.launch(defaultInstanceId(), { ...config, routerIniPath: iniPath, modelPath: '' });
+  engines.launch(defaultInstanceId(), applyDefaultDefinition({ ...config, routerIniPath: iniPath, modelPath: '' }));
   res.json({ status: engines.getStatus(defaultInstanceId()), routerIniPath: iniPath, models: selected.map((c) => c.alias) });
 });
 

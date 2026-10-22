@@ -1,35 +1,55 @@
 <script setup lang="ts">
 import { ref, watch, onMounted } from 'vue';
 import Dialog from './ui/Dialog.vue';
+import type { EngineDefinition, EngineKind } from '../types';
+import { ENGINE_KIND_LABELS } from '../types';
 
 interface EnvConfig {
-  llamaCppPath: string;
   modelsDir: string;
   routerIniPath: string;
   host: string;
   port: number;
   apiKey: string;
-  envVars: Record<string, string>;
 }
 
 const emit = defineEmits(['saved', 'close']);
 
 const local = ref<EnvConfig>({
-  llamaCppPath: '',
   modelsDir: '',
   routerIniPath: '',
   host: '127.0.0.1',
   port: 8080,
   apiKey: '',
-  envVars: {},
 });
 
-// Env var rows for easy editing
-interface EnvRow { key: string; value: string }
-const envRows = ref<EnvRow[]>([]);
+// Engine builds (definitions): build folder + env vars, reusable across engine
+// instances. Edited as a list here (todo #21 Phase 2) — the single legacy
+// llamaCppPath/envVars in settings.json is no longer surfaced.
+interface VersionInfo {
+  version: string | null;
+  build: string | null;
+  commit: string | null;
+  backend: string | null;
+  note?: string;
+}
+interface DefRow {
+  /** null while a new row has not been persisted yet */
+  id: string | null;
+  name: string;
+  kind: EngineKind;
+  buildPath: string;
+  envRows: { key: string; value: string }[];
+  checking: boolean;
+  valid: boolean | null;
+  info: VersionInfo | null;
+}
+const defs = ref<DefRow[]>([]);
+// Definitions removed since the last save — deleted through the API on Save
+const pendingDefDeletes = ref<string[]>([]);
 
 const saving = ref(false);
 const savedFlash = ref(false);
+const formError = ref('');
 
 // Dirty tracking: compare the current form against a snapshot of the last
 // loaded/saved state. A deep watch fires on nextTick (after initial load), so a
@@ -37,122 +57,205 @@ const savedFlash = ref(false);
 const dirty = ref(false);
 let snapshot = '';
 function currentState() {
-  return JSON.stringify({ form: local.value, rows: envRows.value });
+  return JSON.stringify({
+    form: local.value,
+    defs: defs.value.map((d) => ({ id: d.id, name: d.name, kind: d.kind, buildPath: d.buildPath, envRows: d.envRows })),
+    deleted: pendingDefDeletes.value,
+  });
 }
 function takeSnapshot() {
   snapshot = currentState();
 }
-watch([local, envRows], () => {
+watch([local, defs, pendingDefDeletes], () => {
   dirty.value = currentState() !== snapshot;
 }, { deep: true });
 
-// llama.cpp version info (read-only, shown below the build folder field)
-interface LlamaVersionInfo {
-  version: string | null;
-  build: string | null;
-  commit: string | null;
-  compiler: string | null;
-  backend: string | null;
-}
-const llamaVersion = ref<LlamaVersionInfo | null>(null);
-const checkingPath = ref(false);
-const pathValid = ref<boolean | null>(null); // null = not yet checked
-
-// Validate the (possibly edited) build folder and refresh the version display.
-async function checkBuildPath() {
-  const p = local.value.llamaCppPath.trim();
-  if (!p) {
-    llamaVersion.value = null;
-    pathValid.value = false;
+// Validate a persisted definition through its own endpoint (probes the saved
+// folder with the right kind); unsaved rows use the generic path probe.
+async function validateDef(def: DefRow) {
+  const url = def.id
+    ? `/api/engines/definitions/${def.id}/version`
+    : null;
+  if (!url) {
+    const p = def.buildPath.trim();
+    if (!p) {
+      def.info = null;
+      def.valid = false;
+      return;
+    }
+    def.checking = true;
+    try {
+      const res = await fetch('/api/version/check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: p }),
+      });
+      if (res.ok) {
+        const info = await res.json();
+        def.info = info;
+        def.valid = !!info.valid;
+      } else {
+        def.info = null;
+        def.valid = false;
+      }
+    } catch {
+      def.info = null;
+      def.valid = false;
+    } finally {
+      def.checking = false;
+    }
     return;
   }
-  checkingPath.value = true;
+  def.checking = true;
   try {
-    const res = await fetch('/api/version/check', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: p }),
-    });
+    const res = await fetch(url);
     if (res.ok) {
       const info = await res.json();
-      llamaVersion.value = info;
-      pathValid.value = !!info.valid;
+      def.info = info;
+      def.valid = !!info.valid;
     } else {
-      llamaVersion.value = null;
-      pathValid.value = false;
+      def.info = null;
+      def.valid = false;
     }
   } catch {
-    llamaVersion.value = null;
-    pathValid.value = false;
+    def.info = null;
+    def.valid = false;
   } finally {
-    checkingPath.value = false;
+    def.checking = false;
   }
 }
 
 onMounted(async () => {
   try {
-    const res = await fetch('/api/config');
-    if (res.ok) {
-      const cfg = await res.json();
+    const [cfgRes, engRes] = await Promise.all([fetch('/api/config'), fetch('/api/engines')]);
+    if (cfgRes.ok) {
+      const cfg = await cfgRes.json();
       local.value = {
-        llamaCppPath: cfg.llamaCppPath || '',
         modelsDir: cfg.modelsDir || '',
         routerIniPath: cfg.routerIniPath || '',
         host: cfg.host || '127.0.0.1',
         port: cfg.port ?? 8080,
         apiKey: cfg.apiKey || '',
-        envVars: cfg.envVars || {},
       };
-      envRows.value = Object.entries(local.value.envVars).map(([key, value]) => ({ key, value }));
+    }
+    if (engRes.ok) {
+      const data = await engRes.json();
+      defs.value = ((data.definitions || []) as EngineDefinition[]).map((d) => ({
+        id: d.id,
+        name: d.name,
+        kind: d.kind,
+        buildPath: d.buildPath,
+        envRows: Object.entries(d.envVars).map(([key, value]) => ({ key, value })),
+        checking: false,
+        valid: null,
+        info: null,
+      }));
     }
   } catch (e) {
     console.error('Failed to load environment config:', e);
   }
   takeSnapshot();
-  // Validate the saved path on open so the version badge is accurate.
-  checkBuildPath();
+  // Validate saved llama.cpp builds on open so the version badges are accurate.
+  for (const d of defs.value) {
+    if (d.id && d.kind === 'llamacpp' && d.buildPath) validateDef(d);
+  }
 });
 
-function addEnvRow() {
-  envRows.value.push({ key: '', value: '' });
+function addDef() {
+  defs.value.push({
+    id: null,
+    name: '',
+    kind: 'llamacpp',
+    buildPath: '',
+    envRows: [],
+    checking: false,
+    valid: null,
+    info: null,
+  });
 }
 
-function removeEnvRow(idx: number) {
-  envRows.value.splice(idx, 1);
+function removeDef(idx: number) {
+  const def = defs.value[idx];
+  if (def.id && !confirm(`Remove build "${def.name}"? Engine instances using it must be moved or deleted first.`)) return;
+  defs.value.splice(idx, 1);
+  // Persisted rows are deleted through the API on Save; unsaved rows just vanish
+  if (def.id) pendingDefDeletes.value.push(def.id);
+}
+
+function addDefEnv(def: DefRow) {
+  def.envRows.push({ key: '', value: '' });
+}
+
+function removeDefEnv(def: DefRow, idx: number) {
+  def.envRows.splice(idx, 1);
 }
 
 async function save() {
   saving.value = true;
+  formError.value = '';
   try {
-    // Build envVars object from rows (skip empty keys)
-    const envVars: Record<string, string> = {};
-    for (const row of envRows.value) {
-      if (row.key.trim()) envVars[row.key.trim()] = row.value;
-    }
-
     const res = await fetch('/api/config', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        llamaCppPath: local.value.llamaCppPath,
         modelsDir: local.value.modelsDir,
         routerIniPath: local.value.routerIniPath,
         host: local.value.host,
         port: Number(local.value.port) || 8080,
         apiKey: local.value.apiKey,
-        envVars,
       }),
     });
-    if (res.ok) {
-      takeSnapshot();
-      dirty.value = false;
-      savedFlash.value = true;
-      setTimeout(() => (savedFlash.value = false), 1500);
-      // Re-validate the (possibly new) build folder and refresh the version.
-      checkBuildPath();
-      emit('saved');
-      emit('close');
+    if (!res.ok) {
+      formError.value = (await res.json().catch(() => ({}))).error || `Config save failed (${res.status})`;
+      return;
     }
+
+    // Create/update each definition through the engines API
+    for (const def of defs.value) {
+      const envVars: Record<string, string> = {};
+      for (const row of def.envRows) {
+        if (row.key.trim()) envVars[row.key.trim()] = row.value;
+      }
+      const body = {
+        name: def.name.trim() || def.id || 'build',
+        kind: def.kind,
+        buildPath: def.buildPath.trim(),
+        envVars,
+      };
+      const dRes = await fetch(def.id ? `/api/engines/definitions/${def.id}` : '/api/engines/definitions', {
+        method: def.id ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!dRes.ok) {
+        formError.value = (await dRes.json().catch(() => ({}))).error || `Build save failed (${dRes.status})`;
+        return;
+      }
+      def.id = (await dRes.json()).id;
+    }
+
+    // Definitions removed since the last save
+    for (const id of [...pendingDefDeletes.value]) {
+      const dRes = await fetch(`/api/engines/definitions/${id}`, { method: 'DELETE' });
+      if (!dRes.ok) {
+        formError.value = (await dRes.json().catch(() => ({}))).error || `Build delete failed (${dRes.status})`;
+        return;
+      }
+      pendingDefDeletes.value.splice(pendingDefDeletes.value.indexOf(id), 1);
+    }
+
+    takeSnapshot();
+    dirty.value = false;
+    savedFlash.value = true;
+    setTimeout(() => (savedFlash.value = false), 1500);
+    // Re-validate the (possibly edited) build folders and refresh the badges.
+    for (const d of defs.value) {
+      if (d.kind === 'llamacpp' && d.buildPath) validateDef(d);
+    }
+    emit('saved');
+    emit('close');
+  } catch (e) {
+    formError.value = String(e);
   } finally {
     saving.value = false;
   }
@@ -168,25 +271,7 @@ function requestClose() {
 <template>
   <Dialog title="Environment" @close="requestClose">
   <div class="env-config">
-    <div class="field">
-      <label>llama.cpp Build Folder</label>
-      <div class="path-row">
-        <input v-model="local.llamaCppPath" type="text" placeholder="/path/to/llama.cpp/build/bin" />
-        <button
-          class="btn btn-sm refresh-btn"
-          :disabled="checkingPath"
-          @click="checkBuildPath"
-          title="Validate this path and fetch the latest version"
-        >{{ checkingPath ? '…' : '↻ Refresh' }}</button>
-      </div>
-      <small>Folder containing <code>llama-server</code> / <code>llama-cli</code></small>
-      <div v-if="pathValid === false" class="version-info version-invalid">
-        Invalid path — <code>llama-server</code> not found here.
-      </div>
-      <div v-else-if="llamaVersion && (llamaVersion.version || llamaVersion.build)" class="version-info">
-        llama.cpp {{ llamaVersion.version || '?' }} (build {{ llamaVersion.build || '?' }})<template v-if="llamaVersion.backend"> · {{ llamaVersion.backend }}</template><template v-if="llamaVersion.commit"> · {{ llamaVersion.commit.slice(0, 7) }}</template>
-      </div>
-    </div>
+    <div v-if="formError" class="form-error">{{ formError }}</div>
 
     <div class="field">
       <label>Models Folder</label>
@@ -204,12 +289,12 @@ function requestClose() {
       <div class="field">
         <label>Host</label>
         <input v-model="local.host" type="text" placeholder="127.0.0.1" />
-        <small>Interface llama-server binds to (<code>--host</code>)</small>
+        <small>Default interface for new engine instances (<code>--host</code>)</small>
       </div>
       <div class="field field-port">
         <label>Port</label>
         <input v-model.number="local.port" type="number" min="1" max="65535" />
-        <small>Server port (<code>--port</code>)</small>
+        <small>Default port (<code>--port</code>)</small>
       </div>
     </div>
 
@@ -219,14 +304,46 @@ function requestClose() {
       <small>Requires clients to send this key; leave empty for no auth</small>
     </div>
 
+    <!-- Engine builds (definitions): build folder + env, reusable across instances -->
     <div class="field">
-      <label>Environment Variables</label>
-      <div v-for="(row, idx) in envRows" :key="idx" class="env-row">
-        <input v-model="row.key" type="text" placeholder="VAR_NAME" class="env-key" />
-        <input v-model="row.value" type="text" placeholder="value" class="env-value" />
-        <button class="remove-btn" @click="removeEnvRow(idx)" title="Remove">&times;</button>
+      <label>Engine Builds</label>
+      <small>Build folders and their environment variables. Engine instances pick one of these in the Engines tab.</small>
+      <div v-for="(def, idx) in defs" :key="def.id ?? `new-${idx}`" class="def-card">
+        <div class="def-head">
+          <input v-model="def.name" type="text" placeholder="build name" class="def-name" />
+          <select v-model="def.kind" class="def-kind">
+            <option v-for="(label, k) in ENGINE_KIND_LABELS" :key="k" :value="k">{{ label }}</option>
+          </select>
+          <button class="remove-btn" @click="removeDef(idx)" title="Remove build">&times;</button>
+        </div>
+        <div class="path-row">
+          <input v-model="def.buildPath" type="text" placeholder="/path/to/build/bin" class="def-path" />
+          <button
+            class="btn refresh-btn"
+            :disabled="def.checking"
+            @click="validateDef(def)"
+            title="Validate this build folder"
+          >{{ def.checking ? '…' : '↻ Validate' }}</button>
+        </div>
+        <div v-if="def.kind === 'llamacpp' && def.valid === false" class="version-info version-invalid">
+          Invalid path — <code>llama-server</code> not found here.
+        </div>
+        <div v-else-if="def.kind === 'llamacpp' && def.info && (def.info.version || def.info.build)" class="version-info">
+          llama.cpp {{ def.info.version || '?' }} (build {{ def.info.build || '?' }})<template v-if="def.info.backend"> · {{ def.info.backend }}</template><template v-if="def.info.commit"> · {{ def.info.commit.slice(0, 7) }}</template>
+        </div>
+        <div v-else-if="def.kind !== 'llamacpp' && def.valid === true" class="version-info">
+          Folder exists. No version probe for this kind yet.
+        </div>
+        <div class="def-env">
+          <div v-for="(row, eidx) in def.envRows" :key="eidx" class="env-row">
+            <input v-model="row.key" type="text" placeholder="VAR_NAME" class="env-key" />
+            <input v-model="row.value" type="text" placeholder="value" class="env-value" />
+            <button class="remove-btn" @click="removeDefEnv(def, eidx)" title="Remove">&times;</button>
+          </div>
+          <button class="add-env-btn" @click="addDefEnv(def)">+ Add Variable</button>
+        </div>
       </div>
-      <button class="add-env-btn" @click="addEnvRow">+ Add Variable</button>
+      <button class="add-env-btn" @click="addDef">+ Add Build</button>
       <small>e.g. <code>CUDA_VISIBLE_DEVICES=0,2</code>, <code>LD_LIBRARY_PATH=/opt/cuda/lib64</code></small>
     </div>
 
@@ -245,6 +362,77 @@ function requestClose() {
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.form-error {
+  color: #f85149;
+  background: #da363315;
+  border: 1px solid #da363333;
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 0.78rem;
+}
+
+.def-card {
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 10px;
+  margin-bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #0d111766;
+}
+
+.def-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.def-name {
+  flex: 1;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 6px 10px;
+  color: #e1e4e8;
+  font-size: 0.82rem;
+  font-family: inherit;
+}
+
+.def-name:focus { outline: none; border-color: #58a6ff; }
+
+.def-kind {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 6px 8px;
+  color: #e1e4e8;
+  font-size: 0.78rem;
+  font-family: inherit;
+  width: 170px;
+  flex-shrink: 0;
+}
+
+.def-kind:focus { outline: none; border-color: #58a6ff; }
+
+.def-path {
+  flex: 1;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 7px 10px;
+  color: #e1e4e8;
+  font-size: 0.82rem;
+  font-family: 'Cascadia Code', monospace;
+}
+
+.def-path:focus { outline: none; border-color: #58a6ff; }
+
+.def-env {
+  display: flex;
+  flex-direction: column;
 }
 
 .field {
