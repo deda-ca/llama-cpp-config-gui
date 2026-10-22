@@ -33,7 +33,11 @@ export interface LlamaConfig {
   /** Environment variables passed to spawned llama.cpp processes */
   envVars: Record<string, string>;
   modelPath: string;
-  binary: 'llama-server' | 'llama-cli';
+  /**
+   * Executable name inside the build folder. llama.cpp uses 'llama-server' |
+   * 'llama-cli'; other engine kinds name their own binary (Phase 3 drivers).
+   */
+  binary: string;
   contextSize: number;
   gpuLayers: number;
   threads: number;

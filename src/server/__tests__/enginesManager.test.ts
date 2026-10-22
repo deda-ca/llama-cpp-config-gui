@@ -268,4 +268,94 @@ describe('instanceToLlamaConfig', () => {
     expect(instanceToLlamaConfig({ ...base, binary: 'llama-cli' }, def).binary).toBe('llama-cli');
     expect(instanceToLlamaConfig({ ...base, binary: 'weird' }, def).binary).toBe('llama-server');
   });
+
+  it('non-llama kinds launch the instance binary verbatim', () => {
+    const audioDef: EngineDefinition = { ...def, kind: 'audio', buildPath: '/opt/audio/build' };
+    const spec = instanceToLlamaConfig({ ...base, binary: 'audio-server' }, audioDef);
+    expect(spec.binary).toBe('audio-server');
+    expect(spec.llamaCppPath).toBe('/opt/audio/build');
+  });
+});
+
+// --- Phase 3: per-kind drivers (docs/llm-engines.md §2.1) ---
+
+function enginesFs(definitions: EngineDefinition[], instances: EngineInstance[]) {
+  existsSync.mockImplementation((p: unknown) => {
+    const s = String(p);
+    return /engines\.json$/.test(s) || !/\.config\//.test(s);
+  });
+  readFileSync.mockReturnValue(
+    JSON.stringify({ definitions, instances, defaultInstanceId: instances[0]?.id ?? null }),
+  );
+}
+
+describe('driver selection', () => {
+  it('unknown instance ids keep the llama.cpp driver (legacy parity)', () => {
+    const mgr = new EngineManager();
+    expect(mgr.driverFor('nope').kind).toBe('llamacpp');
+  });
+
+  it('resolves the driver from the instance definition kind', () => {
+    enginesFs(
+      [
+        { id: 'd-llama', name: 'llama', kind: 'llamacpp', buildPath: '/opt/llama', envVars: {} },
+        { id: 'd-audio', name: 'audio', kind: 'audio', buildPath: '/opt/audio', envVars: {} },
+      ],
+      [
+        { id: 'i-llama', name: 'llama', definitionId: 'd-llama', binary: 'llama-server', host: '127.0.0.1', port: 8080, apiKey: '', params: [], routerMode: false, modelConfigIds: [] },
+        { id: 'i-audio', name: 'audio', definitionId: 'd-audio', binary: 'audio-server', host: '127.0.0.1', port: 8081, apiKey: '', params: [], routerMode: false, modelConfigIds: [] },
+      ],
+    );
+    const mgr = new EngineManager();
+    expect(mgr.driverFor('i-llama').kind).toBe('llamacpp');
+    // kinds without a dedicated driver fall back to passthrough
+    expect(mgr.driverFor('i-audio').kind).toBe('custom');
+  });
+});
+
+describe('passthrough driver launch', () => {
+  it('spawns the instance binary with its params and streams raw logs', () => {
+    enginesFs(
+      [{ id: 'd-c', name: 'custom', kind: 'custom', buildPath: '/opt/tool', envVars: { FOO: 'bar' } }],
+      [{ id: 'i-c', name: 'custom', definitionId: 'd-c', binary: 'my-tool', host: '127.0.0.1', port: 8080, apiKey: '', params: [{ key: '--serve' }, { key: '--port', value: '8080' }], routerMode: false, modelConfigIds: [] }],
+    );
+    const lines: Array<[string, string]> = [];
+    const mgr = new EngineManager({ onLogLine: (id, line) => lines.push([id, line]) });
+    const child = fakeChild();
+    spawn.mockReturnValueOnce(child);
+
+    mgr.launch('i-c', instanceToLlamaConfig(mgr.getEngines().instances[0], mgr.getEngines().definitions[0]));
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    const [bin, args, opts] = spawn.mock.calls[0] as unknown as [string, string[], any];
+    expect(bin).toBe('/opt/tool/my-tool');
+    // No llama.cpp flags injected — only the instance's own params
+    expect(args).toEqual(['--serve', '--port', '8080']);
+    expect(opts.cwd).toBe('/opt/tool');
+    expect(opts.env.FOO).toBe('bar');
+
+    // Raw lines are forwarded unmodified
+    child.stderr.emit('data', Buffer.from('hello from my-tool\n'));
+    expect(lines.map(([, l]) => l)).toContain('hello from my-tool');
+    expect(mgr.getStatus('i-c')).toBe('starting');
+  });
+
+  it('a missing binary reports an error without spawning', () => {
+    // engines.json present (so the custom kind resolves), binary absent
+    existsSync.mockImplementation((p: unknown) => /engines\.json$/.test(String(p)));
+    readFileSync.mockReturnValue(
+      JSON.stringify({
+        definitions: [{ id: 'd-c', name: 'custom', kind: 'custom', buildPath: '/opt/tool', envVars: {} }],
+        instances: [{ id: 'i-c', name: 'custom', definitionId: 'd-c', binary: 'my-tool', host: '127.0.0.1', port: 8080, apiKey: '', params: [{ key: '--serve' }], routerMode: false, modelConfigIds: [] }],
+        defaultInstanceId: 'i-c',
+      }),
+    );
+    const lines: string[] = [];
+    const mgr = new EngineManager({ onLogLine: (_id, line) => lines.push(line) });
+    const inst = mgr.getEngines().instances[0];
+    mgr.launch('i-c', instanceToLlamaConfig(inst, mgr.getEngines().definitions[0]));
+    expect(spawn).not.toHaveBeenCalled();
+    expect(mgr.getStatus('i-c')).toBe('error');
+    expect(lines[0]).toContain('[ERROR] Binary not found: /opt/tool/my-tool');
+  });
 });

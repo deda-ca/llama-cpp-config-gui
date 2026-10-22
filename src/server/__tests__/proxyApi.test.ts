@@ -3,22 +3,20 @@ vi.mock('../gpu.js', () => ({
   startGpuPolling: () => ({ stop: () => {}, setInterval: () => {} }),
   queryGpus: async () => [],
 }));
-vi.mock('../llama.js', () => {
-  class LlamaProcessManager {
+vi.mock('../engines/worker.js', () => {
+  class ProcessWorker {
     onLogLine: any = null;
     onStatusChange: any = null;
     onMetrics: any = null;
-    getStatus() { return 'stopped'; }
+    private status = 'stopped';
+    constructor(_driver: unknown) {}
+    getDriver() { return {}; }
+    getStatus() { return this.status; }
     getMetrics() { return { prefillTokensPerSec: null, generationTokensPerSec: null, lastUpdated: 0 }; }
     launch() {}
-    stop() {}
+    stop() { this.status = 'stopped'; }
   }
-  return {
-    LlamaProcessManager,
-    listLlamaDevices: async () => [],
-    matchCudaIndices: () => new Map(),
-    getLlamaVersion: async () => ({ version: null, build: null, commit: null, compiler: null, backend: null, raw: [] }),
-  };
+  return { ProcessWorker };
 });
 vi.mock('../metricsPoller.js', () => {
   class ModelMetricsPoller {

@@ -1,7 +1,8 @@
 # LLM Engines
 
-> Status: **Draft v1** — definition and recommendations only, no implementation yet.
-> Related: `docs/todo.md` (items 11 & 12), `docs/proxy-server.md`, `docs/agent.md`
+> Status: **Phases 1–3 implemented** (multi-instance manager, engine definitions,
+> kind drivers + passthrough). Phase 4 (real non-llama drivers) pending.
+> Related: `docs/todo.md` (item 21), `docs/proxy-server.md`, `docs/agent.md`
 
 Allow spawning and monitoring **multiple LLM engine instances** — each with its own
 binary/build, parameters, environment variables, and port — streaming each instance's

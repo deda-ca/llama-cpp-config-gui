@@ -3,18 +3,21 @@
  *
  * Replaces the single `LlamaProcessManager` singleton with a map of
  * instanceId -> ManagedInstance. Each ManagedInstance owns one worker (the
- * existing LlamaProcessManager, unchanged), its own log cache, and its own
- * status/metrics. Engine-specific knowledge stays in the worker.
+ * generic `ProcessWorker`), its own log cache, and its own status/metrics.
+ * Engine-specific knowledge lives in the per-kind `EngineDriver` injected into
+ * the worker (Phase 3); the manager picks the driver from the instance's
+ * definition kind.
  *
  * During the transition the launch spec is still a LlamaConfig (the legacy
  * /api/launch endpoint sends one); the EngineInstance -> LlamaConfig mapping
- * lands with the REST/API step. This keeps behavior identical while the
- * plumbing becomes per-instance.
+ * lives in `launch.ts`. This keeps behavior identical while the plumbing
+ * becomes per-instance.
  */
 
-import { LlamaProcessManager } from '../llama.js';
+import { ProcessWorker } from './worker.js';
+import { getDriver, type EngineDriver } from './driver.js';
 import type { LlamaConfig, PerfMetrics, ProcessStatus } from '../types.js';
-import type { LogEntry } from '../logParser.js';
+import type { LogEntry } from './llama.js';
 import { enginesFileExists, loadEngines, migrateLegacyConfig, saveEngines } from './store.js';
 import type { EnginesFile } from './types.js';
 
@@ -22,7 +25,7 @@ const LOG_CACHE_SIZE = 1024;
 
 export interface ManagedInstance {
   id: string;
-  worker: LlamaProcessManager;
+  worker: ProcessWorker;
   /** In-memory log cache, replayed to clients on (re)connect */
   logCache: LogEntry[];
   status: ProcessStatus;
@@ -97,8 +100,21 @@ export class EngineManager {
     return inst;
   }
 
+  /**
+   * Driver for an instance, from its definition's kind. Instances that are not
+   * in the engines file yet (the legacy /api/launch alias before migration,
+   * or a caller-supplied id) keep llama.cpp behavior for parity.
+   */
+  driverFor(instanceId: string): EngineDriver {
+    const data = this.engines;
+    const inst = data.instances.find((i) => i.id === instanceId);
+    if (!inst) return getDriver('llamacpp');
+    const def = data.definitions.find((d) => d.id === inst.definitionId);
+    return getDriver(def?.kind);
+  }
+
   private createInstance(instanceId: string): ManagedInstance {
-    const worker = new LlamaProcessManager();
+    const worker = new ProcessWorker(this.driverFor(instanceId));
     const inst: ManagedInstance = {
       id: instanceId,
       worker,

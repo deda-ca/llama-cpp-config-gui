@@ -6,7 +6,8 @@ import { spawn } from 'child_process';
 import { loadConfig, saveConfig } from './config.js';
 import { startGpuPolling } from './gpu.js';
 import { startSystemPolling } from './system.js';
-import { listLlamaDevices, matchCudaIndices, getLlamaVersion } from './llama.js';
+import { matchCudaIndices, parseTimingMessage } from './engines/llama.js';
+import type { LogEntry, TimingData } from './engines/llama.js';
 import { EngineManager } from './engines/manager.js';
 import { instanceToLlamaConfig } from './engines/launch.js';
 import {
@@ -17,6 +18,7 @@ import {
   normalizeEnvVars,
 } from './engines/store.js';
 import { isEngineKind, type EngineDefinition } from './engines/types.js';
+import { getDriver } from './engines/driver.js';
 import type { WsMessage, LlamaConfig, GpuInfo, LlamaDevice, GpuSortMode, SystemStats } from './types.js';
 import { loadModels, saveModels, loadParams, saveParams, generateId, type ModelConfig, type ConfigTemplate, type ParamDef } from './modelConfig.js';
 import { DEFAULT_PARAMS } from './params-default.js';
@@ -26,7 +28,6 @@ import { ModelRouter } from './proxy/router.js';
 import { UsageDb } from './proxy/usageDb.js';
 import { DEFAULT_PROXY_SETTINGS, normalizeProxySettings, type ProxyBackend, type ProxySettings, type UsageQuery, type UsageRecord } from './proxy/types.js';
 import { isBackendKind, makeBackendId } from './proxy/backends.js';
-import { toLogEntry, parseLogLine, parseTimingMessage, type LogEntry, type TimingData } from './logParser.js';
 import { ModelMetricsPoller } from './metricsPoller.js';
 import { APP_VERSION } from './version.js';
 import { applyUpdate, checkForUpdate } from './update.js';
@@ -75,12 +76,16 @@ let config = loadConfig();
 // instance*, whose id comes from the engines file (seeded from settings.json).
 const engines = new EngineManager({
   onLogLine: (instanceId, line) => {
-    const entry = toLogEntry(line);
+    // Log interpretation is per kind: the driver classifies lines, other kinds
+    // fall back to plain (uncolored) entries.
+    const driver = engines.driverFor(instanceId);
+    const entry = driver.toLogEntry?.(line) ?? { raw: line, level: 'plain' as const };
     engines.pushLog(instanceId, entry);
     broadcast({ type: 'log-line', payload: { ...entry, instanceId } });
 
-    // Extract timing data for the Model Status panel
-    const parsed = parseLogLine(line);
+    // Extract timing data for the Model Status panel (llama.cpp only — other
+    // drivers report no structured log format)
+    const parsed = driver.parseLogLine?.(line) ?? null;
     if (parsed && parsed.func === 'print_timing') {
       const timing = parseTimingMessage(parsed.message);
       if (timing) {
@@ -140,7 +145,8 @@ const PROXY_LOG_CACHE_SIZE = 1024;
 const proxyLogCache: LogEntry[] = [];
 
 function proxyLog(level: 'I' | 'W' | 'E', message: string): void {
-  const entry = toLogEntry(`[proxy] ${new Date().toISOString().slice(11, 23)} ${level} ${message}`);
+  // Proxy lines are our own format, never llama.cpp-structured → plain level.
+  const entry: LogEntry = { raw: `[proxy] ${new Date().toISOString().slice(11, 23)} ${level} ${message}`, level: 'plain' };
   proxyLogCache.push(entry);
   if (proxyLogCache.length > PROXY_LOG_CACHE_SIZE) proxyLogCache.shift();
   broadcast({ type: 'proxy-log', payload: entry });
@@ -405,10 +411,21 @@ function updateModelStatus(timing: TimingData): void {
 // --- Device detection & CUDA matching ---
 let cudaMatchMap: Map<number, number> = new Map();
 
+/** Device listing for the default definition, through its kind's driver. */
+async function defaultDevices(): Promise<LlamaDevice[]> {
+  const buildPath = defaultBuildPath();
+  if (!buildPath) return [];
+  const data = engines.getEngines();
+  const inst = data.instances.find((i) => i.id === data.defaultInstanceId);
+  const def = data.definitions.find((d) => d.id === inst?.definitionId);
+  const list = getDriver(def?.kind).listDevices;
+  return list ? list(buildPath) : [];
+}
+
 async function refreshDeviceMatch(): Promise<void> {
   const buildPath = defaultBuildPath();
   if (!buildPath) return;
-  const devices = await listLlamaDevices(buildPath);
+  const devices = await defaultDevices();
   // We need current GPU names — query once
   const { queryGpus } = await import('./gpu.js');
   const gpus = await queryGpus();
@@ -436,13 +453,7 @@ const systemPoller = startSystemPolling((stats) => {
 }, 1000);
 
 app.get('/api/devices', async (_req, res) => {
-  const buildPath = defaultBuildPath();
-  if (!buildPath) {
-    res.json([]);
-    return;
-  }
-  const devices = await listLlamaDevices(buildPath);
-  res.json(devices);
+  res.json(await defaultDevices());
 });
 
 // This app's own version (baked in at compile time from package.json)
@@ -521,21 +532,36 @@ app.get('/api/version', async (_req, res) => {
     res.json({ version: null, commit: null, buildDate: null, backend: null, raw: [] });
     return;
   }
-  const info = await getLlamaVersion(buildPath);
+  const data = engines.getEngines();
+  const inst = data.instances.find((i) => i.id === data.defaultInstanceId);
+  const def = data.definitions.find((d) => d.id === inst?.definitionId);
+  const driver = getDriver(def?.kind);
+  if (!driver.getVersion) {
+    res.json({ version: null, build: null, commit: null, compiler: null, backend: null, raw: [] });
+    return;
+  }
+  const info = await driver.getVersion(buildPath);
   res.json(info);
 });
 
-// Check a specific path (used by the Environment dialog's refresh button)
+// Check a specific path (used by the Environment dialog's refresh button).
+// Optional `kind` selects the driver; defaults to llama.cpp for back-compat.
 app.post('/api/version/check', async (req, res) => {
   const p: string = req.body?.path || '';
   if (!p) {
     res.status(400).json({ error: 'path is required' });
     return;
   }
-  const info = await getLlamaVersion(p);
+  const kind = isEngineKind(req.body?.kind) ? req.body.kind : 'llamacpp';
+  const driver = getDriver(kind);
+  if (!driver.getVersion) {
+    res.json({ version: null, build: null, commit: null, compiler: null, backend: null, raw: [], valid: fs.existsSync(p), kind });
+    return;
+  }
+  const info = await driver.getVersion(p);
   // If all fields are null, the path is invalid (binary not found)
   const valid = info.version !== null || info.build !== null;
-  res.json({ ...info, valid });
+  res.json({ ...info, valid, kind });
 });
 
 app.get('/api/gpu-interval', (_req, res) => {
@@ -643,8 +669,8 @@ app.delete('/api/engines/definitions/:id', (req, res) => {
   res.json({ status: 'deleted' });
 });
 
-// Validate a definition's saved build folder (llama.cpp probe). Non-llama kinds
-// report valid when the folder exists — full per-kind probes land with drivers.
+// Validate a definition's saved build folder using its kind's driver. Kinds
+// without a version probe report valid when the folder exists.
 app.get('/api/engines/definitions/:id/version', async (req, res) => {
   const def = engines.getEngines().definitions.find((d) => d.id === req.params.id);
   if (!def) {
@@ -655,11 +681,12 @@ app.get('/api/engines/definitions/:id/version', async (req, res) => {
     res.json({ valid: false, error: 'buildPath is not set' });
     return;
   }
-  if (def.kind !== 'llamacpp') {
+  const driver = getDriver(def.kind);
+  if (!driver.getVersion) {
     res.json({ valid: fs.existsSync(def.buildPath), kind: def.kind, note: 'no version probe for this kind yet' });
     return;
   }
-  const info = await getLlamaVersion(def.buildPath);
+  const info = await driver.getVersion(def.buildPath);
   const valid = info.version !== null || info.build !== null;
   res.json({ ...info, valid, kind: def.kind });
 });
@@ -748,9 +775,16 @@ app.post('/api/engines/instances/:id/launch', async (req, res) => {
     res.status(400).json({ error: `Instance references missing definition "${inst.definitionId}"` });
     return;
   }
+  // Non-llama kinds launch the executable named on the instance (passthrough
+  // driver), so a binary must be set — llama.cpp falls back to llama-server.
+  if (def.kind !== 'llamacpp' && !inst.binary.trim()) {
+    res.status(400).json({ error: 'Set an executable name for this engine before launching' });
+    return;
+  }
 
   let routerIniPath: string | undefined;
-  if (inst.routerMode) {
+  // Router mode is a llama.cpp feature (--models-preset); other kinds ignore it.
+  if (inst.routerMode && def.kind === 'llamacpp') {
     const modelsData = loadModels();
     const selected = modelsData.configs.filter((c) => inst.modelConfigIds.includes(c.id));
     if (selected.length === 0) {
@@ -1062,8 +1096,11 @@ app.delete('/api/models/templates/:id', (req, res) => {
 
 // --- Params API ---
 
-app.get('/api/params', (_req, res) => {
-  res.json(loadParams());
+// Per-kind param catalog (?kind=audio etc). llama.cpp is the default and keeps
+// the original params.json file.
+app.get('/api/params', (req, res) => {
+  const kind = isEngineKind(req.query.kind) ? req.query.kind : undefined;
+  res.json(loadParams(kind));
 });
 
 app.post('/api/params/refresh', async (_req, res) => {

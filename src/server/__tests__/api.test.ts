@@ -25,22 +25,22 @@ vi.mock('../gpu.js', () => ({
   queryGpus: async () => [],
 }));
 
-vi.mock('../llama.js', () => {
-  class LlamaProcessManager {
+// The process layer is generic (engines/worker.ts) and spawns real processes —
+// replace it with a stub so launches never touch the filesystem or a binary.
+vi.mock('../engines/worker.js', () => {
+  class ProcessWorker {
     onLogLine: any = null;
     onStatusChange: any = null;
     onMetrics: any = null;
-    getStatus() { return 'stopped'; }
+    private status = 'stopped';
+    constructor(_driver: unknown) {}
+    getDriver() { return {}; }
+    getStatus() { return this.status; }
     getMetrics() { return { prefillTokensPerSec: null, generationTokensPerSec: null, lastUpdated: 0 }; }
     launch() {}
-    stop() {}
+    stop() { this.status = 'stopped'; }
   }
-  return {
-    LlamaProcessManager,
-    listLlamaDevices: async () => [],
-    matchCudaIndices: () => new Map(),
-    getLlamaVersion: async () => ({ version: null, build: null, commit: null, compiler: null, backend: null, raw: [] }),
-  };
+  return { ProcessWorker };
 });
 
 vi.mock('../metricsPoller.js', () => {

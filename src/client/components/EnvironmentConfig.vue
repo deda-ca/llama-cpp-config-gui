@@ -88,7 +88,7 @@ async function validateDef(def: DefRow) {
       const res = await fetch('/api/version/check', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: p }),
+        body: JSON.stringify({ path: p, kind: def.kind }),
       });
       if (res.ok) {
         const info = await res.json();

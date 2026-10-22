@@ -444,10 +444,20 @@ is chosen by the *instance*, so "different builds per model" is expressed as one
 per build — adding `definitionId` to model configs would reintroduce a second source of
 truth. Revisit if a per-model build override is actually wanted.
 
-### Phase 3 — engine kind drivers
-`EngineDriver` interface (binary name, `buildArgs`, `getVersion`, `parseLogLine`,
-`metricsSource`); llama.cpp logic moved to `engines/llama.ts`; passthrough driver for
-custom binaries; per-kind param catalogs (`params.<kind>.json`).
+### Phase 3 — engine kind drivers ✅
+`EngineDriver` interface (`src/server/engines/driver.ts`: binary name, `buildArgs`,
+optional `getVersion` / `listDevices` / `parseLogLine` / `toLogEntry` /
+`metricsSource`); all llama.cpp logic (version probe, device listing, CUDA matching,
+log parsing + print_timing, arg building) moved to `engines/llama.ts`; the process
+layer is now the neutral `ProcessWorker` (`engines/worker.ts`) with the driver
+injected per instance from the definition's kind — `LlamaProcessManager`,
+`src/server/llama.ts` and `src/server/logParser.ts` are gone. Passthrough driver
+(`engines/passthrough.ts`) makes custom/unknown kinds launchable: the instance's
+binary runs from the definition's build folder with its params, raw logs, no
+version probe/metrics/proxy. Per-kind param catalogs: `GET /api/params?kind=<k>`
+reads `params.<kind>.json` when present (llama.cpp keeps `params.json`; other
+kinds fall back to it until their own catalog exists). `/api/version/check` and
+`/api/engines/definitions/:id/version` now probe through the kind's driver.
 
 ### Phase 4 — real non-llama kinds
 audio.cpp, stable-diffusion.cpp, strata drivers + auto-registration as proxy backends.

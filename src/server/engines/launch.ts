@@ -1,11 +1,11 @@
 /**
  * Map an EngineInstance + EngineDefinition to the LlamaConfig launch spec used
- * by LlamaProcessManager (docs/llm-engines.md §6.1).
+ * by the process worker (docs/llm-engines.md §6.1).
  *
  * Kept as a pure function so the mapping is testable without spawning
- * processes. llama.cpp is the only kind with a driver in Phase 1; other kinds
- * get a generic spec (binary + params) that the Phase 3 driver interface will
- * formalize.
+ * processes. The spec is a superset: llama.cpp fields are filled for the
+ * llama.cpp driver, while other kinds ignore them and launch from `binary` +
+ * `extraArgs` through their own driver (Phase 3).
  */
 
 import { DEFAULT_CONFIG } from '../config.js';
@@ -28,7 +28,11 @@ export function instanceToLlamaConfig(
     modelsDir: '',
     routerIniPath: routerIniPath ?? '',
     envVars: definition.envVars,
-    binary: (instance.binary === 'llama-cli' ? 'llama-cli' : 'llama-server'),
+    // llama.cpp kinds pick one of the two known binaries; other kinds launch
+    // whatever executable the instance names (passthrough driver).
+    binary: definition.kind === 'llamacpp'
+      ? (instance.binary === 'llama-cli' ? 'llama-cli' : 'llama-server')
+      : instance.binary,
     modelPath: instance.routerMode ? '' : (instance.modelPath ?? ''),
     mmproj: instance.routerMode ? undefined : instance.mmproj,
     host: instance.host,

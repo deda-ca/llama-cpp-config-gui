@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseLogLine, parseTimingMessage, toLogEntry } from '../logParser.js';
+import { parseLogLine, parseTimingMessage, toLogEntry } from '../engines/llama.js';
 import { FINAL_RESULTS, PROMPT_PROGRESS, GEN_STATS, UNSTRUCTURED, REAL_LOGS } from './fixtures/logLines.js';
 
 describe('parseLogLine', () => {

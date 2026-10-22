@@ -145,22 +145,37 @@ export function saveModels(data: ModelsFile): void {
 
 const PARAMS_FILE_NAME = 'params.json';
 
-function paramsFile(): string {
-  return path.join(configDir(), PARAMS_FILE_NAME);
+/**
+ * Params catalog file for an engine kind (docs/llm-engines.md §2.6).
+ * llama.cpp keeps the original `params.json` for back-compat; other kinds use
+ * `params.<kind>.json`. `kind` is optional so existing llama.cpp callers are
+ * unchanged.
+ */
+export function paramsFileForKind(kind?: string): string {
+  return path.join(configDir(), !kind || kind === 'llamacpp' ? PARAMS_FILE_NAME : `params.${kind}.json`);
 }
 
-export function loadParams(): ParamDef[] {
+export function loadParams(kind?: string): ParamDef[] {
   try {
-    const raw = fs.readFileSync(paramsFile(), 'utf-8');
+    const raw = fs.readFileSync(paramsFileForKind(kind), 'utf-8');
     return JSON.parse(raw);
   } catch {
+    // Kinds without their own catalog yet fall back to the llama.cpp reference
+    // so the param editor still shows something useful.
+    if (kind && kind !== 'llamacpp') {
+      try {
+        return JSON.parse(fs.readFileSync(paramsFileForKind(), 'utf-8'));
+      } catch {
+        return [];
+      }
+    }
     return [];
   }
 }
 
-export function saveParams(params: ParamDef[]): void {
+export function saveParams(params: ParamDef[], kind?: string): void {
   fs.mkdirSync(configDir(), { recursive: true });
-  fs.writeFileSync(paramsFile(), JSON.stringify(params, null, 2));
+  fs.writeFileSync(paramsFileForKind(kind), JSON.stringify(params, null, 2));
 }
 
 // --- ID generation ---

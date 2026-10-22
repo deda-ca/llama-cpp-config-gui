@@ -9,7 +9,7 @@ vi.mock('child_process', () => ({
   spawn: vi.fn(),
 }));
 
-import { getLlamaVersion, listLlamaDevices, matchCudaIndices } from '../llama.js';
+import { getLlamaVersion, listLlamaDevices, matchCudaIndices } from '../engines/llama.js';
 import type { LlamaDevice } from '../types.js';
 import { execFile } from 'child_process';
 
