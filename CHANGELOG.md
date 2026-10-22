@@ -1,3 +1,11 @@
+# [0.10.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.9.0...v0.10.0) (2026-10-22)
+
+
+### Features
+
+* engine builds list in Environment dialog with per-definition validation ([11bd546](https://github.com/deda-ca/llama-cpp-config-gui/commit/11bd5463bf737778b8a81a8ddd85be7a3ca3d791))
+* LLM Engines phase 1 — multi-instance engine manager, engines API, and Engines tab ([ff60464](https://github.com/deda-ca/llama-cpp-config-gui/commit/ff60464ac0adc1016c4c4f6b4c0ba93547d1cadb))
+
 # [0.9.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.8.0...v0.9.0) (2026-10-21)
 
 
