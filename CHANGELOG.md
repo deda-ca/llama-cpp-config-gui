@@ -1,3 +1,10 @@
+# [0.11.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.10.0...v0.11.0) (2026-10-22)
+
+
+### Features
+
+* generic engine spawner (phase 3.5) - templates, notes, command preview, catalog-driven params, no hidden launch args ([bc116fa](https://github.com/deda-ca/llama-cpp-config-gui/commit/bc116faeb29ed44ce54caa30528e80ca1f9e230c))
+
 # [0.10.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.9.0...v0.10.0) (2026-10-22)
 
 
