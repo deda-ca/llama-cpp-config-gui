@@ -537,6 +537,70 @@ Blocked on the proxy Phase 0 spike (fixtures for their HTTP APIs).
 **Open questions to resolve before Phase 3/4** (spec §4): audio.cpp / sd.cpp HTTP vs
 CLI-only, what strata actually is, per-instance GPU allocation UX.
 
+## 22. Serve the llama.cpp Web UI from the GUI server 🚧
+
+**Goal:** expose llama.cpp's own Web UI (`tools/ui/`) from this app so it can be opened
+next to the GUI, without running a separate `llama-server` just for the UI.
+
+### Approach rejected — proxy passthrough (reverted 2026-10-22)
+
+A first attempt made the OpenAI proxy (`src/server/proxy/index.ts`) forward llama.cpp's
+own routes to the `llamacpp` backend, so `http://<proxy>:8090/` served the UI that
+`llama-server` embeds in its binary. It worked end to end (all 70 files of
+`build/tools/ui/dist` and all 51 `index.html` refs resolved through the proxy, query
+strings preserved, no usage rows polluted), but it was reverted:
+
+- It couples the **OpenAI gateway** to a **browser UI**. The proxy's job is model routing +
+  usage capture; making it a static file host and a second management API is scope creep.
+- It inherits llama.cpp's auth split. Only `index.html` + assets are keyless upstream
+  (`get_public_endpoints` in `tools/server/server-http.cpp`), so the proxy had to mirror
+  that exactly or leak `/props`, `/slots`, `/completions`, `/tokenize` unauthenticated.
+  Fragile to track across llama.cpp releases.
+- The UI's model list is answered by the proxy (`GET /v1/models` → all registered models,
+  including SD/audio), but Load/Unload/Delete/`/models/sse` are llama-only paths. So the
+  picker shows non-llama models that cannot be managed — confusing half-support.
+- It only works for a running llama.cpp backend, which is the case least in need of the UI.
+
+### Chosen approach — serve the build output directly
+
+Serve the UI's static build from the **GUI server** (`src/server/index.ts`, port 1535)
+out of a llama.cpp checkout's `build/tools/ui/dist`, rather than proxying a live
+`llama-server`'s embedded copy.
+
+Why this build tree: `llama.cpp` provisions it via `scripts/ui-assets.cmake` — an `npm`
+build when configured with `BUILD_UI=ON`, otherwise a verified `dist.tar.gz` from the
+`ggml-org/llama-ui` Hub bucket (`.ui-stamp` records `ggml-org/llama-ui|b11601`). It is
+already on disk at `<llama.cpp>/build/tools/ui/dist` (~10 MB, 70 files) and needs no
+C++ embedding step. `adapter-static` with `bundleStrategy: 'single'` means the app is one
+`index.html` + one hashed `bundle.js` + one hashed `bundle.css`, hash-routed
+(`router: { type: 'hash' }`), so serving it is a plain static mount.
+
+**Blocker to solve first — inconsistent endpoint prefixes.** The UI's
+`src/lib/constants/api-endpoints.constants.ts` mixes `./`-relative (`./v1/chat/completions`,
+`./props`, `./slots`, `./v1/stream`) with root-absolute (`/models`, `/models/load`,
+`/v1/models`, `/models/sse`, `/tools`, `/cors-proxy`) paths, resolved against
+`window.location.href`. Proven empirically: serving under `/ui` sends `./props` to
+`/ui/props` while `/models` still goes to `/models` — the API splits in half. Options:
+
+- [ ] Serve at the **root of a dedicated port** (no base path) so both prefix styles land
+      on the same origin — simplest, no UI patching. Decide: new port, or reuse the proxy
+      port at `/` (rejected above) vs a third listener.
+- [ ] Or rebuild the UI with SvelteKit `paths.base = '/ui'` so the constants agree —
+      requires owning a UI fork/build, and the root-absolute constants are *not* rewritten
+      by `paths.base`, so this alone is not sufficient.
+- [ ] Either way the GUI server must also **forward the UI's API calls** to the selected
+      engine (`/props`, `/slots`, `/models*`, `/models/sse`, `/v1/chat/completions/control`,
+      `/v1/stream`, `/tokenize`, `/tools`) — static files alone are not enough. Scope that
+      forwarding to the GUI server's `/api`-style surface, not the OpenAI proxy.
+- [ ] Pick which engine instance the UI talks to (per-instance from the Engines tab, item
+      21) and how the `--api-key` of that instance is injected.
+- [ ] Setting for the llama.cpp build path already exists per engine definition
+      (`buildPath`) — derive `build/tools/ui/dist` from it, with a fallback/override.
+
+**Related:** the Next Phase bullet about proxying to each backend's own UI page
+(audio.cpp, stable-diffusion.cpp, strata) is the same problem shape — one static/UI
+mount per engine kind, plus per-instance API forwarding.
+
 
 # Next Phase
 
