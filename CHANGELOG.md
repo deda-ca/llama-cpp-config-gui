@@ -1,3 +1,10 @@
+# [0.16.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.15.0...v0.16.0) (2026-10-23)
+
+
+### Features
+
+* **audio:** llama.cpp-style editor layout with per-instance env vars ([accb508](https://github.com/deda-ca/llama-cpp-config-gui/commit/accb5089eb6e2df02744880c1a06c747920eb015))
+
 # [0.15.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.14.1...v0.15.0) (2026-10-23)
 
 
