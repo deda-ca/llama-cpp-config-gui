@@ -1,3 +1,11 @@
+## [0.14.1](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.14.0...v0.14.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* **engines:** keep numeric param values as strings so they persist ([0393167](https://github.com/deda-ca/llama-cpp-config-gui/commit/0393167b6790443c0d52dd38011bb3c793c515a8))
+* **engines:** re-derive the instance id on rename so launch files follow ([e155a47](https://github.com/deda-ca/llama-cpp-config-gui/commit/e155a470f5611592b3fa05e322bbcb1f636fbe02))
+
 # [0.14.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.13.0...v0.14.0) (2026-10-23)
 
 
