@@ -237,6 +237,8 @@ export interface ProxyBackend {
   /** Model ids discovered from the upstream's GET /v1/models (via Refresh). */
   models?: string[];
   modelsFetchedAt?: string;
+  /** Set when the row mirrors a launched engine instance (kept in sync). */
+  engineId?: string;
 }
 
 /** USD price per 1M tokens. */

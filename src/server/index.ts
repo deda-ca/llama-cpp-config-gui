@@ -175,8 +175,10 @@ function proxyRequestLog(rec: UsageRecord): void {
 }
 
 function proxyLlamaAliases(): string[] {
+  // llama.cpp cards only — audio cards share models.json but route through
+  // their audio backend (their upstream ids arrive via backend discovery).
   return loadModels().configs
-    .filter((c) => c.includeInLaunch !== false && c.alias)
+    .filter((c) => c.includeInLaunch !== false && c.alias && (c.type ?? 'llamacpp') === 'llamacpp')
     .map((c) => c.alias);
 }
 
@@ -186,7 +188,83 @@ function proxyLlamaBaseUrl(): string {
 }
 
 function rebuildProxyRegistry(): void {
+  // Mirrors ride along with every rebuild, so an instance rename, a port edit
+  // or a model-card alias change refreshes the audio rows immediately.
+  syncAudioBackends();
   proxyRouter.rebuild(proxySettings, proxyLlamaAliases());
+}
+
+/**
+ * Mirror every audio engine instance into the proxy backend list
+ * (docs/audio.md §3.2, docs/todo.md #21 Phase 4). Audio instances are
+ * self-contained like strata, so the proxy needs a row per instance to route
+ * `/v1/audio/*` to it; the mirror is tagged `engineId` and follows the
+ * instance's name/port. Discovered model ids (`models[]`) are kept — the
+ * audio.cpp upstream answers `GET /v1/models` in OpenAI shape — so the
+ * instance's model cards become auto routes without a manual Refresh.
+ * A mirror whose instance disappeared (rename/delete) is dropped along with
+ * its declared routes.
+ */
+/** Upstream model ids an audio instance serves: the aliases of its selected
+ * audio model cards — the same ids `audioToConfig` writes into the generated
+ * file's `models[].id`, which the launched server reports on GET /v1/models. */
+function audioUpstreamIds(inst: EngineInstance): string[] {
+  const modelsData = loadModels();
+  return (inst.audio?.modelConfigIds ?? [])
+    .map((id) => modelsData.configs.find((c) => c.id === id)?.alias)
+    .filter((a): a is string => !!a);
+}
+
+function syncAudioBackends(): void {
+  const instances = engines.getEngines().instances.filter((i) => i.kind === 'audio' && i.audio);
+  const liveIds = new Set(instances.map((i) => i.id));
+  let changed = false;
+
+  // Drop mirrors of instances that are gone (delete or kind change).
+  const stale = proxySettings.backends.filter((b) => b.engineId && !liveIds.has(b.engineId));
+  if (stale.length > 0) {
+    const staleIds = new Set(stale.map((b) => b.id));
+    proxySettings.backends = proxySettings.backends.filter((b) => !staleIds.has(b.id));
+    proxySettings.models = proxySettings.models.filter((m) => !staleIds.has(m.backend));
+    changed = true;
+  }
+
+  const host = config.host === '0.0.0.0' ? '127.0.0.1' : (config.host || '127.0.0.1');
+  for (const inst of instances) {
+    const port = instancePort(inst);
+    if (port === null) continue; // no port row -> nothing to route to
+    const baseUrl = `http://${host}:${port}`;
+    // The upstream ids are the selected cards' aliases — exactly what
+    // `audioToConfig` writes into the generated file's `models[].id`, so the
+    // routes match what the launched server reports on GET /v1/models.
+    const upstream = audioUpstreamIds(inst);
+    const mirror = proxySettings.backends.find((b) => b.engineId === inst.id);
+    if (mirror) {
+      const dirty = mirror.baseUrl !== baseUrl || mirror.name !== inst.name
+        || JSON.stringify(mirror.models ?? []) !== JSON.stringify(upstream);
+      if (dirty) {
+        mirror.baseUrl = baseUrl;
+        mirror.name = inst.name;
+        mirror.models = upstream;
+        mirror.modelsFetchedAt = new Date().toISOString();
+        changed = true;
+      }
+    } else {
+      proxySettings.backends.push({
+        id: makeBackendId(`audio-${inst.id}`, proxySettings.backends),
+        name: inst.name,
+        kind: 'audio',
+        baseUrl,
+        enabled: true,
+        engineId: inst.id,
+        models: upstream,
+        modelsFetchedAt: new Date().toISOString(),
+      });
+      changed = true;
+    }
+  }
+
+  if (changed) saveProxySettings();
 }
 
 function stopProxy(log = true): void {
@@ -853,6 +931,7 @@ app.post('/api/engines/instances', (req, res) => {
   data.instances.push(inst);
   if (!data.defaultInstanceId) data.defaultInstanceId = inst.id;
   engines.saveEngines(data);
+  rebuildProxyRegistry();
   res.json(inst);
 });
 
@@ -911,6 +990,7 @@ app.put('/api/engines/instances/:id', (req, res) => {
     inst.definitionId = body.definitionId;
   }
   engines.saveEngines(data);
+  rebuildProxyRegistry();
   res.json(inst);
 });
 
@@ -1052,6 +1132,7 @@ app.delete('/api/engines/instances/:id', (req, res) => {
   data.instances.splice(idx, 1);
   if (data.defaultInstanceId === id) data.defaultInstanceId = data.instances[0]?.id ?? null;
   engines.saveEngines(data);
+  rebuildProxyRegistry();
   res.json({ status: 'deleted' });
 });
 

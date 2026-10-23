@@ -534,6 +534,16 @@ kind gets preferential treatment.
 audio.cpp, stable-diffusion.cpp drivers + auto-registration as proxy backends.
 Blocked on the proxy Phase 0 spike (fixtures for their HTTP APIs).
 
+**audio.cpp kind ✅** — driver (`engines/audioDriver.ts`: `--config` spawn plan,
+`--version` banner probe, level-classified logs), typed model cards, generated
+`.config/audio-<id>.json` on launch (docs/audio.md). **Proxy auto-registration:**
+every audio instance is mirrored into the proxy backend list
+(`ProxyBackend.engineId`); name/port follow the instance, the selected cards'
+aliases ride as discovered `models[]` (the ids `audiocpp_server` reports on
+`GET /v1/models`), and the mirror is dropped when the instance is deleted.
+`/v1/audio/*` routes to it by model name, `audio/`/`tts/` prefix or path
+fallback — no manual backend row or Refresh needed.
+
 **strata kind ✅** — the first *specialized* engine kind: a strata deployment is
 described by one JSON file (`strata-<model>.json`) covering the `strata` engine
 binary + `strata generate` flags, the `serve/server.py` HTTP options, and an

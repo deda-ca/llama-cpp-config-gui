@@ -335,8 +335,13 @@ user-refreshable.) The fixed catalog ships as `AUDIO_SERVER_PARAMS` /
    `envVars`, but audio is self-contained with no definition. v1 can put the
    device in the `device` row (audio.cpp's own key); a per-instance env map is
    a separate small feature.
-2. **Proxy**: `audio` is already a `ProxyBackendKind`; wiring an audio engine
-   into the proxy backend list is out of scope here.
+2. **Proxy**: ✅ done — every audio instance is mirrored into the proxy
+   backend list (`ProxyBackend.engineId`): name/port follow the instance, the
+   selected model cards' aliases ride as discovered `models[]` (they are
+   exactly the ids `audioToConfig` writes into `models[].id`, which
+   `audiocpp_server` reports on `GET /v1/models`), and the row disappears when
+   the instance is renamed away or deleted. `/v1/audio/*` then routes to it by
+   model name, prefix (`audio/`, `tts/`) or path fallback.
 3. **`--parallel-jobs` / `slots`**: experimental upstream; the generator
    refuses `slots` rows unless a `parallel_jobs` server row is on (mirrors the
    parse error), or simply leaves `slots` to `extra` in v1.

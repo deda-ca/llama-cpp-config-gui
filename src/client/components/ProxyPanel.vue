@@ -82,6 +82,7 @@ async function proxyAction(action: 'start' | 'stop' | 'restart') {
 // --- Backend (proxy) list ---
 const KIND_LABELS: Record<ProxyBackendKind, string> = {
   llamacpp: 'llama.cpp',
+  strata: 'strata',
   embeddings: 'embeddings',
   audio: 'audio',
   sdiffusion: 'image',
@@ -492,6 +493,7 @@ onUnmounted(() => {
             />
             <span class="backend-name">{{ b.name }}</span>
             <span class="backend-kind" :class="'kind-' + b.kind">{{ KIND_LABELS[b.kind] }}</span>
+            <span v-if="b.engineId" class="backend-kind kind-engine" title="Mirrors an engine instance in the Engines tab — name and port follow it">engine</span>
             <span class="backend-url">{{ b.baseUrl }}</span>
             <span
               class="health-dot"
@@ -866,6 +868,8 @@ onUnmounted(() => {
 .kind-videos { background: #e3b34122; color: #e3b341; }
 .kind-default { background: #f0f1f322; color: #e1e4e8; }
 .kind-custom { background: #30363d; color: #8b949e; }
+.kind-strata { background: #56d36422; color: #7ee787; }
+.kind-engine { background: #238636aa; color: #7ee787; }
 .backend-url {
   flex: 1;
   font-size: 0.75rem;

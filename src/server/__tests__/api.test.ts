@@ -997,6 +997,22 @@ describe('Audio Engine API', () => {
     await request(app).post(`/api/engines/instances/${audioId}/stop`);
   });
 
+  it('mirrors the audio instance into the proxy backends with its model ids', async () => {
+    const get = await request(app).get('/api/proxy/settings');
+    const mirror = get.body.backends.find((b: any) => b.engineId === audioId);
+    expect(mirror).toBeTruthy();
+    expect(mirror.kind).toBe('audio');
+    expect(mirror.name).toBe('Audio TTS');
+    expect(mirror.baseUrl).toBe('http://127.0.0.1:8130');
+    // The selected cards' aliases are the upstream ids the launched server
+    // reports, so they become auto routes without a manual Refresh.
+    expect(mirror.models).toEqual(['breeze_tts_2', 'qwen3-asr']);
+
+    const status = await request(app).get('/api/proxy/status');
+    const route = status.body.models.find((m: any) => m.model === 'breeze_tts_2');
+    expect(route.backend).toBe(mirror.id);
+  });
+
   it('launch rejects an audio instance whose binary is a bare name', async () => {
     const get = await request(app).get('/api/engines');
     const inst = get.body.instances.find((i: any) => i.id === audioId);
@@ -1022,5 +1038,8 @@ describe('Audio Engine API', () => {
   it('deletes the audio instance', async () => {
     const res = await request(app).delete(`/api/engines/instances/${audioId}`);
     expect(res.status).toBe(200);
+    // The proxy mirror follows the instance out.
+    const get = await request(app).get('/api/proxy/settings');
+    expect(get.body.backends.some((b: any) => b.engineId === audioId)).toBe(false);
   });
 });

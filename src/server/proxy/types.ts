@@ -42,6 +42,10 @@ export interface ProxyBackend {
   models?: string[];
   /** ISO timestamp of the last successful model discovery. */
   modelsFetchedAt?: string;
+  /** Set when the entry mirrors a launched engine instance (audio for now):
+   *  the sync keeps name/baseUrl in step with the instance and removes the
+   *  row when the instance goes away. Manual edits of kind/apiKey stick. */
+  engineId?: string;
 }
 
 /** A model route in the proxy registry. Several routes may share the same
@@ -127,6 +131,7 @@ function normalizeBackend(raw: unknown, fallbackId: string, fallbackKind: ProxyB
     ...(typeof b.apiKey === 'string' && b.apiKey ? { apiKey: b.apiKey } : {}),
     ...(Array.isArray(b.models) ? { models: b.models.filter((m): m is string => typeof m === 'string') } : {}),
     ...(typeof b.modelsFetchedAt === 'string' ? { modelsFetchedAt: b.modelsFetchedAt } : {}),
+    ...(typeof b.engineId === 'string' && b.engineId ? { engineId: b.engineId } : {}),
   };
 }
 
