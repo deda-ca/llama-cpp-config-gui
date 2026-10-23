@@ -1,3 +1,10 @@
+# [0.14.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.13.0...v0.14.0) (2026-10-23)
+
+
+### Features
+
+* **engines:** select router models per instance in the engine dialog ([96c7fa9](https://github.com/deda-ca/llama-cpp-config-gui/commit/96c7fa91cd2dda3ff1a8ce71ea67197bccf022fd))
+
 # [0.13.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.12.0...v0.13.0) (2026-10-22)
 
 
