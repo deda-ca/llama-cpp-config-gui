@@ -1,3 +1,10 @@
+# [0.17.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.16.0...v0.17.0) (2026-10-23)
+
+
+### Features
+
+* **audio:** single executable path field with audiocpp_server version probe ([95c93b2](https://github.com/deda-ca/llama-cpp-config-gui/commit/95c93b2849a9cf7284f3c7482b86ec644f1942be))
+
 # [0.16.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.15.0...v0.16.0) (2026-10-23)
 
 
