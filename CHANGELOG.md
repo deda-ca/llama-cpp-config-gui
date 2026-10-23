@@ -1,3 +1,10 @@
+# [0.18.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.17.0...v0.18.0) (2026-10-23)
+
+
+### Features
+
+* **proxy:** auto-register audio engine instances as proxy backends ([09a83c8](https://github.com/deda-ca/llama-cpp-config-gui/commit/09a83c8962f7b28ecb1abcc95c888aa063034d86))
+
 # [0.17.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.16.0...v0.17.0) (2026-10-23)
 
 
