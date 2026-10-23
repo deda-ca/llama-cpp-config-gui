@@ -113,18 +113,22 @@ export function getAudioVersion(exePath: string): Promise<DriverVersionInfo> {
 }
 
 /**
- * `audiocpp_server --config <generated>.json`. The instance names the
- * executable with a full path, so a path with a slash is absolutized and the
- * working directory is its folder — matching `audioRunDir`, which the launch
- * mapping stores in `llamaCppPath`. A bare name is left to PATH, and the
+ * `audiocpp_server --config <generated>.json [--parallel-jobs]`. The instance
+ * names the executable with a full path, so a path with a slash is absolutized
+ * and the working directory is its folder — matching `audioRunDir`, which the
+ * launch mapping stores in `llamaCppPath`. A bare name is left to PATH, and the
  * process inherits the app's cwd. `--config` is required unless `--ui` is
  * passed, and we always generate a config, so it is unconditional.
+ * `--parallel-jobs` (the experimental parallel runtime) is a CLI-only flag:
+ * upstream never reads it from the JSON, so it rides on the command line when
+ * the instance's `audio.parallelJobs` is on.
  */
 function buildLaunch(spec: LlamaConfig): DriverLaunch {
   const exe = exeOf(spec);
   const command = exe.includes('/') ? path.resolve(exe) : exe;
   const cwd = command.includes('/') ? path.dirname(command) : spec.llamaCppPath;
   const args = ['--config', spec.audioConfigPath ?? ''];
+  if (spec.audioParallelJobs) args.push('--parallel-jobs');
   return { command, args, cwd };
 }
 

@@ -1013,6 +1013,52 @@ describe('Audio Engine API', () => {
     expect(route.backend).toBe(mirror.id);
   });
 
+  it('launch with parallelJobs adds --parallel-jobs and keeps slots in the file', async () => {
+    const get = await request(app).get('/api/engines');
+    const inst = get.body.instances.find((i: any) => i.id === audioId);
+    // A slots row on a selected card is only emitted once the flag is on —
+    // upstream rejects the combination ("slots requires --parallel-jobs").
+    await request(app)
+      .put(`/api/models/configs/${audioModelIds[0]}`)
+      .send({ params: { task: 'tts', slots: '3' } });
+    const saved = await request(app)
+      .put(`/api/engines/instances/${audioId}`)
+      .send({ audio: { ...inst.audio, parallelJobs: true } });
+    expect(saved.status).toBe(200);
+    expect(saved.body.audio.parallelJobs).toBe(true);
+
+    const preview = await request(app)
+      .post('/api/engines/command')
+      .send({
+        kind: 'audio',
+        instanceId: audioId,
+        executable: '/home/u/Programs/AI/audio.cpp/build/bin/audiocpp_server',
+        audio: { ...inst.audio, parallelJobs: true },
+      });
+    expect(preview.body.args).toEqual([
+      '--config', expect.stringContaining(`audio-${audioId}.json`),
+      '--parallel-jobs',
+    ]);
+
+    const res = await request(app).post(`/api/engines/instances/${audioId}/launch`);
+    expect(res.status).toBe(200);
+    const written = JSON.parse(fs.readFileSync(res.body.audioConfigPath, 'utf-8'));
+    const breeze = (written.models as any[]).find((m) => m.id === 'breeze_tts_2');
+    expect(breeze.slots).toBe(3);
+    await request(app).post(`/api/engines/instances/${audioId}/stop`);
+
+    // Flag off again: the same card loses its slots row instead of producing a
+    // file the server refuses to parse.
+    await request(app)
+      .put(`/api/engines/instances/${audioId}`)
+      .send({ audio: { ...inst.audio, parallelJobs: false } });
+    const off = await request(app).post(`/api/engines/instances/${audioId}/launch`);
+    expect(off.status).toBe(200);
+    const writtenOff = JSON.parse(fs.readFileSync(off.body.audioConfigPath, 'utf-8'));
+    expect((writtenOff.models as any[]).find((m) => m.id === 'breeze_tts_2').slots).toBeUndefined();
+    await request(app).post(`/api/engines/instances/${audioId}/stop`);
+  });
+
   it('launch rejects an audio instance whose binary is a bare name', async () => {
     const get = await request(app).get('/api/engines');
     const inst = get.body.instances.find((i: any) => i.id === audioId);

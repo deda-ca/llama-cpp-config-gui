@@ -206,6 +206,22 @@ function clearModelSelection() {
   audio.value.modelConfigIds = [];
 }
 
+// --- Parallel jobs (--parallel-jobs) ---
+// A CLI flag, not a config key, so it is a checkbox instead of a Parameter
+// row. It also gates the per-model `slots` row: upstream's parser rejects a
+// `slots` entry when the flag is off, so the generator drops those rows and
+// the editor explains why here.
+const slotsCards = computed(() =>
+  audio.value.modelConfigIds
+    .map((id) => allModels.value.find((m) => m.id === id))
+    .filter((m): m is ModelConfig => !!m)
+    .filter((m) => {
+      const disabled = new Set(m.disabledParams ?? []);
+      return Object.keys(m.params ?? {}).some((k) => k === 'slots' && !disabled.has(k));
+    })
+    .map((m) => m.alias || m.id),
+);
+
 // --- Raw JSON view (`extra` keys: live_ingest, frontend_options, …) ---
 const jsonText = ref('');
 const jsonError = ref('');
@@ -421,6 +437,7 @@ async function save() {
     const audioBody: AudioConfig = {
       envVars: collectEnvVars(),
       serverArgs: cleanRows(audio.value.serverArgs),
+      ...(audio.value.parallelJobs ? { parallelJobs: true } : {}),
       modelConfigIds: audio.value.modelConfigIds,
       extra: audio.value.extra ?? {},
     };
@@ -563,6 +580,24 @@ snapshot = currentState();
           :category-labels="SERVER_CATEGORY_LABELS"
           flag-placeholder="key (e.g. cors_origins)"
         />
+      </div>
+
+      <div class="field">
+        <label class="check-row">
+          <input v-model="audio.parallelJobs" type="checkbox" />
+          <span>Parallel jobs (<code>--parallel-jobs</code>)</span>
+        </label>
+        <small>
+          Experimental: audio.cpp's parallel runtime, so several requests share
+          this engine at once. It is a command-line flag, so it never appears in
+          the generated JSON, and it is what unlocks each model's
+          <code>slots</code> row (1..16 concurrent sessions, default 1).
+        </small>
+        <small v-if="slotsCards.length && !audio.parallelJobs" class="version-info version-invalid">
+          {{ slotsCards.join(', ') }} has a <code>slots</code> row, but
+          <code>--parallel-jobs</code> is off — audio.cpp rejects that
+          combination, so the row is left out of the generated file.
+        </small>
       </div>
       </template>
 

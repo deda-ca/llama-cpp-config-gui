@@ -342,8 +342,12 @@ user-refreshable.) The fixed catalog ships as `AUDIO_SERVER_PARAMS` /
    `audiocpp_server` reports on `GET /v1/models`), and the row disappears when
    the instance is renamed away or deleted. `/v1/audio/*` then routes to it by
    model name, prefix (`audio/`, `tts/`) or path fallback.
-3. **`--parallel-jobs` / `slots`**: experimental upstream; the generator
-   refuses `slots` rows unless a `parallel_jobs` server row is on (mirrors the
-   parse error), or simply leaves `slots` to `extra` in v1.
+3. **`--parallel-jobs` / `slots`**: ✅ done — `AudioConfig.parallelJobs`
+   (Launch-tab checkbox) appends `--parallel-jobs` to the spawn args
+   (`audioDriver.buildLaunch`; a CLI-only flag, never written to the JSON).
+   The generator mirrors upstream's parse error the other way: a model card's
+   `slots` row is dropped from `models[]` unless the flag is on, and the
+   editor lists the affected cards so the skip is visible. With the flag on,
+   `slots` (1..16) is emitted verbatim.
 4. **stable-diffusion.cpp**: same typed-card pattern will apply later; keep
    `ModelConfig.type` open-ended.

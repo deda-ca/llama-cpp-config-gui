@@ -58,6 +58,7 @@ export function instanceToLlamaConfig(
     routerIniPath: routerIniPath ?? '',
     strataConfigPath: strataConfigPath ?? '',
     audioConfigPath: audioConfigPath ?? '',
+    audioParallelJobs: audio?.parallelJobs === true,
     // An audio instance has no definition to carry env vars, so its block owns
     // them (CUDA_VISIBLE_DEVICES etc.); every other kind inherits the
     // definition's environment.

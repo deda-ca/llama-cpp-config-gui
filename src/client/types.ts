@@ -189,6 +189,10 @@ export interface AudioConfig {
    * derived by the server — there is no separate cwd field. */
   envVars: Record<string, string>;
   serverArgs: EngineParam[];
+  /** Launch with `--parallel-jobs` (audio.cpp's experimental parallel
+   * runtime). A CLI flag, not a config key, so it is a field not a row — and
+   * it gates the per-model `slots` row, which the server rejects without it. */
+  parallelJobs?: boolean;
   modelConfigIds: string[];
   extra: Record<string, unknown>;
 }

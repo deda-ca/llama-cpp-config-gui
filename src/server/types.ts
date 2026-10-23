@@ -76,6 +76,9 @@ export interface LlamaConfig {
    * array, since audio.cpp has no CLI flag that adds a model.
    */
   audioConfigPath?: string;
+  /** audio.cpp only: launch with `--parallel-jobs`, the experimental parallel
+   * runtime (a CLI flag, never part of the generated JSON — see AudioConfig). */
+  audioParallelJobs?: boolean;
 }
 
 export interface PerfMetrics {

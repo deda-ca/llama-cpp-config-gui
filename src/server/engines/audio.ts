@@ -69,6 +69,15 @@ export const AUDIO_MODEL_KEYS = new Set([
  */
 export const AUDIO_OPTION_PREFIXES = ['load_options', 'session_options', 'default_request_options'] as const;
 
+/**
+ * The model key gated by the `--parallel-jobs` CLI flag: upstream's parser
+ * (`app/server/config.cpp`) throws `"slots requires --parallel-jobs at server
+ * startup"` when a `models[]` entry carries `slots` and the process was not
+ * started with the flag, so the generator mirrors that rule instead of
+ * writing a file the server refuses to load.
+ */
+export const AUDIO_SLOTS_KEY = 'slots';
+
 /** Model keys too nested for flat rows, preserved verbatim in `audioExtras`. */
 export const AUDIO_MODEL_EXTRA_KEYS = [
   'voice_presets', 'default_voice_preset', 'live_ingest',
@@ -174,7 +183,11 @@ export function audioModelFromEntry(entry: Record<string, unknown>): ModelConfig
  * folder, which for a generated `.config/audio-<id>.json` is not where the
  * models live.
  */
-export function audioModelToEntry(cfg: ModelConfig, baseDir: string): Record<string, unknown> {
+export function audioModelToEntry(
+  cfg: ModelConfig,
+  baseDir: string,
+  parallelJobs = false,
+): Record<string, unknown> {
   const out: Record<string, unknown> = {
     id: cfg.alias.trim(),
     family: '',
@@ -194,6 +207,10 @@ export function audioModelToEntry(cfg: ModelConfig, baseDir: string): Record<str
       continue;
     }
     if (disabled.has(key)) continue;
+    // `slots` without `--parallel-jobs` is exactly what upstream rejects at
+    // parse time; drop the row so the file stays loadable (the editor warns
+    // about it instead of the server dying at startup).
+    if (key === AUDIO_SLOTS_KEY && !parallelJobs) continue;
     out[key] = modelValueOf(key, value);
   }
 
@@ -276,7 +293,8 @@ export function audioToConfig(
 ): Record<string, unknown> {
   const out: Record<string, unknown> = { ...audio.extra };
   Object.assign(out, serverParamsToConfig(audio.serverArgs));
-  out.models = modelConfigs.map((cfg) => audioModelToEntry(cfg, baseDir));
+  const parallelJobs = audio.parallelJobs === true;
+  out.models = modelConfigs.map((cfg) => audioModelToEntry(cfg, baseDir, parallelJobs));
   return out;
 }
 
@@ -315,6 +333,7 @@ export function normalizeAudioConfig(raw: unknown): AudioConfig | undefined {
   return {
     envVars: normalizeEnvVars(c.envVars),
     serverArgs: normalizeEngineParams(c.serverArgs),
+    ...(c.parallelJobs === true ? { parallelJobs: true } : {}),
     modelConfigIds: Array.isArray(c.modelConfigIds)
       ? c.modelConfigIds.filter((x): x is string => typeof x === 'string')
       : [],

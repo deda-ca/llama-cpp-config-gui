@@ -55,7 +55,7 @@ export const AUDIO_MODEL_PARAMS: ParamDef[] = [
   { flag: 'mode', key: 'mode', label: 'Mode', description: 'offline (whole-file) or streaming (live-ingest routes)', category: 'runtime', inputType: 'select', options: ['offline', 'streaming'], default: 'offline' },
   { flag: 'lazy', key: 'lazy', label: 'Lazy Load', description: 'Load this model on first request; defaults to the server lazy_load when unset', category: 'runtime', inputType: 'toggle', default: 'off' },
   { flag: 'busy_timeout_ms', key: 'busy_timeout_ms', label: 'Busy Timeout (ms)', description: 'Per-model override of the server busy timeout; 0 disables the guard', category: 'runtime', inputType: 'number' },
-  { flag: 'slots', key: 'slots', label: 'Slots', description: 'Parallel slots (1..16); only valid when the server runs with --parallel-jobs', category: 'runtime', inputType: 'number' },
+  { flag: 'slots', key: 'slots', label: 'Slots', description: 'Parallel slots (1..16): how many requests this model serves at once. Only emitted when the engine has "Parallel jobs" (--parallel-jobs) on in its Launch tab — audio.cpp rejects the key without the flag', category: 'runtime', inputType: 'number' },
 ];
 
 /** Option-map row prefixes a model card can add (each becomes a nested object). */

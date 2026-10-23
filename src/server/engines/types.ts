@@ -123,6 +123,12 @@ export interface AudioConfig {
   /** Server-level config keys as ordered rows (host, port, backend, device,
    * threads, lazy_load, cors_origins, busy_timeout_ms, …). */
   serverArgs: EngineParam[];
+  /** Launch with `--parallel-jobs`, audio.cpp's experimental parallel
+   * runtime. A **CLI flag**, not a config key, so it is a field rather than a
+   * row: `audiocpp_server` only reads it from the command line
+   * (`app/server/main.cpp`). It also gates the per-model `slots` key — a
+   * `slots` row is rejected by the server's parser unless this is on. */
+  parallelJobs?: boolean;
   /** Model config ids (models.json entries with `type: 'audio'`) written into
    * the generated file's `models[]` array. */
   modelConfigIds: string[];

@@ -193,6 +193,20 @@ describe('audioFromConfig / audioToConfig round-trip', () => {
     expect(out.live_ingest).toEqual({ idle_timeout_ms: 5000 });
     expect(out.frontend_options).toEqual({ theme: 'dark' });
   });
+
+  it('drops a slots row unless parallelJobs adds --parallel-jobs', () => {
+    // Upstream throws "slots requires --parallel-jobs at server startup", so a
+    // file we write must never carry the key without the flag (config.cpp:309).
+    const card = audioModelFromEntry({ id: 'm', family: 'f', path: '/abs/m.gguf', slots: 4 });
+    expect(audioModelToEntry(card, '/base').slots).toBeUndefined();
+    expect(audioModelToEntry(card, '/base', true).slots).toBe(4);
+
+    const { audio, models } = audioFromConfig(realConfig as Record<string, unknown>);
+    models[0].params.slots = '3';
+    expect((audioToConfig(audio, models, '/base').models as any[])[0].slots).toBeUndefined();
+    const out = audioToConfig({ ...audio, parallelJobs: true }, models, '/base');
+    expect((out.models as any[])[0].slots).toBe(3);
+  });
 });
 
 describe('normalizeAudioConfig', () => {
@@ -225,6 +239,12 @@ describe('normalizeAudioConfig', () => {
       modelConfigIds: [],
       extra: {},
     });
+  });
+
+  it('keeps parallelJobs only when true', () => {
+    expect(normalizeAudioConfig({ parallelJobs: true })?.parallelJobs).toBe(true);
+    expect(normalizeAudioConfig({ parallelJobs: false })).not.toHaveProperty('parallelJobs');
+    expect(normalizeAudioConfig({ parallelJobs: 'yes' })).not.toHaveProperty('parallelJobs');
   });
 });
 
@@ -292,6 +312,19 @@ describe('audioDriver', () => {
     } as any);
     expect(launch.command).toBe('audiocpp_server');
     expect(launch.cwd).toBe('/run');
+  });
+
+  it('appends --parallel-jobs only when the instance enables it', () => {
+    // The flag is CLI-only upstream, so it rides on the command line.
+    const base = {
+      binary: '/b/audiocpp_server',
+      llamaCppPath: '/b',
+      audioConfigPath: '/cfg/audio-a.json',
+    };
+    expect(audioDriver.buildLaunch!(base as any).args)
+      .toEqual(['--config', '/cfg/audio-a.json']);
+    expect(audioDriver.buildLaunch!({ ...base, audioParallelJobs: true } as any).args)
+      .toEqual(['--config', '/cfg/audio-a.json', '--parallel-jobs']);
   });
 
   it('classifies log levels', () => {
