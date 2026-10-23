@@ -9,7 +9,7 @@ import { startSystemPolling } from './system.js';
 import { matchCudaIndices, parseTimingMessage } from './engines/llama.js';
 import type { LogEntry, TimingData } from './engines/llama.js';
 import { EngineManager } from './engines/manager.js';
-import { instanceToLlamaConfig } from './engines/launch.js';
+import { instanceToLlamaConfig, routerIniPathFor } from './engines/launch.js';
 import {
   blankInstance,
   instancePort,
@@ -718,16 +718,23 @@ app.post('/api/engines/command', (req, res) => {
   const buildPath = customLaunch ? '' : path.dirname(executable);
   const binary = customLaunch ? executable : path.basename(executable);
 
+  // Router mode preview: point at the same generated INI a real launch writes
+  // (llama.cpp only), so the --models-preset argument shown matches reality.
+  const routerMode = body.routerMode === true && kind === 'llamacpp';
+  const previewInstanceId = typeof body.instanceId === 'string' && body.instanceId ? body.instanceId : '__preview__';
+
   const previewInstance = {
-    id: '__preview__',
-    name: '__preview__',
+    id: previewInstanceId,
+    name: previewInstanceId,
     notes: '',
     kind,
     definitionId: def?.id ?? 'default',
     binary,
     params: normalizeEngineParams(body.params),
-    routerMode: false,
-    modelConfigIds: [],
+    routerMode,
+    modelConfigIds: Array.isArray(body.modelConfigIds)
+      ? body.modelConfigIds.filter((x: unknown): x is string => typeof x === 'string')
+      : [],
     autoLaunch: false,
     ...(body.strata ? { strata: normalizeStrataConfig(body.strata) } : {}),
   } as EngineInstance;
@@ -741,7 +748,9 @@ app.post('/api/engines/command', (req, res) => {
       buildPath,
       envVars: normalizeEnvVars(body.envVars),
     },
-    undefined,
+    // A router-mode preview points at the file a real launch would write, so
+    // the --models-preset argument shown matches what runs.
+    routerMode ? routerIniPathFor(previewInstanceId) : undefined,
     // A strata preview points at the file a real launch would write, so the
     // --config argument shown matches what runs.
     kind === 'strata' ? strataConfigPath(body.instanceId ?? '__preview__') : undefined,
@@ -961,7 +970,7 @@ async function buildLaunchSpec(
     if (selected.length === 0) {
       return { error: 'Router mode requires at least one model config' };
     }
-    routerIniPath = path.join(path.resolve(process.cwd(), '.config'), `router-${inst.id}.ini`);
+    routerIniPath = routerIniPathFor(inst.id);
     try {
       fs.mkdirSync(path.dirname(routerIniPath), { recursive: true });
       fs.writeFileSync(routerIniPath, exportRouterIni(selected, loadParams()), 'utf-8');

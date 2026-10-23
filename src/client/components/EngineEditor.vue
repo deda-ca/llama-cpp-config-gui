@@ -6,6 +6,8 @@ import type {
   EngineInstance,
   EngineKind,
   EngineParam,
+  ModelConfig,
+  ModelsFile,
   ParamDef,
 } from '../types';
 import { ENGINE_KIND_LABELS } from '../types';
@@ -36,6 +38,11 @@ const form = ref({
 const params = ref<EngineParam[]>(
   props.instance.params.map((p) => ({ key: p.key, value: p.value })),
 );
+
+// --- Router mode (llama.cpp only): which models from the global Models list
+// go into this instance's generated router INI (--models-preset) ---
+const routerMode = ref(props.instance.routerMode === true);
+const modelConfigIds = ref<string[]>([...props.instance.modelConfigIds]);
 
 // --- Definition editing (build folder + env live on the definition) ---
 // The definition dropdown is hidden for now; edits apply to the definition
@@ -112,8 +119,13 @@ onMounted(() => {
   if (splitPath(executablePath.value).folder) checkBuildPath();
 });
 
-// --- Tabs: the launch panel vs the composed command line ---
-const activeTab = ref<'launch' | 'command'>('launch');
+// --- Tabs: the launch panel, per-instance router models, the composed command ---
+const activeTab = ref<'launch' | 'router' | 'command'>('launch');
+
+// Router mode is a llama.cpp feature: switching kind away closes its tab.
+watch(defKind, (kind) => {
+  if (kind !== 'llamacpp' && activeTab.value === 'router') activeTab.value = 'launch';
+});
 
 interface CommandPreview {
   binaryPath: string;
@@ -151,6 +163,9 @@ async function fetchCommand() {
         executable,
         envVars,
         params: params.value,
+        instanceId: props.instance.id,
+        routerMode: routerMode.value,
+        modelConfigIds: modelConfigIds.value,
       }),
     });
     const data = await res.json().catch(() => ({}));
@@ -170,7 +185,7 @@ async function fetchCommand() {
 }
 
 // Re-preview whenever the draft changes while the Command tab is open.
-watch([activeTab, executablePath, defKind, envRows, params], () => {
+watch([activeTab, executablePath, defKind, envRows, params, routerMode, modelConfigIds], () => {
   if (activeTab.value !== 'command') return;
   if (commandTimer) clearTimeout(commandTimer);
   commandTimer = setTimeout(fetchCommand, 250);
@@ -458,15 +473,59 @@ function currentState() {
     defKind: defKind.value,
     executablePath: executablePath.value,
     envRows: envRows.value,
+    routerMode: routerMode.value,
+    modelConfigIds: modelConfigIds.value,
   });
 }
 watch(
-  [form, params, defName, defKind, executablePath, envRows],
+  [form, params, defName, defKind, executablePath, envRows, routerMode, modelConfigIds],
   () => {
     dirty.value = currentState() !== snapshot;
   },
   { deep: true },
 );
+
+// --- Global model list (Models tab) for the Router tab's checkbox list ---
+const allModels = ref<ModelConfig[]>([]);
+const modelFilter = ref('');
+
+async function loadModels() {
+  try {
+    const res = await fetch('/api/models');
+    const data: ModelsFile = res.ok ? await res.json() : { configs: [], templates: [], defaultConfigId: null };
+    allModels.value = data.configs;
+  } catch {
+    allModels.value = [];
+  }
+}
+onMounted(loadModels);
+
+const visibleModels = computed(() => {
+  const q = modelFilter.value.toLowerCase();
+  return allModels.value.filter(
+    (m) => !q || m.alias.toLowerCase().includes(q) || m.modelPath.toLowerCase().includes(q),
+  );
+});
+
+const selectedModelIds = computed(() => new Set(modelConfigIds.value));
+
+function toggleModelSelection(id: string) {
+  const next = new Set(modelConfigIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  modelConfigIds.value = [...next];
+}
+
+// Keep the selection list in the saved order of the global model list.
+function selectAllVisible() {
+  const next = new Set(modelConfigIds.value);
+  for (const m of visibleModels.value) next.add(m.id);
+  modelConfigIds.value = allModels.value.filter((m) => next.has(m.id)).map((m) => m.id);
+}
+
+function clearModelSelection() {
+  modelConfigIds.value = [];
+}
 
 // --- Save ---
 const saving = ref(false);
@@ -519,9 +578,9 @@ async function save() {
       defId = (await res.json()).id;
     }
 
-    // 2. Persist the instance. routerMode/modelConfigIds/modelPath/mmproj are
-    // intentionally not sent — the generic dialog never edits them, and the
-    // server PUT only touches the fields present in the body.
+    // 2. Persist the instance. modelPath/mmproj stay untouched — the generic
+    // dialog never edits them; routerMode/modelConfigIds are edited on the
+    // Router tab. The server PUT only touches the fields present in the body.
     const cleanParams = params.value
       .filter((p) => p.key.trim())
       .map((p) => ({
@@ -534,6 +593,8 @@ async function save() {
       binary: exeName,
       definitionId: defId,
       params: cleanParams,
+      routerMode: routerMode.value,
+      modelConfigIds: modelConfigIds.value,
     };
     // A draft from the kind dropdown has no row on the server yet: create it,
     // then write the dialog's edits onto it. Existing instances update in place.
@@ -616,9 +677,15 @@ snapshot = currentState();
         <span>Start this engine when the application launches</span>
       </label>
 
-      <!-- Tabs: launch settings vs the command that would actually run -->
+      <!-- Tabs: launch settings, router models (llama.cpp only), the real command -->
       <div class="tab-bar">
         <button class="tab-btn" :class="{ active: activeTab === 'launch' }" @click="activeTab = 'launch'">Launch</button>
+        <button
+          v-if="defKind === 'llamacpp'"
+          class="tab-btn"
+          :class="{ active: activeTab === 'router' }"
+          @click="activeTab = 'router'"
+        >Router<template v-if="modelConfigIds.length"> ({{ modelConfigIds.length }})</template></button>
         <button class="tab-btn" :class="{ active: activeTab === 'command' }" @click="activeTab = 'command'">Command</button>
       </div>
 
@@ -754,6 +821,43 @@ snapshot = currentState();
         </div>
         <small v-if="previewArgs" class="params-preview">→ <code>{{ previewArgs }}</code></small>
       </div>
+      </template>
+
+      <!-- Router mode: pick which models from the global Models list this
+           instance serves. The launch writes them to a per-instance INI and
+           starts llama-server with --models-preset. -->
+      <template v-else-if="activeTab === 'router'">
+        <label class="check-row">
+          <input v-model="routerMode" type="checkbox" />
+          <span>Serve multiple models from a generated <code>router.ini</code> (<code>--models-preset</code>)</span>
+        </label>
+        <small>
+          When on, this engine launches without a single <code>-m</code> model: the selected
+          models below are written to <code>.config/router-{{ instance.id }}.ini</code>, each with
+          its own parameters. Engines using a different build get their own file.
+        </small>
+        <div v-if="routerMode" class="field">
+          <div class="router-toolbar">
+            <input v-model="modelFilter" type="text" placeholder="Search models…" class="router-search" />
+            <button class="add-env-btn" @click="selectAllVisible">Select shown</button>
+            <button class="add-env-btn" @click="clearModelSelection">Clear</button>
+          </div>
+          <div v-if="!allModels.length" class="version-info version-invalid">
+            No model configs yet — create them on the Models tab first.
+          </div>
+          <div v-else-if="!visibleModels.length" class="router-empty">No models match that search.</div>
+          <div v-else class="model-list">
+            <label v-for="m in visibleModels" :key="m.id" class="model-row" :class="{ 'is-selected': selectedModelIds.has(m.id) }">
+              <input type="checkbox" :checked="selectedModelIds.has(m.id)" @change="toggleModelSelection(m.id)" />
+              <span class="model-alias">{{ m.alias }}</span>
+              <span class="model-path" :title="m.modelPath">{{ m.modelPath || '(no model path)' }}</span>
+            </label>
+          </div>
+          <small v-if="routerMode && modelConfigIds.length === 0" class="version-info version-invalid">
+            Router mode needs at least one model — launching would fail otherwise.
+          </small>
+          <small v-else>Selected {{ modelConfigIds.length }} of {{ allModels.length }} model config(s).</small>
+        </div>
       </template>
 
       <!-- Composed command line (same driver path a real launch uses) -->
@@ -950,6 +1054,71 @@ snapshot = currentState();
 }
 
 .add-env-btn:hover { border-color: #58a6ff; background: #1f6feb11; }
+
+/* Router tab: model selection list */
+.router-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.router-search {
+  flex: 1;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 6px 8px;
+  color: #e1e4e8;
+  font-size: 0.78rem;
+}
+
+.router-search:focus { outline: none; border-color: #58a6ff; }
+
+.model-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 4px;
+}
+
+.model-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.78rem;
+}
+
+.model-row:hover { background: #161b22; }
+.model-row.is-selected { background: #1f6feb18; }
+
+.model-alias {
+  color: #e1e4e8;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.model-path {
+  color: #484f58;
+  font-family: 'Cascadia Code', monospace;
+  font-size: 0.7rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.router-empty {
+  font-size: 0.75rem;
+  color: #8b949e;
+  padding: 8px 4px;
+}
 
 .params-actions {
   display: flex;

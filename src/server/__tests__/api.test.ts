@@ -405,6 +405,28 @@ describe('Engine API', () => {
     expect(res.status).toBe(400);
   });
 
+  it('POST /api/engines/command previews router mode with --models-preset', async () => {
+    const res = await request(app)
+      .post('/api/engines/command')
+      .send({
+        definitionId: defId,
+        kind: 'llamacpp',
+        executable: '/opt/llama/build/bin/llama-server',
+        params: [{ key: '--port', value: '9090' }],
+        instanceId: instId,
+        routerMode: true,
+        modelConfigIds: ['cfg-x'],
+      });
+    expect(res.status).toBe(200);
+    // The preview names the same generated INI a real launch writes, and drops
+    // the single-model -m argument.
+    expect(res.body.args).toEqual(expect.arrayContaining([
+      '--models-preset',
+      expect.stringContaining(`router-${instId}.ini`),
+    ]));
+    expect(res.body.args).not.toContain('-m');
+  });
+
   it('disabled param rows round-trip and stay out of the composed command', async () => {
     const put = await request(app)
       .put(`/api/engines/instances/${instId}`)
@@ -446,6 +468,25 @@ describe('Engine API', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('model config');
     await request(app).put(`/api/engines/instances/${instId}`).send({ routerMode: false });
+  });
+
+  it('launching a router-mode instance writes its own INI from the selected models', async () => {
+    const models = await request(app).get('/api/models');
+    const cfg = models.body.configs[0];
+    const put = await request(app)
+      .put(`/api/engines/instances/${instId}`)
+      .send({ routerMode: true, modelConfigIds: [cfg.id] });
+    expect(put.status).toBe(200);
+    expect(put.body.routerMode).toBe(true);
+    expect(put.body.modelConfigIds).toEqual([cfg.id]);
+
+    const res = await request(app).post(`/api/engines/instances/${instId}/launch`);
+    expect(res.status).toBe(200);
+    expect(res.body.routerIniPath).toContain(`router-${instId}.ini`);
+    const ini = fs.readFileSync(res.body.routerIniPath, 'utf-8');
+    expect(ini).toContain(`[${cfg.alias}]`);
+
+    await request(app).put(`/api/engines/instances/${instId}`).send({ routerMode: false, modelConfigIds: [] });
   });
 
   it('POST /api/engines/instances/:id/stop stops the instance', async () => {

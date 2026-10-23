@@ -8,12 +8,19 @@
  * `extraArgs` through their own driver (Phase 3).
  */
 
-import { DEFAULT_CONFIG } from '../config.js';
+import path from 'path';
+import { configDir, DEFAULT_CONFIG } from '../config.js';
 import type { LlamaConfig } from '../types.js';
 import { paramsToArgs } from './args.js';
 import { strataPort, strataRepoRoot } from './strata.js';
 import { paramValue, paramValueAny } from './store.js';
 import type { EngineDefinition, EngineInstance } from './types.js';
+
+/** The generated router INI an instance launches from in router mode. Shared
+ * by the launch path and the Command-tab preview so both name the same file. */
+export function routerIniPathFor(instanceId: string): string {
+  return path.join(configDir(), `router-${instanceId}.ini`);
+}
 
 /**
  * `routerIniPath` is passed in by the caller because generating it requires
