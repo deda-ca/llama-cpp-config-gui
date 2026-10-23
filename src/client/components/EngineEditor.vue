@@ -519,6 +519,16 @@ const visibleModels = computed(() => {
 
 const selectedModelIds = computed(() => new Set(modelConfigIds.value));
 
+/**
+ * The id the instance will carry after Save. The server re-derives the id from
+ * the name (generated files are named `router-<id>.ini`), so the hint shows the
+ * slug of the name currently in the field rather than the id it was created with.
+ */
+const effectiveId = computed(() => {
+  const base = form.value.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'engine';
+  return base === props.instance.id ? props.instance.id : base;
+});
+
 function toggleModelSelection(id: string) {
   const next = new Set(modelConfigIds.value);
   if (next.has(id)) next.delete(id);
@@ -844,7 +854,7 @@ snapshot = currentState();
         </label>
         <small>
           When on, this engine launches without a single <code>-m</code> model: the selected
-          models below are written to <code>.config/router-{{ instance.id }}.ini</code>, each with
+          models below are written to <code>.config/router-{{ effectiveId }}.ini</code>, each with
           its own parameters. Engines using a different build get their own file.
         </small>
         <div v-if="routerMode" class="field">

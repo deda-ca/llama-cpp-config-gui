@@ -37,8 +37,14 @@ vi.mock('../engines/worker.js', () => {
     getDriver() { return {}; }
     getStatus() { return this.status; }
     getMetrics() { return { prefillTokensPerSec: null, generationTokensPerSec: null, lastUpdated: 0 }; }
-    launch() {}
-    stop() { this.status = 'stopped'; }
+    // Mirrors the real worker: status changes are pushed to the manager through
+    // onStatusChange, which is what engines.getStatus() reports.
+    launch() { this.setStatus('starting'); }
+    stop() { this.setStatus('stopped'); }
+    private setStatus(status: string) {
+      this.status = status;
+      this.onStatusChange?.(status);
+    }
   }
   return { ProcessWorker };
 });
@@ -66,6 +72,7 @@ import { app } from '../index.js';
 
 // The temp dir was created and chdir'd in the hoisted block above.
 import fs from 'fs';
+import path from 'path';
 
 afterAll(() => {
   process.chdir((globalThis as any).__originalCwd);
@@ -493,6 +500,71 @@ describe('Engine API', () => {
     const res = await request(app).post(`/api/engines/instances/${instId}/stop`);
     expect(res.status).toBe(200);
     expect(res.body.status).toBe('stopped');
+  });
+
+  it('renaming an instance re-keys its id so generated files follow', async () => {
+    // The id is the slug of the name and the launch files are named from it
+    // (router-<id>.ini), so an old name must not keep pointing at an old file.
+    const oldId = instId;
+    const iniPath = path.join(tmpDir, '.config', `router-${oldId}.ini`);
+    fs.writeFileSync(iniPath, '[stale]\n');
+
+    const res = await request(app).put(`/api/engines/instances/${oldId}`).send({ name: 'Renamed Engine' });
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe('renamed-engine');
+
+    const after = await request(app).get('/api/engines');
+    expect(after.body.instances.some((i: any) => i.id === oldId)).toBe(false);
+    expect(after.body.instances.some((i: any) => i.id === 'renamed-engine')).toBe(true);
+    // The stale INI from the old id is gone, and the old id no longer resolves.
+    expect(fs.existsSync(iniPath)).toBe(false);
+    expect((await request(app).put(`/api/engines/instances/${oldId}`).send({})).status).toBe(404);
+
+    instId = 'renamed-engine';
+  });
+
+  it('renaming the default instance re-points defaultInstanceId', async () => {
+    const before = await request(app).get('/api/engines');
+    expect(before.body.defaultInstanceId).toBe('default');
+
+    const res = await request(app).put('/api/engines/instances/default').send({ name: 'Main Build' });
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe('main-build');
+
+    const after = await request(app).get('/api/engines');
+    expect(after.body.defaultInstanceId).toBe('main-build');
+
+    // Put it back so later tests keep the legacy id.
+    const back = await request(app).put('/api/engines/instances/main-build').send({ name: 'default' });
+    expect(back.body.id).toBe('default');
+    expect((await request(app).get('/api/engines')).body.defaultInstanceId).toBe('default');
+  });
+
+  it('renaming only re-keys when the slug actually changes', async () => {
+    // Whitespace/case tweaks keep the id, so no files are rewritten.
+    const res = await request(app).put(`/api/engines/instances/${instId}`).send({ name: 'Renamed Engine ' });
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe(instId);
+  });
+
+  it('PUT rename is rejected while the engine is running', async () => {
+    const launch = await request(app).post(`/api/engines/instances/${instId}/launch`);
+    expect(launch.status).toBe(200);
+
+    const res = await request(app).put(`/api/engines/instances/${instId}`).send({ name: 'Moved While Running' });
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain('Stop this engine');
+
+    // The instance keeps its original id/name until it is stopped.
+    const after = await request(app).get('/api/engines');
+    const inst = after.body.instances.find((i: any) => i.id === instId);
+    expect(inst.name).toBe('Renamed Engine');
+
+    await request(app).post(`/api/engines/instances/${instId}/stop`);
+    const ok = await request(app).put(`/api/engines/instances/${instId}`).send({ name: 'Stopped Rename' });
+    expect(ok.status).toBe(200);
+    expect(ok.body.id).toBe('stopped-rename');
+    instId = 'stopped-rename';
   });
 
   it('unknown instance ids return 404', async () => {

@@ -26,6 +26,7 @@ import {
   instancePort,
   blankInstance,
   makeEngineId,
+  engineIdForRename,
 } from '../engines/store.js';
 import { splitArgs, tokensToParams, paramsToArgs } from '../engines/args.js';
 import { blankStrataConfig } from '../engines/strata.js';
@@ -333,6 +334,23 @@ describe('blankInstance / makeEngineId', () => {
     const existing = normalizeEngines({ instances: [{ id: 'my-engine' }] });
     expect(makeEngineId('My Engine', existing.instances)).toBe('my-engine-2');
     expect(blankInstance('My Engine', def, existing).id).toBe('my-engine-2');
+  });
+});
+
+describe('engineIdForRename', () => {
+  it('keeps the id when the slug already matches', () => {
+    expect(engineIdForRename('My Engine', 'my-engine', [])).toBe('my-engine');
+    // Case/whitespace edits are not a real rename.
+    expect(engineIdForRename('  my Engine ', 'my-engine', [])).toBe('my-engine');
+  });
+
+  it('follows the name when it changes', () => {
+    expect(engineIdForRename('llama.cpp 2', 'llamacpp', [])).toBe('llama-cpp-2');
+  });
+
+  it('uniquifies the new id against the other instances', () => {
+    const others = [{ id: 'llama-cpp-2' }, { id: 'llama-cpp-3' }];
+    expect(engineIdForRename('llama.cpp 2', 'engine-1', others)).toBe('llama-cpp-2-2');
   });
 });
 

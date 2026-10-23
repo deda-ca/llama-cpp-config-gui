@@ -195,7 +195,10 @@ async function deleteInstance(id: string) {
 }
 
 function onEditorSaved(updated: EngineInstance) {
-  const idx = instances.value.findIndex((i) => i.id === updated.id);
+  // A rename re-derives the instance id (generated files are named from it), so
+  // match the row on the id the editor started with, not the one it came back with.
+  const previousId = editingInstance.value?.id ?? updated.id;
+  const idx = instances.value.findIndex((i) => i.id === previousId || i.id === updated.id);
   if (idx !== -1) instances.value[idx] = { ...instances.value[idx], ...updated };
   else instances.value.push(updated);
   // Definition edits happen inside the editor — refresh the shared list

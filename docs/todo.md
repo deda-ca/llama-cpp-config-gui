@@ -654,14 +654,15 @@ mount per engine kind, plus per-instance API forwarding.
 - ~~Restart the service/program~~
 - ~~Usage status panel add settings gear icon to provide a setting of the max number of last used models within the list bellow. Something similar to the GPU monitor settings icon where it expands down the options. Also make the title size similar to the System monitor and also the same padding as the system monitor so that more space is given to the content.~~
 - ~~When refreshing version if there is no new version then show latest in the pill.~~
+- ~~Add strata configuration and startup within the app. → item 21 Phase 4~~
+- ~~Ability to start other .ccp apps with configs such as audio.cpp and stable-diffusion.ccp → item 21 Phase 4~~
 
-- Add strata configuration and startup within the app. → item 21 Phase 4
 - Ability to delete usage input.
-- Ability to start other .ccp apps with configs such as audio.cpp and stable-diffusion.ccp → item 21 Phase 4
 - Add configuration backup process.
 - The title bar has 'STARTING' which is always the same. Replace it with the current status of the models, and proxy.
 - For the different internal proxy services create a new url to proxy to the main pages of each UIs such as audio.cpp and stable-diffusion.cpp, llama.cpp or strata. Also show a button for each to jump to the main page of each UI.
 - Keep track of watts used for each active gpu for each request, average, and add a cost to the power including different times of day power and calculate the power usage in real time.
+
 
 
 

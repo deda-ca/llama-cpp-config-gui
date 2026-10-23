@@ -12,6 +12,7 @@ import { EngineManager } from './engines/manager.js';
 import { instanceToLlamaConfig, routerIniPathFor } from './engines/launch.js';
 import {
   blankInstance,
+  engineIdForRename,
   instancePort,
   isPortTaken,
   makeEngineId,
@@ -860,7 +861,26 @@ app.put('/api/engines/instances/:id', (req, res) => {
     res.status(409).json({ error: `Port ${nextPort} is already used by another instance` });
     return;
   }
-  if (typeof body.name === 'string' && body.name.trim()) inst.name = body.name.trim();
+  // The instance id is the slug of its name, and the generated launch files are
+  // named from the id (router-<id>.ini, strata-<id>.json) — so a rename carries
+  // the id along, otherwise the dialog would keep pointing at the old file.
+  // The process registry keys the live worker by id, so a running engine has to
+  // be stopped first.
+  const nextName = typeof body.name === 'string' ? body.name.trim() : '';
+  if (nextName && nextName !== inst.name) {
+    const nextId = engineIdForRename(nextName, inst.id, data.instances.filter((i) => i.id !== inst.id));
+    if (nextId !== inst.id) {
+      const status = engines.getStatus(inst.id);
+      if (status === 'running' || status === 'starting') {
+        res.status(409).json({ error: 'Stop this engine before renaming it' });
+        return;
+      }
+      removeGeneratedFiles(inst.id);
+      inst.id = nextId;
+      if (data.defaultInstanceId === req.params.id) data.defaultInstanceId = nextId;
+    }
+  }
+  if (nextName) inst.name = nextName;
   if (typeof body.notes === 'string') inst.notes = body.notes;
   if (isEngineKind(body.kind)) inst.kind = body.kind;
   if (typeof body.binary === 'string' && body.binary) inst.binary = body.binary;
@@ -939,6 +959,19 @@ app.delete('/api/engines/instances/:id', (req, res) => {
   engines.saveEngines(data);
   res.json({ status: 'deleted' });
 });
+
+/** Drop the generated launch files named from an instance id (router INI,
+ * strata config). Both are rewritten on every launch, so this only clears the
+ * stale copy a rename or delete leaves behind. */
+function removeGeneratedFiles(id: string): void {
+  for (const p of [routerIniPathFor(id), strataConfigPath(id)]) {
+    try {
+      fs.rmSync(p, { force: true });
+    } catch {
+      /* a leftover file is never worth failing the request over */
+    }
+  }
+}
 
 // Build the launch spec for an instance, writing any generated files the
 // launch needs (llama.cpp router INI, strata config JSON). Returns an error

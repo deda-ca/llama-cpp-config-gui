@@ -31,12 +31,37 @@ function enginesFile(): string {
   return path.join(configDir(), 'engines.json');
 }
 
+/** Slug form of an engine name (no uniquification). */
+export function slugifyEngineName(name: string): string {
+  return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'engine';
+}
+
 /** Slug id derived from a name, uniquified against the existing ids. */
 export function makeEngineId(name: string, existing: { id: string }[]): string {
-  const base = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'engine';
+  const base = slugifyEngineName(name);
   let id = base;
   let n = 2;
   while (existing.some((e) => e.id === id)) id = `${base}-${n++}`;
+  return id;
+}
+
+/**
+ * Id an instance should carry after a rename. Generated files are named from
+ * the id (`router-<id>.ini`, `strata-<id>.json`), so the id follows the name
+ * instead of staying pinned to whatever it was first created as. Returns the
+ * current id unchanged when the slug already matches, and never collides with
+ * another instance's id.
+ */
+export function engineIdForRename(
+  name: string,
+  currentId: string,
+  others: { id: string }[],
+): string {
+  const base = slugifyEngineName(name);
+  if (base === currentId) return currentId;
+  let id = base;
+  let n = 2;
+  while (others.some((e) => e.id === id)) id = `${base}-${n++}`;
   return id;
 }
 
