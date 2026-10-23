@@ -78,7 +78,9 @@ export class ProcessWorker {
     }
 
     const args = custom ? custom.args : this.driver.buildArgs(spec);
-    const cwd = custom ? custom.cwd : spec.llamaCppPath;
+    // An empty cwd (a PATH-resolved audio binary has no folder) must become
+    // `undefined` — spawn treats `cwd: ''` as an invalid path (ENOENT).
+    const cwd = (custom ? custom.cwd : spec.llamaCppPath) || undefined;
     this.metrics = { ...EMPTY_METRICS };
 
     this.setStatus('starting');

@@ -162,6 +162,22 @@ export function instancePort(
   return strataPort(inst.strata) ?? audioPort(inst.audio);
 }
 
+/**
+ * Audio instances used to keep the run folder in `audio.cwd` with the
+ * executable relative to it. That field merged into a single full-path
+ * `binary` (the launch cwd is the executable's folder), so join the old cwd
+ * with a relative binary once on load. Idempotent: an absolute path — or a
+ * missing legacy cwd — is left alone.
+ */
+function mergeLegacyAudioBinary(raw: unknown, binary: string): string {
+  const block = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? (raw as { cwd?: unknown })
+    : undefined;
+  const runDir = typeof block?.cwd === 'string' ? block.cwd.trim() : '';
+  if (!runDir || !binary || binary.startsWith('/') || binary.startsWith('~')) return binary;
+  return path.join(runDir, binary);
+}
+
 function normalizeInstance(raw: unknown, index: number): EngineInstance | null {
   const i = (raw ?? {}) as Partial<EngineInstance> & {
     host?: unknown; port?: unknown; apiKey?: unknown;
@@ -182,13 +198,14 @@ function normalizeInstance(raw: unknown, index: number): EngineInstance | null {
     params.push({ key: '--port', value: String(i.port) });
   }
   legacyField('api-key', i.apiKey);
+  const binary = typeof i.binary === 'string' && i.binary ? i.binary : 'llama-server';
   return {
     id,
     name: typeof i.name === 'string' && i.name ? i.name : id,
     notes: typeof i.notes === 'string' ? i.notes : '',
     kind: isEngineKind(i.kind) ? i.kind : ('' as EngineKind),
     definitionId: typeof i.definitionId === 'string' ? i.definitionId : 'default',
-    binary: typeof i.binary === 'string' && i.binary ? i.binary : 'llama-server',
+    binary: mergeLegacyAudioBinary(i.audio, binary),
     params,
     routerMode: !!i.routerMode,
     modelConfigIds: Array.isArray(i.modelConfigIds)

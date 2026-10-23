@@ -358,7 +358,7 @@ onUnmounted(() => es?.close());
           </div>
           <div v-if="inst.audio" class="drawer-section">
             <span class="drawer-label">Audio</span>
-            <code>{{ inst.binary }} · cwd {{ inst.audio.cwd || '(not set)' }}</code>
+            <code>{{ inst.binary || '(no executable)' }}</code>
           </div>
           <div v-if="inst.audio" class="drawer-section">
             <span class="drawer-label">Server</span>

@@ -190,8 +190,8 @@ Decisions:
    output looks like. An audio engine instance selects which audio model
    configs go into its JSON — the same selection UX as llama.cpp router mode.
 2. **Audio instances are fully self-contained** (like strata): no
-   `EngineDefinition`. The executable and the run folder are rows/fields on
-   the instance.
+   `EngineDefinition`. The executable is a full-path field on the instance
+   (`binary`); the working directory is that executable's folder.
 3. **Per-model option maps live on the model card** (decision 1): a typed
    model config carries its own `load_options` / `session_options` /
    `default_request_options` / voice presets, so the engine instance only
@@ -234,11 +234,9 @@ Self-contained, like `strata?:`:
 
 ```ts
 interface AudioConfig {
-  /** Run folder (the folder holding audio.cpp/, models/) — launch cwd. */
-  cwd: string;
-  /** Executable: absolute path, or resolved against cwd. Default
-   * `audio.cpp/build/bin/audiocpp_server` relative to cwd. */
-  exe: string;
+  /** Process env (CUDA_VISIBLE_DEVICES, …) — audio instances have no shared
+   * definition to carry it, so the block owns it. */
+  envVars: Record<string, string>;
   /** Server-level options as rows keyed by JSON key verbatim
    * (host, port, backend, device, threads, lazy_load, cors_origins, …). */
   serverArgs: EngineParam[];
@@ -249,6 +247,12 @@ interface AudioConfig {
   extra: Record<string, unknown>;
 }
 ```
+
+The executable lives on the instance's `binary` field as a **full path**
+(default `audiocpp_server`), like the llama.cpp editors' CMD — there is no
+separate run folder: the launch cwd is `path.dirname(binary)` (`audioRunDir`),
+and audio.cpp's `model_specs` discovery walks up from the cwd, so running
+from `build/bin` still finds the repo's `model_specs/` folder.
 
 Row values keep JSON types through the existing `parseConfigValue` /
 `formatConfigValue` helpers (`threads: 8`, `lazy_load: true`).
@@ -261,27 +265,17 @@ Row values keep JSON types through the existing `parseConfigValue` /
 - Contents = `audioToConfig(block, modelConfigs)`: server rows → top-level
   keys, `models[]` built from the selected audio model cards, `extra` merged,
   **paths emitted absolute** (§1.5 option A — the generator resolves relative
-  paths against the instance's `cwd`).
-- Launch: `<exe> --config <generated>.json` with `cwd = AudioConfig.cwd`
-  (matches the user's script; `CUDA_VISIBLE_DEVICES` rides in per-instance
-  env vars — see §3 note).
-
-- `.config/audio-<instanceId>.json`, written on every launch (like
-  `strata-<id>.json` / `router-<id>.ini`), removed on rename/delete via
-  `removeGeneratedFiles()`.
-- Contents = `audioToConfig(block)`: server rows → top-level keys, `models`
-  array from the model blocks, `extra` merged, **paths emitted absolute**
-  (§1.5 option A).
-- Launch command: `<buildPath>/audiocpp_server --config <generated>.json`
-  with `cwd = AudioConfig.cwd` (matches the user's script; `CUDA_VISIBLE_DEVICES`
-  rides in the definition's envVars or a per-instance env later).
+  paths against the executable's folder, `audioRunDir(binary)`).
+- Launch: `<binary> --config <generated>.json` with
+  `cwd = dirname(binary)` (matches the user's script closely; `CUDA_VISIBLE_DEVICES`
+  rides in per-instance env vars — see §3 note).
 
 ### 2.4 Server modules
 
 | File | Role (strata counterpart) |
 |---|---|
-| `src/server/engines/audio.ts` | block ↔ file JSON both ways, `normalizeAudioConfig`, `blankAudioConfig`, `audioConfigPath(id)`, `audioPort(block)`, model-card → `models[]` entry builder (counterpart of `strata.ts`) |
-| `src/server/engines/audioDriver.ts` | `EngineDriver` kind `'audio'`: `buildLaunch` (command/args/cwd), `toLogEntry` level rules, `--version` probe, `--list-devices` (counterpart of `strataDriver.ts`) |
+| `src/server/engines/audio.ts` | block ↔ file JSON both ways, `normalizeAudioConfig`, `blankAudioConfig`, `audioConfigPath(id)`, `audioRunDir(binary)` (launch cwd), `audioPort(block)`, model-card → `models[]` entry builder (counterpart of `strata.ts`) |
+| `src/server/engines/audioDriver.ts` | `EngineDriver` kind `'audio'`: `buildLaunch` (command/args/cwd), `getVersion` (`audiocpp_server --version` banner → version/git sha/build/backends badge), `toLogEntry` level rules (counterpart of `strataDriver.ts`) |
 | `src/server/engines/audioServerParams.ts` | fixed `ParamDef[]` catalogs: `AUDIO_SERVER_PARAMS` (server keys) + `AUDIO_MODEL_PARAMS` (model-card keys), from §1.2/§1.3/§1.4 (counterpart of `STRATA_SERVER_PARAMS`) |
 | `src/server/engines/types.ts` | `AudioConfig` interface; `defaultBinaryForKind('audio') = 'audiocpp_server'` |
 | `src/server/engines/store.ts` | `normalizeInstance` folds `i.audio` through `normalizeAudioConfig`; `instancePort` falls back to `audioPort` |
@@ -304,10 +298,12 @@ user-refreshable.) The fixed catalog ships as `AUDIO_SERVER_PARAMS` /
   audio cards show the audio keys and an `audioExtras` raw-JSON block;
   the list shows a type badge so mixed kinds stay readable.
 - `src/client/components/AudioEditor.vue` (new, modeled on `StrataEditor.vue`):
-  - Header: Engine Name, Notes, **Executable** (default
-    `audio.cpp/build/bin/audiocpp_server`), **Run folder (cwd)**, autoLaunch
-    checkbox, **Import audio JSON… / Export audio JSON** buttons.
-  - Tabs: **Server** (server rows, catalog-driven) |
+  - Header: Engine Name, Notes, autoLaunch checkbox,
+    **Import audio JSON… / Export audio JSON** buttons.
+  - Tabs: **Launch** (single **Executable (CMD)** full-path field with a
+    **↻ Validate** button probing `audiocpp_server --version` via
+    `POST /api/version/check` (`kind: 'audio'`) and a build/version badge,
+    env var rows, parameter rows — catalog-driven) |
     **Models** (picker over `type === 'audio'` model cards — same UX as the
     llama.cpp Router tab: filter, select-all-visible, clear) |
     **Other Keys** (raw JSON of `extra`) | **Command** (preview via

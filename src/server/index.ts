@@ -25,6 +25,7 @@ import { STRATA_SERVER_PARAMS, STRATA_VISION_PARAMS } from './engines/strataServ
 import {
   audioConfigPath,
   audioFromConfig,
+  audioRunDir,
   audioToConfig,
   normalizeAudioConfig,
 } from './engines/audio.js';
@@ -1012,8 +1013,11 @@ app.post('/api/engines/audio/render', (req, res) => {
   const selected = ids
     .map((id) => modelsData.configs.find((c) => c.id === id))
     .filter((c): c is ModelConfig => !!c);
+  // Relative model paths absolutize against the executable's folder — the same
+  // base a real launch uses. The draft's executable rides in the body.
+  const baseDir = audioRunDir(typeof req.body?.executable === 'string' ? req.body.executable : '');
   res.setHeader('Content-Disposition', `attachment; filename="${req.body?.instanceId || 'audio'}-draft.json"`);
-  res.json(audioToConfig(audio, selected, audio.cwd));
+  res.json(audioToConfig(audio, selected, baseDir));
 });
 
 // Export an instance's audio block + selected model cards back to the
@@ -1033,7 +1037,7 @@ app.get('/api/engines/instances/:id/audio/export', (req, res) => {
     .map((id) => modelsData.configs.find((c) => c.id === id))
     .filter((c): c is ModelConfig => !!c);
   res.setHeader('Content-Disposition', `attachment; filename="audio-${inst.id}.json"`);
-  res.json(audioToConfig(inst.audio, selected, inst.audio.cwd));
+  res.json(audioToConfig(inst.audio, selected, audioRunDir(inst.binary)));
 });
 
 app.delete('/api/engines/instances/:id', (req, res) => {
@@ -1127,11 +1131,14 @@ async function buildLaunchSpec(
   // Audio.cpp reads one JSON file holding the server options *and* the models,
   // so the launch writes `.config/audio-<id>.json` from the instance block plus
   // the selected model cards. Relative paths inside it are absolutized against
-  // the run folder — audio.cpp resolves them against the file's own folder.
+  // the run folder — the folder holding the executable, which is also the
+  // working directory the server starts in (audio.cpp resolves config-relative
+  // paths against the file's own folder, so the generator emits absolutes).
   let generatedAudioPath: string | undefined;
   if (kind === 'audio') {
     if (!inst.audio) return { error: 'This audio engine has no configuration yet' };
-    if (!inst.audio.cwd.trim()) return { error: 'Set the run folder before launching' };
+    const runDir = audioRunDir(inst.binary);
+    if (!runDir) return { error: 'Set the full path to the audiocpp_server executable before launching' };
     const modelsData = loadModels();
     const selected = inst.audio.modelConfigIds
       .map((id) => modelsData.configs.find((c) => c.id === id))
@@ -1144,7 +1151,7 @@ async function buildLaunchSpec(
       fs.mkdirSync(path.dirname(generatedAudioPath), { recursive: true });
       fs.writeFileSync(
         generatedAudioPath,
-        JSON.stringify(audioToConfig(inst.audio, selected, inst.audio.cwd), null, 2),
+        JSON.stringify(audioToConfig(inst.audio, selected, runDir), null, 2),
         'utf-8',
       );
     } catch (e) {

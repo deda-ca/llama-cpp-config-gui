@@ -914,7 +914,6 @@ describe('Audio Engine API', () => {
 
   it('PUT /api/engines/instances/:id round-trips the audio block and port conflict', async () => {
     const block = {
-      cwd: '/home/u/Programs/AI',
       envVars: { CUDA_VISIBLE_DEVICES: '0' },
       serverArgs: [
         { key: 'host', value: '0.0.0.0' },
@@ -928,7 +927,7 @@ describe('Audio Engine API', () => {
     };
     const res = await request(app)
       .put(`/api/engines/instances/${audioId}`)
-      .send({ audio: block, autoLaunch: true });
+      .send({ binary: '/home/u/Programs/AI/audio.cpp/build/bin/audiocpp_server', audio: block, autoLaunch: true });
     expect(res.status).toBe(200);
     expect(res.body.autoLaunch).toBe(true);
     expect(res.body.audio).toEqual(block);
@@ -947,8 +946,8 @@ describe('Audio Engine API', () => {
     expect(res.body).toMatchObject({ host: '0.0.0.0', port: 8130, backend: 'cuda', live_ingest: { idle_timeout_ms: 5000 } });
     const models = res.body.models as Record<string, unknown>[];
     expect(models).toHaveLength(2);
-    // Relative model paths become absolute against the run folder.
-    expect(models[0].path).toBe('/home/u/Programs/AI/models/Breeze-TTS-2/breeze.gguf');
+    // Relative model paths become absolute against the executable's folder.
+    expect(models[0].path).toBe('/home/u/Programs/AI/audio.cpp/build/bin/models/Breeze-TTS-2/breeze.gguf');
     expect(models[0].task).toEqual(['tts', 'clon', 'vdes']);
   });
 
@@ -961,7 +960,7 @@ describe('Audio Engine API', () => {
     const res = await request(app)
       .post('/api/engines/audio/render')
       .send({
-        audio: { cwd: '/base', serverArgs: [{ key: 'port', value: '9000' }], modelConfigIds: [], extra: { ui: false } },
+        audio: { serverArgs: [{ key: 'port', value: '9000' }], modelConfigIds: [], extra: { ui: false } },
         modelConfigIds: [],
       });
     expect(res.status).toBe(200);
@@ -974,13 +973,13 @@ describe('Audio Engine API', () => {
       .send({
         kind: 'audio',
         instanceId: audioId,
-        executable: 'audio.cpp/build/bin/audiocpp_server',
-        audio: { cwd: '/home/u/Programs/AI', envVars: { CUDA_VISIBLE_DEVICES: '0' }, serverArgs: [{ key: 'port', value: '8130' }] },
+        executable: '/home/u/Programs/AI/audio.cpp/build/bin/audiocpp_server',
+        audio: { envVars: { CUDA_VISIBLE_DEVICES: '0' }, serverArgs: [{ key: 'port', value: '8130' }] },
       });
     expect(res.status).toBe(200);
-    // A relative binary resolves against the run folder; cwd is the run folder.
+    // The full-path binary is the command; cwd is the executable's folder.
     expect(res.body.binaryPath).toBe('/home/u/Programs/AI/audio.cpp/build/bin/audiocpp_server');
-    expect(res.body.cwd).toBe('/home/u/Programs/AI');
+    expect(res.body.cwd).toBe('/home/u/Programs/AI/audio.cpp/build/bin');
     // The audio block's env vars reach the spawn environment (no definition to carry them).
     expect(res.body.envVars).toEqual({ CUDA_VISIBLE_DEVICES: '0' });
     expect(res.body.args).toEqual(['--config', expect.stringContaining(`audio-${audioId}.json`)]);
@@ -998,15 +997,15 @@ describe('Audio Engine API', () => {
     await request(app).post(`/api/engines/instances/${audioId}/stop`);
   });
 
-  it('launch rejects an audio instance without a run folder', async () => {
+  it('launch rejects an audio instance whose binary is a bare name', async () => {
     const get = await request(app).get('/api/engines');
     const inst = get.body.instances.find((i: any) => i.id === audioId);
     await request(app)
       .put(`/api/engines/instances/${audioId}`)
-      .send({ audio: { ...inst.audio, cwd: '' } });
+      .send({ binary: 'audiocpp_server' });
     const res = await request(app).post(`/api/engines/instances/${audioId}/launch`);
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('run folder');
+    expect(res.body.error).toContain('full path');
   });
 
   it('launch rejects an audio instance with no selected models', async () => {
@@ -1014,7 +1013,7 @@ describe('Audio Engine API', () => {
     const inst = get.body.instances.find((i: any) => i.id === audioId);
     await request(app)
       .put(`/api/engines/instances/${audioId}`)
-      .send({ audio: { ...inst.audio, cwd: '/home/u/Programs/AI', modelConfigIds: [] } });
+      .send({ binary: '/home/u/Programs/AI/audio.cpp/build/bin/audiocpp_server', audio: { ...inst.audio, modelConfigIds: [] } });
     const res = await request(app).post(`/api/engines/instances/${audioId}/launch`);
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('model');

@@ -26,8 +26,8 @@
  * Path note: audio.cpp resolves every relative path against the *config
  * file's* folder, not the process cwd. The generated file lives in `.config/`,
  * so relative paths would resolve against the wrong place; the generator
- * therefore emits absolute paths, resolved against the instance's `cwd`
- * (docs/audio.md §1.5).
+ * therefore emits absolute paths, resolved against the instance's run folder
+ * — the folder holding its executable (docs/audio.md §1.5).
  */
 
 import path from 'path';
@@ -255,7 +255,6 @@ export function audioFromConfig(cfg: Record<string, unknown>): {
     : [];
   return {
     audio: {
-      cwd: '',
       envVars: {},
       serverArgs: configToServerParams(serverCfg),
       modelConfigIds: [],
@@ -289,7 +288,6 @@ export function audioConfigPath(instanceId: string): string {
 /** Blank audio block for a new instance. */
 export function blankAudioConfig(): AudioConfig {
   return {
-    cwd: '',
     envVars: {},
     // The keys a new server needs to bind at all lead the Server tab; the
     // rest are added from the catalog on demand.
@@ -315,7 +313,6 @@ export function normalizeAudioConfig(raw: unknown): AudioConfig | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const c = raw as Record<string, unknown>;
   return {
-    cwd: typeof c.cwd === 'string' ? c.cwd.trim() : '',
     envVars: normalizeEnvVars(c.envVars),
     serverArgs: normalizeEngineParams(c.serverArgs),
     modelConfigIds: Array.isArray(c.modelConfigIds)
@@ -332,4 +329,18 @@ export function audioPort(audio: AudioConfig | undefined): number | null {
   const raw = audio?.serverArgs.find((p) => p.key === 'port' && !p.disabled)?.value;
   const n = Number(raw);
   return Number.isInteger(n) && n > 0 && n <= 65535 ? n : null;
+}
+
+/**
+ * The folder an audio instance runs from: the folder holding its executable.
+ * An audio instance names `audiocpp_server` with a full path (one field, like
+ * the llama.cpp editors), so the working directory is that path's parent —
+ * the same layout the llama.cpp driver uses for `<buildPath>/<binary>`.
+ * Absolutized so a relative path in the config still yields a usable cwd;
+ * a bare name (PATH lookup) has no folder and yields '' (spawn inherits).
+ */
+export function audioRunDir(binary: string | undefined): string {
+  const trimmed = (binary ?? '').trim();
+  if (!trimmed || !trimmed.includes('/')) return '';
+  return path.dirname(path.resolve(trimmed));
 }

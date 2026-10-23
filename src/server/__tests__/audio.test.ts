@@ -18,13 +18,14 @@ import {
   audioModelFromEntry,
   audioModelToEntry,
   audioPort,
+  audioRunDir,
   audioToConfig,
   blankAudioConfig,
   configToServerParams,
   normalizeAudioConfig,
   serverParamsToConfig,
 } from '../engines/audio.js';
-import { audioDriver, audioLevel } from '../engines/audioDriver.js';
+import { audioDriver, audioLevel, getAudioVersion } from '../engines/audioDriver.js';
 
 /** The user's real audio-cpp.json (relative paths, a task array, an `options`
  * map the upstream parser ignores, and a streaming model). */
@@ -204,14 +205,12 @@ describe('normalizeAudioConfig', () => {
 
   it('coerces each field defensively', () => {
     const c = normalizeAudioConfig({
-      cwd: '  /run  ',
       envVars: { CUDA_VISIBLE_DEVICES: '0', bad: 5 },
       serverArgs: [{ key: 'port', value: 8080 }],
       modelConfigIds: ['a', 3, 'b'],
       extra: { live_ingest: { x: 1 } },
     });
     expect(c).toEqual({
-      cwd: '/run',
       envVars: { CUDA_VISIBLE_DEVICES: '0' },
       serverArgs: [{ key: 'port', value: '8080' }],
       modelConfigIds: ['a', 'b'],
@@ -221,7 +220,6 @@ describe('normalizeAudioConfig', () => {
 
   it('defaults missing fields to empty', () => {
     expect(normalizeAudioConfig({})).toEqual({
-      cwd: '',
       envVars: {},
       serverArgs: [],
       modelConfigIds: [],
@@ -238,8 +236,8 @@ describe('blankAudioConfig / audioPort / audioConfigPath', () => {
   });
 
   it('reads the port from the port row, null when absent', () => {
-    expect(audioPort({ cwd: '', envVars: {}, serverArgs: [{ key: 'port', value: '5455' }], modelConfigIds: [], extra: {} })).toBe(5455);
-    expect(audioPort({ cwd: '', envVars: {}, serverArgs: [{ key: 'port', value: '5455', disabled: true }], modelConfigIds: [], extra: {} })).toBeNull();
+    expect(audioPort({ envVars: {}, serverArgs: [{ key: 'port', value: '5455' }], modelConfigIds: [], extra: {} })).toBe(5455);
+    expect(audioPort({ envVars: {}, serverArgs: [{ key: 'port', value: '5455', disabled: true }], modelConfigIds: [], extra: {} })).toBeNull();
     expect(audioPort(undefined)).toBeNull();
   });
 
@@ -249,34 +247,51 @@ describe('blankAudioConfig / audioPort / audioConfigPath', () => {
   });
 });
 
+describe('audioRunDir', () => {
+  it('derives the working directory from a full executable path', () => {
+    expect(audioRunDir('/home/u/Programs/AI/audio.cpp/build/bin/audiocpp_server'))
+      .toBe('/home/u/Programs/AI/audio.cpp/build/bin');
+    expect(audioRunDir('audio.cpp/build/bin/audiocpp_server'))
+      .toBe(path.resolve('audio.cpp/build/bin'));
+  });
+
+  it('is empty for a bare name or blank binary (PATH lookup)', () => {
+    expect(audioRunDir('audiocpp_server')).toBe('');
+    expect(audioRunDir('')).toBe('');
+    expect(audioRunDir(undefined)).toBe('');
+  });
+});
+
 describe('audioDriver', () => {
-  it('launches the binary with --config from the run folder', () => {
+  it('launches a full-path binary from its own folder', () => {
     const launch = audioDriver.buildLaunch!({
-      binary: 'audio.cpp/build/bin/audiocpp_server',
-      llamaCppPath: '/home/u/Programs/AI',
+      binary: '/home/u/Programs/AI/audio.cpp/build/bin/audiocpp_server',
+      llamaCppPath: '/home/u/Programs/AI/audio.cpp/build/bin',
       audioConfigPath: '/cfg/audio-a.json',
     } as any);
     expect(launch.command).toBe('/home/u/Programs/AI/audio.cpp/build/bin/audiocpp_server');
     expect(launch.args).toEqual(['--config', '/cfg/audio-a.json']);
-    expect(launch.cwd).toBe('/home/u/Programs/AI');
+    expect(launch.cwd).toBe('/home/u/Programs/AI/audio.cpp/build/bin');
   });
 
-  it('leaves a bare binary for PATH resolution', () => {
+  it('absolutizes a relative binary and runs from its folder', () => {
+    const launch = audioDriver.buildLaunch!({
+      binary: 'audio.cpp/build/bin/audiocpp_server',
+      llamaCppPath: '',
+      audioConfigPath: '/cfg/audio-a.json',
+    } as any);
+    expect(launch.command).toBe(path.resolve('audio.cpp/build/bin/audiocpp_server'));
+    expect(launch.cwd).toBe(path.resolve('audio.cpp/build/bin'));
+  });
+
+  it('leaves a bare binary for PATH resolution, keeping the fallback cwd', () => {
     const launch = audioDriver.buildLaunch!({
       binary: 'audiocpp_server',
       llamaCppPath: '/run',
       audioConfigPath: '/cfg/audio-a.json',
     } as any);
     expect(launch.command).toBe('audiocpp_server');
-  });
-
-  it('keeps an absolute binary as-is', () => {
-    const launch = audioDriver.buildLaunch!({
-      binary: '/opt/bin/audiocpp_server',
-      llamaCppPath: '/run',
-      audioConfigPath: '/cfg/audio-a.json',
-    } as any);
-    expect(launch.command).toBe('/opt/bin/audiocpp_server');
+    expect(launch.cwd).toBe('/run');
   });
 
   it('classifies log levels', () => {
@@ -284,6 +299,15 @@ describe('audioDriver', () => {
     expect(audioLevel('ERROR: cannot load model')).toBe('E');
     expect(audioLevel('WARNING: experimental')).toBe('W');
     expect(audioLevel('serving on 0.0.0.0:5455')).toBe('plain');
+  });
+
+  it('version probe returns empty info for a missing binary', async () => {
+    const info = await getAudioVersion('/nonexistent/audiocpp_server');
+    expect(info.version).toBeNull();
+    expect(info.commit).toBeNull();
+    expect(info.build).toBeNull();
+    expect(info.backend).toBeNull();
+    expect(info.raw).toEqual([]);
   });
 });
 

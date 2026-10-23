@@ -13,7 +13,7 @@ import { configDir, DEFAULT_CONFIG } from '../config.js';
 import type { LlamaConfig } from '../types.js';
 import { paramsToArgs } from './args.js';
 import { strataPort, strataRepoRoot } from './strata.js';
-import { audioPort } from './audio.js';
+import { audioPort, audioRunDir } from './audio.js';
 import { paramValue, paramValueAny } from './store.js';
 import type { EngineDefinition, EngineInstance } from './types.js';
 
@@ -49,10 +49,11 @@ export function instanceToLlamaConfig(
   const kind = instance.kind || definition.kind;
   return {
     ...DEFAULT_CONFIG,
-    // A strata instance carries its own repo root in the `cwd` deployment row,
-    // and an audio instance its run folder in the audio block's `cwd`; the
-    // definition's build folder is a llama.cpp concept neither kind uses.
-    llamaCppPath: strata ? strataRepoRoot(strata) : audio ? audio.cwd : definition.buildPath,
+    // A strata instance carries its own repo root in the `cwd` deployment row.
+    // An audio instance names its executable with a full path, so the working
+    // directory is that executable's folder; the definition's build folder is
+    // a llama.cpp concept neither kind uses.
+    llamaCppPath: strata ? strataRepoRoot(strata) : audio ? audioRunDir(instance.binary) : definition.buildPath,
     modelsDir: '',
     routerIniPath: routerIniPath ?? '',
     strataConfigPath: strataConfigPath ?? '',

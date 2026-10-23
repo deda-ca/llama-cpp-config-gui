@@ -45,7 +45,6 @@ const form = ref({
 
 function blankAudio(): AudioConfig {
   return {
-    cwd: '',
     envVars: {},
     serverArgs: [
       { key: 'host', value: '127.0.0.1' },
@@ -85,6 +84,57 @@ function collectEnvVars(): Record<string, string> {
   return out;
 }
 
+// --- Build validation (audiocpp_server --version, like the llama.cpp editor) ---
+// The executable is one full path, so the probe runs against it directly and
+// the badge shows the build banner audio.cpp prints (version, git sha, backends).
+interface VersionInfo {
+  version: string | null;
+  build: string | null;
+  commit: string | null;
+  compiler: string | null;
+  backend: string | null;
+  valid?: boolean;
+}
+const versionInfo = ref<VersionInfo | null>(null);
+const checkingPath = ref(false);
+const pathValid = ref<boolean | null>(null);
+
+async function checkExecutablePath() {
+  const exe = form.value.binary.trim();
+  // A bare name is a PATH lookup with nothing to stat or probe locally.
+  if (!exe.includes('/')) {
+    versionInfo.value = null;
+    pathValid.value = exe ? true : null;
+    return;
+  }
+  checkingPath.value = true;
+  try {
+    const res = await fetch('/api/version/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: exe, kind: 'audio' }),
+    });
+    if (res.ok) {
+      const info = await res.json();
+      versionInfo.value = info;
+      pathValid.value = !!info.valid;
+    } else {
+      versionInfo.value = null;
+      pathValid.value = false;
+    }
+  } catch {
+    versionInfo.value = null;
+    pathValid.value = false;
+  } finally {
+    checkingPath.value = false;
+  }
+}
+
+// Validate the saved path on open so the badge is accurate
+onMounted(() => {
+  if (form.value.binary.trim().includes('/')) checkExecutablePath();
+});
+
 // --- Catalog ---
 const serverCatalog = ref<ParamDef[]>([]);
 
@@ -106,9 +156,9 @@ const SERVER_CATEGORY_LABELS: Record<string, string> = {
 };
 
 // --- Tabs ---
-// Layout mirrors the llama.cpp engine editor: Launch (executable, run folder,
-// env vars, parameters), Models (the audio counterpart of the Router tab),
-// Other Keys (raw JSON) and the composed Command.
+// Layout mirrors the llama.cpp engine editor: Launch (executable with a version
+// probe, env vars, parameters), Models (the audio counterpart of the Router
+// tab), Other Keys (raw JSON) and the composed Command.
 type Tab = 'launch' | 'models' | 'json' | 'command';
 const activeTab = ref<Tab>('launch');
 
@@ -234,6 +284,7 @@ async function exportJson() {
   const body = {
     audio: audio.value,
     modelConfigIds: audio.value.modelConfigIds,
+    executable: form.value.binary.trim(),
     instanceId: props.instance.id,
   };
   try {
@@ -368,7 +419,6 @@ async function save() {
       return;
     }
     const audioBody: AudioConfig = {
-      cwd: audio.value.cwd,
       envVars: collectEnvVars(),
       serverArgs: cleanRows(audio.value.serverArgs),
       modelConfigIds: audio.value.modelConfigIds,
@@ -468,18 +518,23 @@ snapshot = currentState();
       </div>
 
       <template v-if="activeTab === 'launch'">
-      <div class="field-row">
-        <div class="field">
-          <label>Executable (CMD)</label>
-          <input v-model="form.binary" type="text" placeholder="audio.cpp/build/bin/audiocpp_server"
-            title="audiocpp_server binary: absolute path, or resolved against the run folder below" />
-          <small>Path to <code>audiocpp_server</code>; a relative path resolves against the run folder</small>
+      <div class="field">
+        <label>Executable (CMD)</label>
+        <div class="path-row">
+          <input v-model="form.binary" type="text" placeholder="/path/to/audio.cpp/build/bin/audiocpp_server" />
+          <button
+            class="btn refresh-btn"
+            :disabled="checkingPath"
+            @click="checkExecutablePath"
+            title="Validate this path and fetch the audiocpp_server build version"
+          >{{ checkingPath ? '…' : '↻ Validate' }}</button>
         </div>
-        <div class="field">
-          <label>Run Folder</label>
-          <input v-model="audio.cwd" type="text" placeholder="/home/me/Programs/AI"
-            title="Folder the server runs from; relative model paths in the generated file resolve against it (absolute paths are written)" />
-          <small>The working directory the server starts in</small>
+        <small>Full path to <code>audiocpp_server</code>; the server runs from that folder, and relative model paths resolve against it</small>
+        <div v-if="pathValid === false" class="version-info version-invalid">
+          Invalid path — no executable found there.
+        </div>
+        <div v-else-if="versionInfo && (versionInfo.version || versionInfo.commit)" class="version-info">
+          audio.cpp {{ versionInfo.version || '?' }}<template v-if="versionInfo.commit"> · git {{ versionInfo.commit.slice(0, 8) }}</template><template v-if="versionInfo.build"> · {{ versionInfo.build }}</template><template v-if="versionInfo.backend"> · {{ versionInfo.backend }}</template>
         </div>
       </div>
 
@@ -797,11 +852,35 @@ snapshot = currentState();
 }
 
 .version-info {
+  margin-top: 4px;
   font-size: 0.72rem;
-  color: #8b949e;
+  color: #79c0ff;
+  background: #388bfd15;
+  border: 1px solid #388bfd33;
+  border-radius: 6px;
+  padding: 5px 10px;
 }
 
-.version-invalid { color: #f85149; }
+.version-invalid {
+  color: #f85149;
+  background: #da363315;
+  border-color: #da363333;
+}
+
+.path-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.path-row input {
+  flex: 1;
+}
+
+.refresh-btn {
+  white-space: nowrap;
+  padding: 7px 12px;
+}
 
 .json-area {
   background: #0d1117;

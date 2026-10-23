@@ -116,12 +116,6 @@ export interface StrataVisionConfig {
  * an import → export round-trip never loses data.
  */
 export interface AudioConfig {
-  /** Folder the server runs from: the parent holding `audio.cpp/` and
-   * `models/`. Relative model paths in the generated file resolve against the
-   * config file's folder, so the generator emits absolute paths instead. The
-   * executable itself is the instance's `binary` field (absolute, or resolved
-   * against this folder) — the same split strata uses for its interpreter. */
-  cwd: string;
   /** Environment for the spawned process (`CUDA_VISIBLE_DEVICES=0`, …).
    * Audio instances have no EngineDefinition to carry env vars, so the block
    * owns them like every other launch setting. */

@@ -173,6 +173,36 @@ describe('normalizeEngines', () => {
     const normalized = normalizeEngines({ definitions: [{ id: 'd', kind: 'bogus' }] });
     expect(normalized.definitions[0].kind).toBe('llamacpp');
   });
+
+  it('folds a legacy audio run folder into a relative binary', () => {
+    const normalized = normalizeEngines({
+      instances: [
+        {
+          id: 'audio-cpp',
+          kind: 'audio',
+          binary: 'build/bin/audiocpp_server',
+          audio: { cwd: '/home/u/Programs/AI/audio.cpp', serverArgs: [] },
+        },
+      ],
+    });
+    // The merged field is a single full path; the launch cwd is its folder.
+    expect(normalized.instances[0].binary).toBe('/home/u/Programs/AI/audio.cpp/build/bin/audiocpp_server');
+    expect(normalized.instances[0].audio).not.toHaveProperty('cwd');
+  });
+
+  it('leaves an already-full-path audio binary alone', () => {
+    const normalized = normalizeEngines({
+      instances: [
+        {
+          id: 'audio-cpp',
+          kind: 'audio',
+          binary: '/opt/audio.cpp/build/bin/audiocpp_server',
+          audio: { cwd: '/home/u/Programs/AI', serverArgs: [] },
+        },
+      ],
+    });
+    expect(normalized.instances[0].binary).toBe('/opt/audio.cpp/build/bin/audiocpp_server');
+  });
 });
 
 describe('migrateLegacyConfig', () => {
