@@ -185,6 +185,9 @@ export interface StrataVisionConfig {
 export interface AudioConfig {
   /** Folder the server runs from. The executable is the instance's `binary`. */
   cwd: string;
+  /** Process environment (`CUDA_VISIBLE_DEVICES=0`, …) — audio instances have
+   * no shared definition to carry it, so the block owns it. */
+  envVars: Record<string, string>;
   serverArgs: EngineParam[];
   modelConfigIds: string[];
   extra: Record<string, unknown>;

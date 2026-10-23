@@ -57,7 +57,10 @@ export function instanceToLlamaConfig(
     routerIniPath: routerIniPath ?? '',
     strataConfigPath: strataConfigPath ?? '',
     audioConfigPath: audioConfigPath ?? '',
-    envVars: definition.envVars,
+    // An audio instance has no definition to carry env vars, so its block owns
+    // them (CUDA_VISIBLE_DEVICES etc.); every other kind inherits the
+    // definition's environment.
+    envVars: audio ? { ...definition.envVars, ...audio.envVars } : definition.envVars,
     // llama.cpp kinds pick one of the two known binaries; other kinds launch
     // whatever executable the instance names (passthrough driver).
     binary: kind === 'llamacpp'

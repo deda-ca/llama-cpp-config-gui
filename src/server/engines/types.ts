@@ -122,6 +122,10 @@ export interface AudioConfig {
    * executable itself is the instance's `binary` field (absolute, or resolved
    * against this folder) — the same split strata uses for its interpreter. */
   cwd: string;
+  /** Environment for the spawned process (`CUDA_VISIBLE_DEVICES=0`, …).
+   * Audio instances have no EngineDefinition to carry env vars, so the block
+   * owns them like every other launch setting. */
+  envVars: Record<string, string>;
   /** Server-level config keys as ordered rows (host, port, backend, device,
    * threads, lazy_load, cors_origins, busy_timeout_ms, …). */
   serverArgs: EngineParam[];

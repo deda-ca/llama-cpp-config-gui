@@ -205,12 +205,14 @@ describe('normalizeAudioConfig', () => {
   it('coerces each field defensively', () => {
     const c = normalizeAudioConfig({
       cwd: '  /run  ',
+      envVars: { CUDA_VISIBLE_DEVICES: '0', bad: 5 },
       serverArgs: [{ key: 'port', value: 8080 }],
       modelConfigIds: ['a', 3, 'b'],
       extra: { live_ingest: { x: 1 } },
     });
     expect(c).toEqual({
       cwd: '/run',
+      envVars: { CUDA_VISIBLE_DEVICES: '0' },
       serverArgs: [{ key: 'port', value: '8080' }],
       modelConfigIds: ['a', 'b'],
       extra: { live_ingest: { x: 1 } },
@@ -220,6 +222,7 @@ describe('normalizeAudioConfig', () => {
   it('defaults missing fields to empty', () => {
     expect(normalizeAudioConfig({})).toEqual({
       cwd: '',
+      envVars: {},
       serverArgs: [],
       modelConfigIds: [],
       extra: {},
@@ -235,8 +238,8 @@ describe('blankAudioConfig / audioPort / audioConfigPath', () => {
   });
 
   it('reads the port from the port row, null when absent', () => {
-    expect(audioPort({ cwd: '', serverArgs: [{ key: 'port', value: '5455' }], modelConfigIds: [], extra: {} })).toBe(5455);
-    expect(audioPort({ cwd: '', serverArgs: [{ key: 'port', value: '5455', disabled: true }], modelConfigIds: [], extra: {} })).toBeNull();
+    expect(audioPort({ cwd: '', envVars: {}, serverArgs: [{ key: 'port', value: '5455' }], modelConfigIds: [], extra: {} })).toBe(5455);
+    expect(audioPort({ cwd: '', envVars: {}, serverArgs: [{ key: 'port', value: '5455', disabled: true }], modelConfigIds: [], extra: {} })).toBeNull();
     expect(audioPort(undefined)).toBeNull();
   });
 

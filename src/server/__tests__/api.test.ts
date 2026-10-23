@@ -915,6 +915,7 @@ describe('Audio Engine API', () => {
   it('PUT /api/engines/instances/:id round-trips the audio block and port conflict', async () => {
     const block = {
       cwd: '/home/u/Programs/AI',
+      envVars: { CUDA_VISIBLE_DEVICES: '0' },
       serverArgs: [
         { key: 'host', value: '0.0.0.0' },
         { key: 'port', value: '8130' },
@@ -974,12 +975,14 @@ describe('Audio Engine API', () => {
         kind: 'audio',
         instanceId: audioId,
         executable: 'audio.cpp/build/bin/audiocpp_server',
-        audio: { cwd: '/home/u/Programs/AI', serverArgs: [{ key: 'port', value: '8130' }] },
+        audio: { cwd: '/home/u/Programs/AI', envVars: { CUDA_VISIBLE_DEVICES: '0' }, serverArgs: [{ key: 'port', value: '8130' }] },
       });
     expect(res.status).toBe(200);
     // A relative binary resolves against the run folder; cwd is the run folder.
     expect(res.body.binaryPath).toBe('/home/u/Programs/AI/audio.cpp/build/bin/audiocpp_server');
     expect(res.body.cwd).toBe('/home/u/Programs/AI');
+    // The audio block's env vars reach the spawn environment (no definition to carry them).
+    expect(res.body.envVars).toEqual({ CUDA_VISIBLE_DEVICES: '0' });
     expect(res.body.args).toEqual(['--config', expect.stringContaining(`audio-${audioId}.json`)]);
   });
 

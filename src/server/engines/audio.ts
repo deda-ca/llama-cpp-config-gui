@@ -33,7 +33,7 @@
 import path from 'path';
 import { configDir } from '../config.js';
 import { parseConfigValue, formatConfigValue } from './strata.js';
-import { normalizeEngineParams } from './store.js';
+import { normalizeEngineParams, normalizeEnvVars } from './store.js';
 import type { ModelConfig } from '../modelConfig.js';
 import type { AudioConfig, EngineParam } from './types.js';
 
@@ -256,6 +256,7 @@ export function audioFromConfig(cfg: Record<string, unknown>): {
   return {
     audio: {
       cwd: '',
+      envVars: {},
       serverArgs: configToServerParams(serverCfg),
       modelConfigIds: [],
       extra,
@@ -289,6 +290,7 @@ export function audioConfigPath(instanceId: string): string {
 export function blankAudioConfig(): AudioConfig {
   return {
     cwd: '',
+    envVars: {},
     // The keys a new server needs to bind at all lead the Server tab; the
     // rest are added from the catalog on demand.
     serverArgs: [
@@ -314,6 +316,7 @@ export function normalizeAudioConfig(raw: unknown): AudioConfig | undefined {
   const c = raw as Record<string, unknown>;
   return {
     cwd: typeof c.cwd === 'string' ? c.cwd.trim() : '',
+    envVars: normalizeEnvVars(c.envVars),
     serverArgs: normalizeEngineParams(c.serverArgs),
     modelConfigIds: Array.isArray(c.modelConfigIds)
       ? c.modelConfigIds.filter((x): x is string => typeof x === 'string')

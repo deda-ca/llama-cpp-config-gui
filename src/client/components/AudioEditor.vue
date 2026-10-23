@@ -46,6 +46,7 @@ const form = ref({
 function blankAudio(): AudioConfig {
   return {
     cwd: '',
+    envVars: {},
     serverArgs: [
       { key: 'host', value: '127.0.0.1' },
       { key: 'port', value: '8080' },
@@ -60,6 +61,29 @@ function blankAudio(): AudioConfig {
 }
 
 const audio = ref<AudioConfig>({ ...blankAudio(), ...(props.instance.audio ?? {}) });
+
+// --- Env rows (ENV) ---
+// Audio instances have no shared definition to carry environment variables,
+// so the block owns them: `CUDA_VISIBLE_DEVICES=0` etc. are edited here and
+// reach the spawned process through the launch spec's envVars.
+interface EnvRow { key: string; value: string }
+const envRows = ref<EnvRow[]>(
+  Object.entries(audio.value.envVars ?? {}).map(([key, value]) => ({ key, value })),
+);
+
+function addEnvRow() {
+  envRows.value.push({ key: '', value: '' });
+}
+function removeEnvRow(idx: number) {
+  envRows.value.splice(idx, 1);
+}
+function collectEnvVars(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const row of envRows.value) {
+    if (row.key.trim()) out[row.key.trim()] = row.value;
+  }
+  return out;
+}
 
 // --- Catalog ---
 const serverCatalog = ref<ParamDef[]>([]);
@@ -82,8 +106,11 @@ const SERVER_CATEGORY_LABELS: Record<string, string> = {
 };
 
 // --- Tabs ---
-type Tab = 'server' | 'models' | 'json' | 'command';
-const activeTab = ref<Tab>('server');
+// Layout mirrors the llama.cpp engine editor: Launch (executable, run folder,
+// env vars, parameters), Models (the audio counterpart of the Router tab),
+// Other Keys (raw JSON) and the composed Command.
+type Tab = 'launch' | 'models' | 'json' | 'command';
+const activeTab = ref<Tab>('launch');
 
 // --- Model picker (Models tab) ---
 // Same UX as the llama.cpp Router tab, filtered to audio model cards: the
@@ -185,6 +212,7 @@ async function onFileChosen(e: Event) {
       return;
     }
     audio.value = data.audio as AudioConfig;
+    envRows.value = Object.entries(audio.value.envVars ?? {}).map(([key, value]) => ({ key, value }));
     // The imported models[] entries became model cards — select them (plus
     // anything already selected) so the instance launches with them.
     const importedIds = (data.models as ModelConfig[]).map((m) => m.id);
@@ -235,6 +263,7 @@ async function exportJson() {
 interface CommandPreview {
   binaryPath: string;
   args: string[];
+  envVars: Record<string, string>;
   cwd: string;
   exists: boolean;
 }
@@ -254,7 +283,7 @@ async function fetchCommand() {
         instanceId: props.instance.id,
         executable: form.value.binary.trim() || 'audiocpp_server',
         params: [],
-        audio: audio.value,
+        audio: { ...audio.value, envVars: collectEnvVars() },
       }),
     });
     const data = await res.json().catch(() => ({}));
@@ -273,16 +302,30 @@ async function fetchCommand() {
   }
 }
 
-watch([activeTab, audio, () => form.value.binary], () => {
+watch([activeTab, audio, envRows, () => form.value.binary], () => {
   if (activeTab.value !== 'command') return;
   if (commandTimer) clearTimeout(commandTimer);
   commandTimer = setTimeout(fetchCommand, 250);
 }, { deep: true });
 
-const commandText = computed(() => {
-  if (!command.value) return '';
-  return `${command.value.binaryPath} ${command.value.args.join(' ')}`.trim();
+// The env prefix matches the llama.cpp editor's Command tab: `VAR="value"` on
+// its own line, then the executable and its arguments.
+const commandLines = computed(() => {
+  const c = command.value;
+  if (!c) return [];
+  const lines: string[] = Object.entries(c.envVars ?? {})
+    .filter(([, v]) => v)
+    .map(([k, v]) => `${k}="${v}"`);
+  lines.push(c.binaryPath);
+  for (const arg of c.args) lines.push(/\s/.test(arg) ? `"${arg}"` : arg);
+  return lines;
 });
+
+const commandText = computed(() =>
+  commandLines.value
+    .map((line, i) => (i < commandLines.value.length - 1 ? `${line} \\` : line))
+    .join('\n'),
+);
 
 const copiedCommand = ref(false);
 function copyCommand() {
@@ -296,9 +339,9 @@ function copyCommand() {
 const dirty = ref(false);
 let snapshot = '';
 function currentState() {
-  return JSON.stringify({ form: form.value, audio: audio.value });
+  return JSON.stringify({ form: form.value, audio: audio.value, envRows: envRows.value });
 }
-watch([form, audio], () => {
+watch([form, audio, envRows], () => {
   dirty.value = currentState() !== snapshot;
 }, { deep: true });
 
@@ -326,6 +369,7 @@ async function save() {
     }
     const audioBody: AudioConfig = {
       cwd: audio.value.cwd,
+      envVars: collectEnvVars(),
       serverArgs: cleanRows(audio.value.serverArgs),
       modelConfigIds: audio.value.modelConfigIds,
       extra: audio.value.extra ?? {},
@@ -401,18 +445,6 @@ snapshot = currentState();
         <textarea v-model="form.notes" rows="2" placeholder="Which GPU this engine owns, models loaded, trade-offs..."></textarea>
       </div>
 
-      <div class="field">
-        <label>Executable</label>
-        <input v-model="form.binary" type="text" placeholder="audio.cpp/build/bin/audiocpp_server"
-          title="audiocpp_server binary: absolute path, or resolved against the run folder below" />
-      </div>
-
-      <div class="field">
-        <label>Run Folder</label>
-        <input v-model="audio.cwd" type="text" placeholder="/home/me/Programs/AI"
-          title="Folder the server runs from; relative model paths in the generated file resolve against it (absolute paths are written)" />
-      </div>
-
       <label class="check-row">
         <input v-model="form.autoLaunch" type="checkbox" />
         <span>Start this engine when the application launches</span>
@@ -427,13 +459,43 @@ snapshot = currentState();
       </div>
 
       <div class="tab-bar">
-        <button class="tab-btn" :class="{ active: activeTab === 'server' }" @click="activeTab = 'server'">Server</button>
-        <button class="tab-btn" :class="{ active: activeTab === 'models' }" @click="activeTab = 'models'">Models</button>
+        <button class="tab-btn" :class="{ active: activeTab === 'launch' }" @click="activeTab = 'launch'">Launch</button>
+        <button class="tab-btn" :class="{ active: activeTab === 'models' }" @click="activeTab = 'models'">
+          Models<template v-if="audio.modelConfigIds.length"> ({{ audio.modelConfigIds.length }})</template>
+        </button>
         <button class="tab-btn" :class="{ active: activeTab === 'json' }" @click="activeTab = 'json'">Other Keys</button>
         <button class="tab-btn" :class="{ active: activeTab === 'command' }" @click="activeTab = 'command'">Command</button>
       </div>
 
-      <template v-if="activeTab === 'server'">
+      <template v-if="activeTab === 'launch'">
+      <div class="field-row">
+        <div class="field">
+          <label>Executable (CMD)</label>
+          <input v-model="form.binary" type="text" placeholder="audio.cpp/build/bin/audiocpp_server"
+            title="audiocpp_server binary: absolute path, or resolved against the run folder below" />
+          <small>Path to <code>audiocpp_server</code>; a relative path resolves against the run folder</small>
+        </div>
+        <div class="field">
+          <label>Run Folder</label>
+          <input v-model="audio.cwd" type="text" placeholder="/home/me/Programs/AI"
+            title="Folder the server runs from; relative model paths in the generated file resolve against it (absolute paths are written)" />
+          <small>The working directory the server starts in</small>
+        </div>
+      </div>
+
+      <div class="field">
+        <label>Environment Variables (ENV)</label>
+        <div v-for="(row, idx) in envRows" :key="idx" class="env-row">
+          <input v-model="row.key" type="text" placeholder="VAR_NAME" class="env-key" />
+          <input v-model="row.value" type="text" placeholder="value" class="env-value" />
+          <button class="remove-btn" @click="removeEnvRow(idx)" title="Remove">&times;</button>
+        </div>
+        <button class="add-env-btn" @click="addEnvRow">+ Add Variable</button>
+        <small>e.g. <code>CUDA_VISIBLE_DEVICES=1</code></small>
+      </div>
+
+      <div class="field">
+        <label>Parameters</label>
         <small class="tab-hint">
           Top-level keys of the generated <code>audio-&lt;engine&gt;.json</code>, read by
           <code>audiocpp_server</code> (<code>host</code>, <code>port</code>, <code>backend</code>,
@@ -446,6 +508,7 @@ snapshot = currentState();
           :category-labels="SERVER_CATEGORY_LABELS"
           flag-placeholder="key (e.g. cors_origins)"
         />
+      </div>
       </template>
 
       <template v-else-if="activeTab === 'models'">
@@ -598,6 +661,44 @@ snapshot = currentState();
 }
 
 .io-error { color: #f85149; }
+
+.env-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.env-key {
+  flex: 0 0 200px;
+}
+
+.env-value {
+  flex: 1;
+}
+
+.env-key, .env-value {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 6px 10px;
+  color: #e1e4e8;
+  font-size: 0.78rem;
+  font-family: 'Cascadia Code', monospace;
+}
+
+.env-key:focus, .env-value:focus { outline: none; border-color: #58a6ff; }
+
+.remove-btn {
+  background: none;
+  border: none;
+  color: #484f58;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 0 4px;
+}
+
+.remove-btn:hover { color: #f85149; }
 
 .tab-bar {
   display: flex;

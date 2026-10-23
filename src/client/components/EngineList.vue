@@ -159,7 +159,13 @@ async function duplicateInstance(inst: EngineInstance) {
       ? { ...inst.strata, engineArgs: inst.strata.engineArgs.map((p) => ({ ...p })), serverArgs: inst.strata.serverArgs.map((p) => ({ ...p })) }
       : undefined;
     const audio = inst.audio
-      ? { ...inst.audio, serverArgs: inst.audio.serverArgs.map((p) => ({ ...p })), modelConfigIds: [...inst.audio.modelConfigIds], extra: { ...inst.audio.extra } }
+      ? {
+          ...inst.audio,
+          envVars: { ...inst.audio.envVars },
+          serverArgs: inst.audio.serverArgs.map((p) => ({ ...p })),
+          modelConfigIds: [...inst.audio.modelConfigIds],
+          extra: { ...inst.audio.extra },
+        }
       : undefined;
     const strataPortRow = strata?.serverArgs.find(portKey);
     const audioPortRow = audio?.serverArgs.find(portKey);
