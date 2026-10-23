@@ -20,6 +20,7 @@ import {
   enginesFileExists,
   migrateLegacyConfig,
   normalizeEngines,
+  normalizeEngineParams,
   isPortTaken,
   findFreePort,
   instancePort,
@@ -266,6 +267,26 @@ describe('port allocation', () => {
     })).toBe(5456);
   });
 
+  it('a strata --port row holding a number still reports its port', () => {
+    // Repairs engines.json written while a numeric input sent a real number.
+    const normalized = normalizeEngines({
+      definitions: [],
+      instances: [
+        {
+          id: 's1',
+          name: 'S',
+          kind: 'strata',
+          definitionId: '',
+          binary: 'python3',
+          params: [],
+          strata: { engineArgs: [], serverArgs: [{ key: '--port', value: 5457 }], vision: null, extra: {} },
+        },
+      ],
+      defaultInstanceId: 's1',
+    });
+    expect(instancePort(normalized.instances[0])).toBe(5457);
+  });
+
   it('isPortTaken ignores the excluded instance', () => {
     expect(isPortTaken(data, 8080)).toBe(true);
     expect(isPortTaken(data, 8080, 'a')).toBe(false);
@@ -312,6 +333,25 @@ describe('blankInstance / makeEngineId', () => {
     const existing = normalizeEngines({ instances: [{ id: 'my-engine' }] });
     expect(makeEngineId('My Engine', existing.instances)).toBe('my-engine-2');
     expect(blankInstance('My Engine', def, existing).id).toBe('my-engine-2');
+  });
+});
+
+describe('normalizeEngineParams', () => {
+  it('stringifies a numeric value instead of dropping it', () => {
+    // A number input bound straight to the model used to send real numbers,
+    // which were dropped — leaving e.g. a --port row with no port at all.
+    expect(normalizeEngineParams([{ key: '--port', value: 5457 as unknown as string }])).toEqual([
+      { key: '--port', value: '5457' },
+    ]);
+  });
+
+  it('keeps string values and drops non-finite numbers', () => {
+    expect(
+      normalizeEngineParams([
+        { key: '--port', value: '5457' },
+        { key: '--ctx', value: NaN as unknown as number },
+      ]),
+    ).toEqual([{ key: '--port', value: '5457' }, { key: '--ctx' }]);
   });
 });
 

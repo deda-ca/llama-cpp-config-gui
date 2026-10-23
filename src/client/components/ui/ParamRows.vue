@@ -84,6 +84,17 @@ function removeRow(idx: number) {
   params.value.splice(idx, 1);
 }
 
+/**
+ * Number rows keep their value a **string**, like every other row.
+ * `v-model` on `type="number"` runs the value through `looseToNumber`, which
+ * stores a JS number — and `normalizeEngineParams` on the server only accepts
+ * string values, so the row would come back with no value at all (a port that
+ * "doesn't save"). Reading `el.value` directly keeps the text the user typed.
+ */
+function setNumberValue(p: EngineParam, e: Event) {
+  p.value = (e.target as HTMLInputElement).value;
+}
+
 // --- Add from catalog (entries not present yet) ---
 const showPicker = ref(false);
 const pickerFilter = ref('');
@@ -212,7 +223,8 @@ function clearDrag() {
         </select>
         <input
           v-else-if="row.def?.inputType === 'number'"
-          v-model="row.param.value"
+          :value="row.param.value ?? ''"
+          @input="setNumberValue(row.param, $event)"
           type="number"
           step="any"
           :placeholder="row.def?.default || ''"

@@ -58,8 +58,17 @@ export function normalizeEngineParams(raw: unknown): EngineParam[] {
     const key = (p as EngineParam).key;
     if (typeof key !== 'string' || !key.trim()) continue;
     const value = (p as EngineParam).value;
+    // A number value is accepted and stringified: `EngineParam.value` is a
+    // string by contract, but a client that bound a numeric input straight to
+    // the model used to send real numbers, and dropping them silently lost the
+    // value (a --port row saved with no port). Files already written that way
+    // are repaired on load.
     const param: EngineParam =
-      typeof value === 'string' ? { key: key.trim(), value } : { key: key.trim() };
+      typeof value === 'string'
+        ? { key: key.trim(), value }
+        : typeof value === 'number' && Number.isFinite(value)
+          ? { key: key.trim(), value: String(value) }
+          : { key: key.trim() };
     if ((p as EngineParam).disabled === true) param.disabled = true;
     out.push(param);
   }
