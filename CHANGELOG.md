@@ -1,3 +1,10 @@
+# [0.15.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.14.1...v0.15.0) (2026-10-23)
+
+
+### Features
+
+* **engines:** audio.cpp engine with typed model configs and generated JSON ([850fb71](https://github.com/deda-ca/llama-cpp-config-gui/commit/850fb71cd6fcf8b379a14446f76ef9d4aeaed4d4))
+
 ## [0.14.1](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.14.0...v0.14.1) (2026-10-23)
 
 
