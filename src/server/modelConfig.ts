@@ -61,6 +61,22 @@ export interface ModelConfig {
   disabledParams?: string[];
   /** Whether this config is included in router launches (checkbox in the list) */
   includeInLaunch?: boolean;
+  /**
+   * Engine family this card configures (docs/audio.md §2.1). The type decides
+   * which parameter catalog the card edits and what the generated launch file
+   * looks like: `llamacpp` params are CLI flags rendered into the router INI,
+   * `audio` params are audio.cpp config keys rendered into a `models[]` entry.
+   * Open-ended so a later kind (stable-diffusion.cpp) needs no type change.
+   * Absent = 'llamacpp', keeping every pre-existing card working unchanged.
+   */
+  type?: string;
+  /**
+   * audio.cpp only: model keys too nested for flat rows (`voice_presets`,
+   * `default_voice_preset`, `live_ingest`, `model_spec_override`, `config`,
+   * `weight`), plus anything the UI has no field for. Preserved verbatim and
+   * re-emitted on export, mirroring `AudioConfig.extra` at server level.
+   */
+  audioExtras?: Record<string, unknown>;
   isDefault: boolean;
 }
 
@@ -92,6 +108,21 @@ function modelsFile(): string {
   return path.join(configDir(), 'models.json');
 }
 
+/**
+ * Defensive per-card normalization. Most fields are trusted as written (the
+ * editor owns them), but the kind-specific ones added later are validated so a
+ * hand-edited models.json can never smuggle a wrong shape into a generator:
+ * `type` must be a string, `audioExtras` a plain object.
+ */
+function normalizeModelCard(cfg: any): ModelConfig {
+  const out: ModelConfig = cfg;
+  if (typeof out.type !== 'string' || !out.type) delete out.type;
+  if (!out.audioExtras || typeof out.audioExtras !== 'object' || Array.isArray(out.audioExtras)) {
+    delete out.audioExtras;
+  }
+  return out;
+}
+
 export function normalizeModelsFile(data: any): ModelsFile {
   const configs = Array.isArray(data?.configs) ? data.configs : [];
   const configOrder = Array.isArray(data?.configOrder)
@@ -100,7 +131,7 @@ export function normalizeModelsFile(data: any): ModelsFile {
 
   const byId = new Map<string, ModelConfig>();
   for (const cfg of configs) {
-    if (cfg?.id && typeof cfg.id === 'string') byId.set(cfg.id, cfg);
+    if (cfg?.id && typeof cfg.id === 'string') byId.set(cfg.id, normalizeModelCard(cfg));
   }
 
   const orderedConfigs: ModelConfig[] = [];
@@ -114,7 +145,7 @@ export function normalizeModelsFile(data: any): ModelsFile {
   }
   for (const cfg of configs) {
     if (cfg?.id && typeof cfg.id === 'string' && !seen.has(cfg.id)) {
-      orderedConfigs.push(cfg);
+      orderedConfigs.push(byId.get(cfg.id) as ModelConfig);
       seen.add(cfg.id);
     }
   }

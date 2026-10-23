@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, watchEffect, nextTick, onMounted, onUnmounted } from 'vue';
 import type { ModelConfig, ParamDef } from '../types';
 import Dialog from './ui/Dialog.vue';
 
@@ -33,6 +33,23 @@ function cloneConfig(cfg: ModelConfig): ModelConfig {
 }
 
 const local = ref<ModelConfig>(cloneConfig(props.config));
+
+// --- Engine family of this card (docs/audio.md §2.1) ---
+// The llama.cpp catalog arrives as a prop; an audio card edits the audio.cpp
+// model-key catalog instead, fetched once per card type.
+const isAudio = computed(() => local.value.type === 'audio');
+const audioModelParams = ref<ParamDef[] | null>(null);
+
+const catalog = computed(() => (isAudio.value ? audioModelParams.value ?? [] : props.params));
+
+watchEffect(() => {
+  if (isAudio.value && audioModelParams.value === null) {
+    fetch('/api/params/audio-model')
+      .then((res) => (res.ok ? res.json() : []))
+      .then((defs) => { audioModelParams.value = defs; })
+      .catch(() => { audioModelParams.value = []; });
+  }
+});
 
 // Dirty flag: set once the user makes an edit, cleared on a successful save.
 // (Replaces the old JSON.stringify snapshot comparison, which could desync from
@@ -77,7 +94,7 @@ const bulkPasteRef = ref<HTMLElement | null>(null);
 const filteredParams = computed(() => {
   const activeKeys = new Set(local.value.paramOrder);
   const q = pickerFilter.value.toLowerCase();
-  return props.params.filter((p) => {
+  return catalog.value.filter((p) => {
     if (activeKeys.has(p.key)) return false; // already added
     if (!q) return true;
     return p.key.toLowerCase().includes(q) || p.label.toLowerCase().includes(q) || p.flag.toLowerCase().includes(q);
@@ -102,17 +119,20 @@ interface UnknownParam {
   key: string;
 }
 
-const knownKeySet = computed(() => new Set(props.params.map((p) => p.key)));
+const knownKeySet = computed(() => new Set(catalog.value.map((p) => p.key)));
 
 const activeParamDefs = computed(() => {
   return local.value.paramOrder
     .filter((key) => knownKeySet.value.has(key))
-    .map((key) => props.params.find((p) => p.key === key)!);
+    .map((key) => catalog.value.find((p) => p.key === key)!);
 });
 
 const unknownParams = computed<UnknownParam[]>(() => {
   return local.value.paramOrder
     .filter((key) => !knownKeySet.value.has(key))
+    // audio option-map rows (`load_options.x`) have no catalog entry by design —
+    // they are edited in the Option Maps section instead.
+    .filter((key) => !OPTION_PREFIXES.some((p) => key.startsWith(`${p}.`)))
     .map((key) => ({ key }));
 });
 
@@ -137,7 +157,7 @@ const categoryLabels: Record<string, string> = {
 
 // --- Preset inputs: free text + dropdown of preset values from param def ---
 function presetValue(key: string): string {
-  const def = props.params.find((p) => p.key === key);
+  const def = catalog.value.find((p) => p.key === key);
   const cur = local.value.params[key] || '';
   return def?.presets?.includes(cur) ? cur : '';
 }
@@ -151,7 +171,7 @@ function applyPreset(key: string, e: Event) {
 function addParam(key: string) {
   if (!local.value.paramOrder.includes(key)) {
     local.value.paramOrder.push(key);
-    const def = props.params.find((p) => p.key === key);
+    const def = catalog.value.find((p) => p.key === key);
     if (def?.default && !local.value.params[key]) {
       local.value.params[key] = def.default;
     } else if (!local.value.params[key]) {
@@ -315,7 +335,7 @@ function applyBulkPaste() {
 
     // Look up param def by key. Unknown params are kept as raw key=value
     // entries and shown under the "Unknown" group at the end.
-    const def = props.params.find((p) => p.key === key);
+    const def = catalog.value.find((p) => p.key === key);
 
     let finalValue: string;
     if (!def) {
@@ -344,6 +364,93 @@ function applyBulkPaste() {
 
 // --- Tabs ---
 const activeTab = ref<'params' | 'preview' | 'export'>('params');
+
+// --- audio.cpp model card extras (docs/audio.md §2.1) ---
+// The option maps are prefixed rows (`load_options.language = english`) which
+// the server's generator groups back into nested objects, so the editor needs
+// a small builder for them instead of catalog entries.
+const OPTION_PREFIXES = ['load_options', 'session_options', 'default_request_options'] as const;
+const newOptPrefix = ref<string>(OPTION_PREFIXES[0]);
+const newOptKey = ref('');
+const newOptValue = ref('');
+
+function optionRowKeys(): string[] {
+  return local.value.paramOrder.filter((k) => OPTION_PREFIXES.some((p) => k.startsWith(`${p}.`)));
+}
+
+function addOptionRow() {
+  const key = newOptKey.value.trim();
+  if (!key) return;
+  const rowKey = `${newOptPrefix.value}.${key}`;
+  if (!local.value.paramOrder.includes(rowKey)) local.value.paramOrder.push(rowKey);
+  local.value.params[rowKey] = newOptValue.value;
+  newOptKey.value = '';
+  newOptValue.value = '';
+}
+
+// `audioExtras` is a raw-JSON block: voice presets, live_ingest, … ride along
+// verbatim, so the editor only parses/validates on Apply.
+const extrasText = ref('');
+const extrasError = ref('');
+const extrasApplied = ref(false);
+
+function syncExtrasText() {
+  const extras = local.value.audioExtras;
+  extrasText.value = extras && Object.keys(extras).length ? JSON.stringify(extras, null, 2) : '';
+  extrasError.value = '';
+}
+syncExtrasText();
+
+function applyExtras() {
+  const text = extrasText.value.trim();
+  if (!text) {
+    delete local.value.audioExtras;
+    extrasError.value = '';
+    extrasApplied.value = true;
+    setTimeout(() => (extrasApplied.value = false), 1500);
+    return;
+  }
+  try {
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      extrasError.value = 'Expected a JSON object of model keys';
+      return;
+    }
+    local.value.audioExtras = parsed as Record<string, unknown>;
+    extrasError.value = '';
+    extrasApplied.value = true;
+    setTimeout(() => (extrasApplied.value = false), 1500);
+  } catch (e) {
+    extrasError.value = `Invalid JSON: ${(e as Error).message}`;
+  }
+}
+
+// The `models[]` entry this card produces, mirroring the server's generator
+// enough to show what a launch writes (docs/audio.md §2.3).
+const audioEntryPreview = computed(() => {
+  const cfg = local.value;
+  const out: Record<string, unknown> = { id: cfg.alias, family: cfg.params['family'] ?? '', path: cfg.modelPath };
+  const options: Record<string, Record<string, string>> = {};
+  const disabled = new Set(cfg.disabledParams ?? []);
+  for (const key of cfg.paramOrder) {
+    const value = cfg.params[key];
+    if (value === undefined) continue;
+    const prefix = OPTION_PREFIXES.find((p) => key.startsWith(`${p}.`));
+    if (prefix) {
+      const optKey = key.slice(prefix.length + 1);
+      if (!optKey) continue;
+      (options[prefix] ??= {})[optKey] = value;
+      continue;
+    }
+    if (disabled.has(key) || key === 'family') continue;
+    out[key] = value;
+  }
+  for (const [prefix, map] of Object.entries(options)) {
+    if (Object.keys(map).length) out[prefix] = map;
+  }
+  Object.assign(out, cfg.audioExtras ?? {});
+  return JSON.stringify(out, null, 2);
+});
 
 // Build INI preview from the current local config (mirrors server exportRouterIni)
 const CATEGORY_NAMES: Record<string, string> = {
@@ -425,7 +532,7 @@ const previewIni = computed(() => {
 
 const copied = ref(false);
 function copyPreview() {
-  navigator.clipboard.writeText(previewIni.value).then(() => {
+  navigator.clipboard.writeText(isAudio.value ? audioEntryPreview.value : previewIni.value).then(() => {
     copied.value = true;
     setTimeout(() => (copied.value = false), 1500);
   });
@@ -561,7 +668,7 @@ async function setDefault() {
     <div class="tab-bar">
       <button class="tab-btn" :class="{ active: activeTab === 'params' }" @click="activeTab = 'params'">Params</button>
       <button class="tab-btn" :class="{ active: activeTab === 'preview' }" @click="activeTab = 'preview'">Preview</button>
-      <button class="tab-btn" :class="{ active: activeTab === 'export' }" @click="activeTab = 'export'">Export</button>
+      <button v-if="!isAudio" class="tab-btn" :class="{ active: activeTab === 'export' }" @click="activeTab = 'export'">Export</button>
     </div>
 
     <!-- Params tab content -->
@@ -574,8 +681,8 @@ async function setDefault() {
 
     <!-- Model path -->
     <div class="field">
-      <label>Model (.gguf)</label>
-      <input v-model="local.modelPath" type="text" placeholder="/path/to/model.gguf" />
+      <label>{{ isAudio ? 'Model path' : 'Model (.gguf)' }}</label>
+      <input v-model="local.modelPath" type="text" :placeholder="isAudio ? '/path/to/model or repo dir' : '/path/to/model.gguf'" />
     </div>
 
     <!-- Active params grouped by category -->
@@ -674,7 +781,7 @@ async function setDefault() {
         <span class="drag-handle" title="Drag to reorder" @mousedown="onHandleMousedown(up.key)">&#8942;</span>
         <span class="param-flag">{{ up.key }}</span>
         <input v-model="local.params[up.key]" type="text" />
-        <span class="param-desc" :title="'Not a known llama.cpp parameter — kept as-is'">unknown parameter</span>
+        <span class="param-desc" :title="isAudio ? 'Not a known audio.cpp model key — kept as-is' : 'Not a known llama.cpp parameter — kept as-is'">unknown parameter</span>
         <button
           class="toggle-enabled-btn"
           :class="{ 'is-disabled': isDisabled(up.key) }"
@@ -682,6 +789,35 @@ async function setDefault() {
           :title="isDisabled(up.key) ? 'Enable (uncomment in INI)' : 'Disable (comment out in INI)'"
         >{{ isDisabled(up.key) ? 'off' : 'on' }}</button>
         <button class="remove-btn" @click="removeParam(up.key)" title="Remove">&times;</button>
+      </div>
+    </div>
+
+    <!-- audio.cpp option maps: prefixed rows regrouped into nested objects by
+         the generator (load_options.*, session_options.*, …) -->
+    <div v-if="isAudio" class="bulk-paste">
+      <h4 class="group-title">Option Maps</h4>
+      <div v-for="key in optionRowKeys()" :key="key" class="param-row">
+        <span class="param-flag">{{ key }}</span>
+        <input v-model="local.params[key]" type="text" />
+        <button class="remove-btn" @click="removeParam(key)" title="Remove">&times;</button>
+      </div>
+      <div class="param-row">
+        <select v-model="newOptPrefix">
+          <option v-for="p in OPTION_PREFIXES" :key="p" :value="p">{{ p }}</option>
+        </select>
+        <input v-model="newOptKey" type="text" placeholder="key" />
+        <input v-model="newOptValue" type="text" placeholder="value" />
+        <button class="btn btn-sm" @click="addOptionRow">+ Add</button>
+      </div>
+    </div>
+
+    <!-- audio.cpp extras: voice presets, live_ingest, … verbatim raw JSON -->
+    <div v-if="isAudio" class="bulk-paste">
+      <h4 class="group-title">Other Keys (raw JSON)</h4>
+      <textarea v-model="extrasText" rows="8" placeholder='{"voice_presets": {…}, "live_ingest": {…}}'></textarea>
+      <div v-if="extrasError" class="bulk-unknown">{{ extrasError }}</div>
+      <div class="picker-actions">
+        <button class="btn btn-sm btn-primary" @click="applyExtras">{{ extrasApplied ? '✓ Applied' : 'Apply' }}</button>
       </div>
     </div>
 
@@ -740,14 +876,14 @@ async function setDefault() {
     <!-- Preview tab content -->
     <div v-if="activeTab === 'preview'" class="preview-panel">
       <div class="preview-header">
-        <span class="preview-label">router.ini output</span>
+        <span class="preview-label">{{ isAudio ? 'models[] entry' : 'router.ini output' }}</span>
         <button class="btn btn-sm" @click="copyPreview">{{ copied ? '✓ Copied' : 'Copy' }}</button>
       </div>
-      <pre class="preview-code">{{ previewIni }}</pre>
+      <pre class="preview-code">{{ isAudio ? audioEntryPreview : previewIni }}</pre>
     </div>
 
     <!-- Export tab content -->
-    <div v-if="activeTab === 'export'" class="preview-panel">
+    <div v-if="activeTab === 'export' && !isAudio" class="preview-panel">
       <div class="preview-header">
         <span class="preview-label">Command line</span>
         <button class="btn btn-sm" @click="copyExport">{{ copiedExport ? '✓ Copied' : 'Copy' }}</button>

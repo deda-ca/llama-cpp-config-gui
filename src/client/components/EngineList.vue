@@ -2,6 +2,7 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import EngineEditor from './EngineEditor.vue';
 import StrataEditor from './StrataEditor.vue';
+import AudioEditor from './AudioEditor.vue';
 import type { EngineDefinition, EngineInstance, EngineKind, EngineParam } from '../types';
 import { ENGINE_KIND_LABELS } from '../types';
 
@@ -37,7 +38,7 @@ const isNewInstance = ref(false);
 const newKind = ref<EngineKind>('llamacpp');
 // Only kinds with a real driver get offered; the rest stay in the generic
 // editor's kind list for advanced use.
-const creatableKinds: EngineKind[] = ['llamacpp', 'strata'];
+const creatableKinds: EngineKind[] = ['llamacpp', 'strata', 'audio'];
 
 const statusOf = (i: EngineInstance) => props.statuses?.[i.id] ?? i.status ?? 'stopped';
 const isLive = (i: EngineInstance) => {
@@ -50,10 +51,12 @@ const kindOf = (i: EngineInstance): EngineKind =>
 
 // --port is a plain parameter now; the list column reads it back out.
 // Disabled rows never reach the command line, so they don't count here either.
-// strata keeps its port in the separate server-arg list instead.
+// strata keeps its port in the separate server-arg list instead, and audio in
+// its `port` config-key row.
 const portOf = (i: EngineInstance) => {
   const p = i.params.find((x) => (x.key === '--port' || x.key === '-p') && !x.disabled)
-    ?? i.strata?.serverArgs.find((x) => x.key === '--port' && !x.disabled);
+    ?? i.strata?.serverArgs.find((x) => x.key === '--port' && !x.disabled)
+    ?? i.audio?.serverArgs.find((x) => x.key === 'port' && !x.disabled);
   return p?.value ? `:${p.value}` : '';
 };
 
@@ -140,10 +143,14 @@ async function duplicateInstance(inst: EngineInstance) {
   error.value = '';
   try {
     // --port is a param now: shift the copy's port clear of every instance
-    const portKey = (p: EngineParam) => (p.key === '--port' || p.key === '-p') && !p.disabled;
+    const portKey = (p: EngineParam) => (p.key === '--port' || p.key === '-p' || p.key === 'port') && !p.disabled;
     const taken = new Set(
       instances.value
-        .map((i) => Number(i.params.find(portKey)?.value ?? i.strata?.serverArgs.find(portKey)?.value))
+        .map((i) => Number(
+          i.params.find(portKey)?.value
+          ?? i.strata?.serverArgs.find(portKey)?.value
+          ?? i.audio?.serverArgs.find(portKey)?.value,
+        ))
         .filter((n) => Number.isFinite(n)),
     );
     const params = inst.params.map((p) => ({ ...p }));
@@ -151,13 +158,18 @@ async function duplicateInstance(inst: EngineInstance) {
     const strata = inst.strata
       ? { ...inst.strata, engineArgs: inst.strata.engineArgs.map((p) => ({ ...p })), serverArgs: inst.strata.serverArgs.map((p) => ({ ...p })) }
       : undefined;
+    const audio = inst.audio
+      ? { ...inst.audio, serverArgs: inst.audio.serverArgs.map((p) => ({ ...p })), modelConfigIds: [...inst.audio.modelConfigIds], extra: { ...inst.audio.extra } }
+      : undefined;
     const strataPortRow = strata?.serverArgs.find(portKey);
-    const currentPort = Number(portRow?.value ?? strataPortRow?.value);
-    if (portRow || strataPortRow) {
+    const audioPortRow = audio?.serverArgs.find(portKey);
+    const currentPort = Number(portRow?.value ?? strataPortRow?.value ?? audioPortRow?.value);
+    if (portRow || strataPortRow || audioPortRow) {
       let port = Number.isFinite(currentPort) ? currentPort : (inst.kind === 'strata' ? 8095 : 8080);
       while (taken.has(port)) port++;
       if (portRow) portRow.value = String(port);
       if (strataPortRow) strataPortRow.value = String(port);
+      if (audioPortRow) audioPortRow.value = String(port);
     }
     const copy = await postJson('/api/engines/instances', 'POST', {
       name: `${inst.name}-copy`,
@@ -174,6 +186,7 @@ async function duplicateInstance(inst: EngineInstance) {
       mmproj: inst.mmproj ?? '',
       autoLaunch: false,
       ...(strata ? { strata } : {}),
+      ...(audio ? { audio } : {}),
     });
     await loadData();
   } catch (e) {
@@ -240,6 +253,14 @@ function deploymentOf(inst: EngineInstance, key: string): string {
 
 function modelNames(inst: EngineInstance): string {
   return inst.modelConfigIds
+    .map((id) => models.value.find((m) => m.id === id)?.alias ?? id)
+    .join(', ');
+}
+
+// The audio block keeps its model selection separately from the instance's
+// router-mode ids; the drawer shows the same names for it.
+function audioModelNames(inst: EngineInstance): string {
+  return (inst.audio?.modelConfigIds ?? [])
     .map((id) => models.value.find((m) => m.id === id)?.alias ?? id)
     .join(', ');
 }
@@ -329,9 +350,21 @@ onUnmounted(() => es?.close());
             <span class="drawer-label">Server</span>
             <code>{{ fmtParams(inst.strata.serverArgs) || '(defaults)' }}</code>
           </div>
+          <div v-if="inst.audio" class="drawer-section">
+            <span class="drawer-label">Audio</span>
+            <code>{{ inst.binary }} · cwd {{ inst.audio.cwd || '(not set)' }}</code>
+          </div>
+          <div v-if="inst.audio" class="drawer-section">
+            <span class="drawer-label">Server</span>
+            <code>{{ fmtParams(inst.audio.serverArgs) || '(defaults)' }}</code>
+          </div>
           <div v-if="inst.routerMode" class="drawer-section">
             <span class="drawer-label">Router</span>
             <code>{{ inst.modelConfigIds.length }} model(s): {{ modelNames(inst) || '(none selected)' }}</code>
+          </div>
+          <div v-else-if="inst.audio" class="drawer-section">
+            <span class="drawer-label">Models</span>
+            <code>{{ inst.audio.modelConfigIds.length }} model(s): {{ audioModelNames(inst) || '(none selected)' }}</code>
           </div>
           <div v-else-if="inst.modelPath" class="drawer-section">
             <span class="drawer-label">Model</span>
@@ -341,8 +374,15 @@ onUnmounted(() => es?.close());
       </div>
     </div>
 
+    <AudioEditor
+      v-if="editingInstance && kindOf(editingInstance) === 'audio'"
+      :instance="editingInstance"
+      :is-new="isNewInstance"
+      @saved="onEditorSaved"
+      @close="editingInstance = null"
+    />
     <StrataEditor
-      v-if="editingInstance && kindOf(editingInstance) === 'strata'"
+      v-else-if="editingInstance && kindOf(editingInstance) === 'strata'"
       :instance="editingInstance"
       :is-new="isNewInstance"
       @saved="onEditorSaved"

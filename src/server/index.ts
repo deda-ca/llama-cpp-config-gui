@@ -22,6 +22,13 @@ import {
 import { loadTemplate, saveTemplate } from './engines/template.js';
 import { normalizeStrataConfig, strataConfigPath, strataFromConfig, strataRepoRoot, strataToConfig } from './engines/strata.js';
 import { STRATA_SERVER_PARAMS, STRATA_VISION_PARAMS } from './engines/strataServerParams.js';
+import {
+  audioConfigPath,
+  audioFromConfig,
+  audioToConfig,
+  normalizeAudioConfig,
+} from './engines/audio.js';
+import { AUDIO_MODEL_PARAMS, AUDIO_SERVER_PARAMS } from './engines/audioServerParams.js';
 import { isEngineKind, type EngineDefinition, type EngineInstance, type EnginesFile } from './engines/types.js';
 import { getDriver } from './engines/driver.js';
 import type { WsMessage, LlamaConfig, GpuInfo, LlamaDevice, GpuSortMode, SystemStats } from './types.js';
@@ -738,6 +745,7 @@ app.post('/api/engines/command', (req, res) => {
       : [],
     autoLaunch: false,
     ...(body.strata ? { strata: normalizeStrataConfig(body.strata) } : {}),
+    ...(body.audio ? { audio: normalizeAudioConfig(body.audio) } : {}),
   } as EngineInstance;
 
   const spec = instanceToLlamaConfig(
@@ -755,6 +763,8 @@ app.post('/api/engines/command', (req, res) => {
     // A strata preview points at the file a real launch would write, so the
     // --config argument shown matches what runs.
     kind === 'strata' ? strataConfigPath(body.instanceId ?? '__preview__') : undefined,
+    // Same for an audio preview: `--config .config/audio-<id>.json`.
+    kind === 'audio' ? audioConfigPath(body.instanceId ?? '__preview__') : undefined,
   );
 
   // Kinds with a custom spawn plan (strata) preview that exact command; others
@@ -804,15 +814,16 @@ app.get('/api/engines/instances/draft', (req, res) => {
   const name = typeof req.query.name === 'string' && req.query.name.trim()
     ? req.query.name.trim()
     : `engine-${data.instances.length + 1}`;
-  // A strata draft is self-contained: it must not inherit a definition of a
-  // different kind, or blankInstance() would seed the wrong kind's template.
-  const def = kind === 'strata'
+  // A strata or audio draft is self-contained: it must not inherit a definition
+  // of a different kind, or blankInstance() would seed the wrong kind's template.
+  const selfContained = kind === 'strata' || kind === 'audio';
+  const def = selfContained
     ? undefined
     : data.definitions.find((d) => d.kind === kind) ?? data.definitions[0];
   const draft = blankInstance(name, def ?? { id: '', name, kind, buildPath: '', envVars: {} }, data);
   draft.kind = kind;
-  // A draft has no definition unless the kind needs one (strata is self-contained).
-  if (kind === 'strata') draft.definitionId = '';
+  // A draft has no definition unless the kind needs one (strata/audio are self-contained).
+  if (selfContained) draft.definitionId = '';
   res.json(draft);
 });
 
@@ -823,11 +834,11 @@ app.post('/api/engines/instances', (req, res) => {
     res.status(400).json({ error: 'name is required' });
     return;
   }
-  // A strata instance is self-contained (its whole config lives on the
+  // A strata or audio instance is self-contained (its whole config lives on the
   // instance), so it needs no shared definition. Other kinds attach to one.
   const kind = isEngineKind(req.body?.kind) ? req.body.kind : 'llamacpp';
   const def = data.definitions.find((d) => d.id === req.body?.definitionId);
-  if (!def && kind !== 'strata') {
+  if (!def && kind !== 'strata' && kind !== 'audio') {
     res.status(400).json({ error: 'a valid definitionId is required' });
     return;
   }
@@ -856,7 +867,8 @@ app.put('/api/engines/instances/:id', (req, res) => {
   // *before* touching the stored instance, so a rejected edit leaves no trace.
   const nextParams = body.params !== undefined ? normalizeEngineParams(body.params) : inst.params;
   const nextStrata = body.strata !== undefined ? normalizeStrataConfig(body.strata) : inst.strata;
-  const nextPort = instancePort({ params: nextParams, strata: nextStrata });
+  const nextAudio = body.audio !== undefined ? normalizeAudioConfig(body.audio) : inst.audio;
+  const nextPort = instancePort({ params: nextParams, strata: nextStrata, audio: nextAudio });
   if (nextPort !== null && isPortTaken(data, nextPort, inst.id)) {
     res.status(409).json({ error: `Port ${nextPort} is already used by another instance` });
     return;
@@ -891,7 +903,8 @@ app.put('/api/engines/instances/:id', (req, res) => {
   if (typeof body.mmproj === 'string') inst.mmproj = body.mmproj || undefined;
   inst.params = nextParams;
   if (body.strata !== undefined) inst.strata = nextStrata;
-  // '' clears the link: a self-contained (strata) instance has no definition.
+  if (body.audio !== undefined) inst.audio = nextAudio;
+  // '' clears the link: a self-contained (strata/audio) instance has no definition.
   if (typeof body.definitionId === 'string'
     && (body.definitionId === '' || data.definitions.some((d) => d.id === body.definitionId))) {
     inst.definitionId = body.definitionId;
@@ -945,6 +958,84 @@ app.get('/api/engines/instances/:id/strata/export', (req, res) => {
   res.json(strataToConfig(inst.strata));
 });
 
+// Import an audio.cpp config file (the `audio-cpp.json` shape): the server
+// options become the instance's audio block and each `models[]` entry becomes
+// a model config card with `type: 'audio'`, skipped when a card with that
+// alias already exists (same merge rule as the router INI import).
+app.post('/api/engines/audio/import', (req, res) => {
+  const raw = typeof req.body?.json === 'string' ? req.body.json : '';
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    res.status(400).json({ error: `Invalid JSON: ${(e as Error).message}` });
+    return;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    res.status(400).json({ error: 'Expected a JSON object' });
+    return;
+  }
+  const { audio, models } = audioFromConfig(parsed as Record<string, unknown>);
+  const data = loadModels();
+  const imported: ModelConfig[] = [];
+  for (const card of models) {
+    if (data.configs.some((c) => c.alias === card.alias)) continue;
+    const created: ModelConfig = { ...card, id: generateId() };
+    data.configs.push(created);
+    imported.push(created);
+  }
+  if (imported.length > 0) {
+    data.configOrder = data.configs.map((cfg) => cfg.id);
+    if (!data.defaultConfigId) {
+      data.defaultConfigId = data.configs[0].id;
+      data.configs[0].isDefault = true;
+    }
+    saveModels(data);
+    rebuildProxyRegistry();
+  }
+  res.json({ audio, models: imported, skipped: models.length - imported.length });
+});
+
+// Render a *draft* audio block (unsaved dialog edits included) plus selected
+// model config ids to the `audiocpp_server --config` JSON shape, so Export and
+// the Command tab preview work before the instance is saved.
+app.post('/api/engines/audio/render', (req, res) => {
+  const audio = normalizeAudioConfig(req.body?.audio);
+  if (!audio) {
+    res.status(400).json({ error: 'An audio configuration object is required' });
+    return;
+  }
+  const ids: string[] = Array.isArray(req.body?.modelConfigIds)
+    ? req.body.modelConfigIds.filter((x: unknown): x is string => typeof x === 'string')
+    : [];
+  const modelsData = loadModels();
+  const selected = ids
+    .map((id) => modelsData.configs.find((c) => c.id === id))
+    .filter((c): c is ModelConfig => !!c);
+  res.setHeader('Content-Disposition', `attachment; filename="${req.body?.instanceId || 'audio'}-draft.json"`);
+  res.json(audioToConfig(audio, selected, audio.cwd));
+});
+
+// Export an instance's audio block + selected model cards back to the
+// `audiocpp_server --config` JSON shape.
+app.get('/api/engines/instances/:id/audio/export', (req, res) => {
+  const inst = engines.getEngines().instances.find((i) => i.id === req.params.id);
+  if (!inst) {
+    res.status(404).json({ error: `Instance "${req.params.id}" not found` });
+    return;
+  }
+  if (!inst.audio) {
+    res.status(400).json({ error: 'Instance has no audio configuration' });
+    return;
+  }
+  const modelsData = loadModels();
+  const selected = inst.audio.modelConfigIds
+    .map((id) => modelsData.configs.find((c) => c.id === id))
+    .filter((c): c is ModelConfig => !!c);
+  res.setHeader('Content-Disposition', `attachment; filename="audio-${inst.id}.json"`);
+  res.json(audioToConfig(inst.audio, selected, inst.audio.cwd));
+});
+
 app.delete('/api/engines/instances/:id', (req, res) => {
   const id = req.params.id;
   const data = engines.getEngines();
@@ -961,10 +1052,10 @@ app.delete('/api/engines/instances/:id', (req, res) => {
 });
 
 /** Drop the generated launch files named from an instance id (router INI,
- * strata config). Both are rewritten on every launch, so this only clears the
- * stale copy a rename or delete leaves behind. */
+ * strata config, audio config). All are rewritten on every launch, so this
+ * only clears the stale copy a rename or delete leaves behind. */
 function removeGeneratedFiles(id: string): void {
-  for (const p of [routerIniPathFor(id), strataConfigPath(id)]) {
+  for (const p of [routerIniPathFor(id), strataConfigPath(id), audioConfigPath(id)]) {
     try {
       fs.rmSync(p, { force: true });
     } catch {
@@ -980,12 +1071,18 @@ function removeGeneratedFiles(id: string): void {
 async function buildLaunchSpec(
   inst: EngineInstance,
   data: EnginesFile,
-): Promise<{ spec?: LlamaConfig; error?: string; routerIniPath?: string; strataConfigPath?: string }> {
+): Promise<{
+  spec?: LlamaConfig;
+  error?: string;
+  routerIniPath?: string;
+  strataConfigPath?: string;
+  audioConfigPath?: string;
+}> {
   const kind = inst.kind || 'llamacpp';
   const def = data.definitions.find((d) => d.id === inst.definitionId);
-  // A strata instance carries its own config, so it needs no definition; every
-  // other kind launches through one (build folder + env).
-  if (!def && kind !== 'strata') {
+  // A strata or audio instance carries its own config, so it needs no
+  // definition; every other kind launches through one (build folder + env).
+  if (!def && kind !== 'strata' && kind !== 'audio') {
     return { error: `Instance references missing definition "${inst.definitionId}"` };
   }
   const effDef: EngineDefinition = def ?? { id: '', name: inst.name, kind, buildPath: '', envVars: {} };
@@ -1027,8 +1124,36 @@ async function buildLaunchSpec(
     }
   }
 
-  const spec = instanceToLlamaConfig(inst, effDef, routerIniPath, generatedConfigPath);
-  return { spec, routerIniPath, strataConfigPath: generatedConfigPath };
+  // Audio.cpp reads one JSON file holding the server options *and* the models,
+  // so the launch writes `.config/audio-<id>.json` from the instance block plus
+  // the selected model cards. Relative paths inside it are absolutized against
+  // the run folder — audio.cpp resolves them against the file's own folder.
+  let generatedAudioPath: string | undefined;
+  if (kind === 'audio') {
+    if (!inst.audio) return { error: 'This audio engine has no configuration yet' };
+    if (!inst.audio.cwd.trim()) return { error: 'Set the run folder before launching' };
+    const modelsData = loadModels();
+    const selected = inst.audio.modelConfigIds
+      .map((id) => modelsData.configs.find((c) => c.id === id))
+      .filter((c): c is ModelConfig => !!c);
+    if (selected.length === 0) {
+      return { error: 'Select at least one audio model config before launching' };
+    }
+    generatedAudioPath = audioConfigPath(inst.id);
+    try {
+      fs.mkdirSync(path.dirname(generatedAudioPath), { recursive: true });
+      fs.writeFileSync(
+        generatedAudioPath,
+        JSON.stringify(audioToConfig(inst.audio, selected, inst.audio.cwd), null, 2),
+        'utf-8',
+      );
+    } catch (e) {
+      return { error: `Failed to write audio config: ${e}` };
+    }
+  }
+
+  const spec = instanceToLlamaConfig(inst, effDef, routerIniPath, generatedConfigPath, generatedAudioPath);
+  return { spec, routerIniPath, strataConfigPath: generatedConfigPath, audioConfigPath: generatedAudioPath };
 }
 
 // Launch an engine instance from its stored definition + settings.
@@ -1053,6 +1178,7 @@ app.post('/api/engines/instances/:id/launch', async (req, res) => {
     status: engines.getStatus(id),
     routerIniPath: built.routerIniPath ?? null,
     strataConfigPath: built.strataConfigPath ?? null,
+    audioConfigPath: built.audioConfigPath ?? null,
   });
 });
 
@@ -1200,6 +1326,12 @@ app.post('/api/models/configs', (req, res) => {
     chatTemplateFile: req.body.chatTemplateFile,
     params: req.body.params || {},
     paramOrder: req.body.paramOrder || [],
+    // Engine family the card configures (absent = llamacpp): decides which
+    // catalog the editor loads and which generator renders it.
+    ...(typeof req.body.type === 'string' && req.body.type ? { type: req.body.type } : {}),
+    ...(req.body.audioExtras && typeof req.body.audioExtras === 'object' && !Array.isArray(req.body.audioExtras)
+      ? { audioExtras: req.body.audioExtras as Record<string, unknown> }
+      : {}),
     includeInLaunch: true,
     isDefault: false,
   };
@@ -1360,6 +1492,19 @@ app.get('/api/params/strata-server', (_req, res) => {
 // keys of the config's "vision" object, read by serve/server.py's Vision class.
 app.get('/api/params/strata-vision', (_req, res) => {
   res.json(STRATA_VISION_PARAMS);
+});
+
+// The audiocpp_server option list (audio kind's "Server" group). Fixed by the
+// server's own parser (app/server/config.cpp), so it ships with the app.
+app.get('/api/params/audio-server', (_req, res) => {
+  res.json(AUDIO_SERVER_PARAMS);
+});
+
+// The model-card key list (audio kind's model editor). These are the scalar
+// keys of a `models[]` entry; the option maps are prefixed rows and the nested
+// shapes live in the card's raw-JSON extras.
+app.get('/api/params/audio-model', (_req, res) => {
+  res.json(AUDIO_MODEL_PARAMS);
 });
 
 app.post('/api/params/refresh', async (_req, res) => {

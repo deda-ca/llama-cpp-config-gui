@@ -308,16 +308,20 @@ describe('driver selection', () => {
       [
         { id: 'd-llama', name: 'llama', kind: 'llamacpp', buildPath: '/opt/llama', envVars: {} },
         { id: 'd-audio', name: 'audio', kind: 'audio', buildPath: '/opt/audio', envVars: {} },
+        { id: 'd-sdiff', name: 'sdiff', kind: 'sdiffusion', buildPath: '/opt/sdiff', envVars: {} },
       ],
       [
         { id: 'i-llama', name: 'llama', notes: '', definitionId: 'd-llama', binary: 'llama-server', params: [], routerMode: false, modelConfigIds: [] },
         { id: 'i-audio', name: 'audio', notes: '', definitionId: 'd-audio', binary: 'audio-server', params: [], routerMode: false, modelConfigIds: [] },
+        { id: 'i-sdiff', name: 'sdiff', notes: '', definitionId: 'd-sdiff', binary: 'sdiff-server', params: [], routerMode: false, modelConfigIds: [] },
       ],
     );
     const mgr = new EngineManager();
     expect(mgr.driverFor('i-llama').kind).toBe('llamacpp');
+    // audio.cpp has its own driver now (docs/audio.md)
+    expect(mgr.driverFor('i-audio').kind).toBe('audio');
     // kinds without a dedicated driver fall back to passthrough
-    expect(mgr.driverFor('i-audio').kind).toBe('custom');
+    expect(mgr.driverFor('i-sdiff').kind).toBe('custom');
   });
 });
 

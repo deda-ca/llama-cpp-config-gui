@@ -21,6 +21,7 @@ import type { LogEntry, ParsedLog } from './llama.js';
 import type { EngineKind } from './types.js';
 import { llamaDriver } from './llama.js';
 import { strataDriver } from './strataDriver.js';
+import { audioDriver } from './audioDriver.js';
 import { passthroughDriver } from './passthrough.js';
 
 /** Result of probing a build folder for version/build info. */
@@ -72,6 +73,7 @@ export interface EngineDriver {
 const drivers = new Map<EngineKind, EngineDriver>([
   [llamaDriver.kind, llamaDriver],
   [strataDriver.kind, strataDriver],
+  [audioDriver.kind, audioDriver],
 ]);
 
 /** Look up the driver for a kind; unknown kinds get the passthrough driver. */

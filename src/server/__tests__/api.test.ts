@@ -801,3 +801,224 @@ describe('Strata Engine API', () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe('Audio Engine API', () => {
+  let audioId: string;
+  let audioModelIds: string[] = [];
+
+  it('GET /api/params/audio-server returns the audiocpp_server catalog', async () => {
+    const res = await request(app).get('/api/params/audio-server');
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
+    // Audio server options are config keys, so flag === key (no leading dashes).
+    expect(res.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'host', flag: 'host', category: 'network' }),
+      expect.objectContaining({ key: 'port', flag: 'port' }),
+      expect.objectContaining({ key: 'backend', inputType: 'select' }),
+      expect.objectContaining({ key: 'lazy_load', inputType: 'toggle' }),
+    ]));
+  });
+
+  it('GET /api/params/audio-model returns the model-key catalog', async () => {
+    const res = await request(app).get('/api/params/audio-model');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'family', flag: 'family', category: 'identity' }),
+      expect.objectContaining({ key: 'task', inputType: 'select' }),
+      expect.objectContaining({ key: 'mode', inputType: 'select' }),
+    ]));
+  });
+
+  it('GET /api/engines/instances/draft?kind=audio seeds an audio block without saving', async () => {
+    const before = (await request(app).get('/api/engines')).body.instances.length;
+    const res = await request(app).get('/api/engines/instances/draft?kind=audio');
+    expect(res.status).toBe(200);
+    expect(res.body.kind).toBe('audio');
+    // Self-contained: an audio draft has no definition link.
+    expect(res.body.definitionId).toBe('');
+    expect(res.body.binary).toBe('audiocpp_server');
+    expect(res.body.audio).toBeTruthy();
+    expect(res.body.audio.serverArgs).toEqual(expect.arrayContaining([
+      { key: 'host', value: '127.0.0.1' },
+      { key: 'backend', value: 'cuda' },
+    ]));
+    const after = (await request(app).get('/api/engines')).body.instances.length;
+    expect(after).toBe(before);
+  });
+
+  it('POST /api/engines/audio/import creates a model card per models[] entry', async () => {
+    const file = {
+      host: '0.0.0.0',
+      port: 5455,
+      backend: 'cuda',
+      device: 0,
+      threads: 8,
+      lazy_load: true,
+      cors_origins: '*',
+      models: [
+        {
+          id: 'breeze_tts_2',
+          family: 'breeze_tts',
+          path: 'models/Breeze-TTS-2/breeze.gguf',
+          task: ['tts', 'clon', 'vdes'],
+          mode: 'streaming',
+          default_request_options: { instruction: 'radio host' },
+        },
+        { id: 'qwen3-asr', family: 'qwen3_asr', path: 'models/Qwen3-ASR/qwen.gguf', task: 'asr', mode: 'streaming' },
+      ],
+    };
+    const res = await request(app).post('/api/engines/audio/import').send({ json: JSON.stringify(file) });
+    expect(res.status).toBe(200);
+    const a = res.body.audio;
+    expect(a.serverArgs).toEqual(expect.arrayContaining([
+      { key: 'host', value: '0.0.0.0' },
+      { key: 'port', value: '5455' },
+      { key: 'backend', value: 'cuda' },
+      { key: 'cors_origins', value: '*' },
+    ]));
+    expect(res.body.models).toHaveLength(2);
+    audioModelIds = res.body.models.map((m: any) => m.id);
+    // The created cards carry type: 'audio' and the task array survives in extras.
+    const cards = (await request(app).get('/api/models')).body.configs.filter((c: any) => audioModelIds.includes(c.id));
+    expect(cards.every((c: any) => c.type === 'audio')).toBe(true);
+    const breeze = cards.find((c: any) => c.alias === 'breeze_tts_2');
+    expect(breeze.audioExtras?.task).toEqual(['tts', 'clon', 'vdes']);
+    expect(breeze.params['default_request_options.instruction']).toBe('radio host');
+  });
+
+  it('POST /api/engines/audio/import skips a card whose alias already exists', async () => {
+    const file = { models: [{ id: 'qwen3-asr', family: 'qwen3_asr', path: '/x.gguf' }] };
+    const res = await request(app).post('/api/engines/audio/import').send({ json: JSON.stringify(file) });
+    expect(res.status).toBe(200);
+    expect(res.body.models).toHaveLength(0);
+    expect(res.body.skipped).toBe(1);
+  });
+
+  it('POST /api/engines/audio/import rejects invalid JSON and non-objects', async () => {
+    expect((await request(app).post('/api/engines/audio/import').send({ json: '{' })).status).toBe(400);
+    expect((await request(app).post('/api/engines/audio/import').send({ json: '[1,2]' })).status).toBe(400);
+  });
+
+  it('POST /api/engines/instances accepts kind=audio without a definitionId', async () => {
+    const res = await request(app)
+      .post('/api/engines/instances')
+      .send({ name: 'Audio TTS', kind: 'audio' });
+    expect(res.status).toBe(200);
+    expect(res.body.kind).toBe('audio');
+    expect(res.body.definitionId).toBe('');
+    expect(res.body.binary).toBe('audiocpp_server');
+    const port = res.body.audio.serverArgs.find((p: any) => p.key === 'port').value;
+    expect(Number(port)).toBeGreaterThanOrEqual(8080);
+    audioId = res.body.id;
+  });
+
+  it('PUT /api/engines/instances/:id round-trips the audio block and port conflict', async () => {
+    const block = {
+      cwd: '/home/u/Programs/AI',
+      serverArgs: [
+        { key: 'host', value: '0.0.0.0' },
+        { key: 'port', value: '8130' },
+        { key: 'backend', value: 'cuda' },
+        { key: 'threads', value: '8' },
+        { key: 'lazy_load' },
+      ],
+      modelConfigIds: audioModelIds,
+      extra: { live_ingest: { idle_timeout_ms: 5000 } },
+    };
+    const res = await request(app)
+      .put(`/api/engines/instances/${audioId}`)
+      .send({ audio: block, autoLaunch: true });
+    expect(res.status).toBe(200);
+    expect(res.body.autoLaunch).toBe(true);
+    expect(res.body.audio).toEqual(block);
+
+    // The audio port participates in the port conflict check like a param.
+    const clash = await request(app)
+      .put(`/api/engines/instances/${audioId}`)
+      .send({ audio: { ...block, serverArgs: [{ key: 'port', value: '8080' }] } });
+    expect(clash.status).toBe(409);
+  });
+
+  it('GET /api/engines/instances/:id/audio/export renders the file shape with absolute paths', async () => {
+    const res = await request(app).get(`/api/engines/instances/${audioId}/audio/export`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-disposition']).toContain(`audio-${audioId}.json`);
+    expect(res.body).toMatchObject({ host: '0.0.0.0', port: 8130, backend: 'cuda', live_ingest: { idle_timeout_ms: 5000 } });
+    const models = res.body.models as Record<string, unknown>[];
+    expect(models).toHaveLength(2);
+    // Relative model paths become absolute against the run folder.
+    expect(models[0].path).toBe('/home/u/Programs/AI/models/Breeze-TTS-2/breeze.gguf');
+    expect(models[0].task).toEqual(['tts', 'clon', 'vdes']);
+  });
+
+  it('audio export 400s for an instance without an audio block', async () => {
+    const res = await request(app).get('/api/engines/instances/default/audio/export');
+    expect(res.status).toBe(400);
+  });
+
+  it('POST /api/engines/audio/render round-trips a draft block', async () => {
+    const res = await request(app)
+      .post('/api/engines/audio/render')
+      .send({
+        audio: { cwd: '/base', serverArgs: [{ key: 'port', value: '9000' }], modelConfigIds: [], extra: { ui: false } },
+        modelConfigIds: [],
+      });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ui: false, port: 9000, models: [] });
+  });
+
+  it('POST /api/engines/command previews the audiocpp_server --config spawn plan', async () => {
+    const res = await request(app)
+      .post('/api/engines/command')
+      .send({
+        kind: 'audio',
+        instanceId: audioId,
+        executable: 'audio.cpp/build/bin/audiocpp_server',
+        audio: { cwd: '/home/u/Programs/AI', serverArgs: [{ key: 'port', value: '8130' }] },
+      });
+    expect(res.status).toBe(200);
+    // A relative binary resolves against the run folder; cwd is the run folder.
+    expect(res.body.binaryPath).toBe('/home/u/Programs/AI/audio.cpp/build/bin/audiocpp_server');
+    expect(res.body.cwd).toBe('/home/u/Programs/AI');
+    expect(res.body.args).toEqual(['--config', expect.stringContaining(`audio-${audioId}.json`)]);
+  });
+
+  it('launching an audio instance writes the generated config file', async () => {
+    const res = await request(app).post(`/api/engines/instances/${audioId}/launch`);
+    expect(res.status).toBe(200);
+    expect(res.body.routerIniPath).toBeNull();
+    const generated = res.body.audioConfigPath;
+    expect(generated).toContain(`audio-${audioId}.json`);
+    const written = JSON.parse(fs.readFileSync(generated, 'utf-8'));
+    expect(written).toMatchObject({ host: '0.0.0.0', port: 8130, backend: 'cuda' });
+    expect((written.models as any[]).map((m) => m.id).sort()).toEqual(['breeze_tts_2', 'qwen3-asr']);
+    await request(app).post(`/api/engines/instances/${audioId}/stop`);
+  });
+
+  it('launch rejects an audio instance without a run folder', async () => {
+    const get = await request(app).get('/api/engines');
+    const inst = get.body.instances.find((i: any) => i.id === audioId);
+    await request(app)
+      .put(`/api/engines/instances/${audioId}`)
+      .send({ audio: { ...inst.audio, cwd: '' } });
+    const res = await request(app).post(`/api/engines/instances/${audioId}/launch`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('run folder');
+  });
+
+  it('launch rejects an audio instance with no selected models', async () => {
+    const get = await request(app).get('/api/engines');
+    const inst = get.body.instances.find((i: any) => i.id === audioId);
+    await request(app)
+      .put(`/api/engines/instances/${audioId}`)
+      .send({ audio: { ...inst.audio, cwd: '/home/u/Programs/AI', modelConfigIds: [] } });
+    const res = await request(app).post(`/api/engines/instances/${audioId}/launch`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('model');
+  });
+
+  it('deletes the audio instance', async () => {
+    const res = await request(app).delete(`/api/engines/instances/${audioId}`);
+    expect(res.status).toBe(200);
+  });
+});

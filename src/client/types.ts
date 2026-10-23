@@ -25,6 +25,16 @@ export interface ModelConfig {
   disabledParams?: string[];
   /** Whether this config is included in router launches (checkbox in the list) */
   includeInLaunch?: boolean;
+  /**
+   * Engine family this card configures (absent = 'llamacpp'). Decides which
+   * parameter catalog the editor loads and which generator renders it.
+   */
+  type?: string;
+  /**
+   * audio.cpp only: model keys too nested for flat rows (`voice_presets`,
+   * `live_ingest`, …), preserved verbatim on export.
+   */
+  audioExtras?: Record<string, unknown>;
   isDefault: boolean;
 }
 
@@ -134,6 +144,8 @@ export interface EngineInstance {
   autoLaunch: boolean;
   /** strata only: self-contained engine/server/vision config. */
   strata?: StrataConfig;
+  /** audio.cpp only: self-contained server config (see AudioConfig). */
+  audio?: AudioConfig;
   /** Live process status, added by GET /api/engines. */
   status?: 'stopped' | 'starting' | 'running' | 'exited' | 'error';
 }
@@ -160,6 +172,22 @@ export interface StrataConfig {
  */
 export interface StrataVisionConfig {
   args: EngineParam[];
+}
+
+/**
+ * audio.cpp launch config (mirrors src/server/engines/types.ts).
+ * `audiocpp_server` reads one JSON file holding the server options plus the
+ * `models[]` array, so the block is self-contained like strata's. Rows in
+ * `serverArgs` are keyed by the JSON key verbatim (`host`, `port`, `backend`,
+ * …); `modelConfigIds` selects model cards carrying `type: 'audio'`; `extra`
+ * preserves keys the UI has no field for (`live_ingest`, `frontend_options`, …).
+ */
+export interface AudioConfig {
+  /** Folder the server runs from. The executable is the instance's `binary`. */
+  cwd: string;
+  serverArgs: EngineParam[];
+  modelConfigIds: string[];
+  extra: Record<string, unknown>;
 }
 
 export interface EnginesResponse {

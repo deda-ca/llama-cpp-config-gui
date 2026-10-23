@@ -60,6 +60,38 @@ describe('loadModels / saveModels', () => {
     readFileSync.mockReturnValue('{ not valid json');
     expect(loadModels()).toEqual(emptyModels);
   });
+
+  it('preserves a card type and audioExtras on load', () => {
+    const data: any = {
+      configs: [
+        {
+          id: 'a', alias: 'A', displayName: 'A', notes: '', modelPath: '/a.gguf',
+          params: {}, paramOrder: [], isDefault: true,
+          type: 'audio', audioExtras: { voice_presets: { r: { voice_ref: '/v.wav' } } },
+        },
+      ],
+      templates: [],
+      defaultConfigId: 'a',
+    };
+    readFileSync.mockReturnValue(JSON.stringify(data));
+    const loaded = loadModels();
+    expect(loaded.configs[0].type).toBe('audio');
+    expect(loaded.configs[0].audioExtras).toEqual({ voice_presets: { r: { voice_ref: '/v.wav' } } });
+  });
+
+  it('drops a non-string type or non-object audioExtras defensively', () => {
+    const data: any = {
+      configs: [
+        { id: 'a', alias: 'A', displayName: 'A', notes: '', modelPath: '/a.gguf', params: {}, paramOrder: [], isDefault: true, type: 5, audioExtras: [1, 2] },
+      ],
+      templates: [],
+      defaultConfigId: 'a',
+    };
+    readFileSync.mockReturnValue(JSON.stringify(data));
+    const loaded = loadModels();
+    expect(loaded.configs[0].type).toBeUndefined();
+    expect(loaded.configs[0].audioExtras).toBeUndefined();
+  });
 });
 
 describe('loadParams / saveParams', () => {

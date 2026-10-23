@@ -69,6 +69,13 @@ export interface LlamaConfig {
    * `routerIniPath`, so the driver itself stays side-effect free.
    */
   strataConfigPath?: string;
+  /**
+   * audio kind: the generated `audio-<instance>.json` `audiocpp_server` is
+   * launched with (`--config`). Same caller-generated pattern as
+   * `strataConfigPath` — the file holds the server options and the models[]
+   * array, since audio.cpp has no CLI flag that adds a model.
+   */
+  audioConfigPath?: string;
 }
 
 export interface PerfMetrics {

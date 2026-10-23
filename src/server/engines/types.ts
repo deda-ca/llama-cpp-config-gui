@@ -97,6 +97,41 @@ export interface StrataVisionConfig {
   args: EngineParam[];
 }
 
+/**
+ * audio.cpp launch config (docs/audio.md §2.2, docs/todo.md #21 Phase 4).
+ *
+ * `audiocpp_server` takes one JSON file holding everything — server options
+ * plus the `models[]` array — and has no CLI flag that adds a model, so the
+ * file is the whole launch story (like strata's `strata-<model>.json`). The
+ * models themselves are ordinary model configs in models.json with
+ * `type: 'audio'`; an instance selects them by id, exactly like llama.cpp
+ * router mode selects model configs for its generated INI.
+ *
+ * `serverArgs` rows are keyed by the JSON key verbatim (`host`, `port`,
+ * `backend`, `device`, `threads`, `lazy_load`, …) because these are config
+ * keys, not CLI flags — the same rule strata's deployment/vision rows follow.
+ *
+ * `extra` preserves keys the UI has no field for (`live_ingest`,
+ * `frontend_listener`, `frontend_options`, `log_request_body`, …) verbatim so
+ * an import → export round-trip never loses data.
+ */
+export interface AudioConfig {
+  /** Folder the server runs from: the parent holding `audio.cpp/` and
+   * `models/`. Relative model paths in the generated file resolve against the
+   * config file's folder, so the generator emits absolute paths instead. The
+   * executable itself is the instance's `binary` field (absolute, or resolved
+   * against this folder) — the same split strata uses for its interpreter. */
+  cwd: string;
+  /** Server-level config keys as ordered rows (host, port, backend, device,
+   * threads, lazy_load, cors_origins, busy_timeout_ms, …). */
+  serverArgs: EngineParam[];
+  /** Model config ids (models.json entries with `type: 'audio'`) written into
+   * the generated file's `models[]` array. */
+  modelConfigIds: string[];
+  /** Config keys with no UI field, preserved verbatim and re-emitted on export. */
+  extra: Record<string, unknown>;
+}
+
 /** A launchable engine: definition + runtime settings + model selection. */
 export interface EngineInstance {
   /** Stable slug id, derived from name on creation. */
@@ -127,6 +162,8 @@ export interface EngineInstance {
   autoLaunch: boolean;
   /** strata only: self-contained engine/server/vision config (see StrataConfig). */
   strata?: StrataConfig;
+  /** audio.cpp only: self-contained server config (see AudioConfig). */
+  audio?: AudioConfig;
 }
 
 export interface EnginesFile {
@@ -151,6 +188,11 @@ export function defaultBinaryForKind(kind: EngineKind): string {
       // serve/server.py is a Python module, so the "executable" is the
       // interpreter the driver runs `-m serve.server` with.
       return 'python3';
+    case 'audio':
+      // audiocpp_server is a single binary; the instance names it (absolute
+      // path, or resolved against the audio block's cwd — audio is
+      // self-contained, so there is no definition build folder to join).
+      return 'audiocpp_server';
     default:
       return '';
   }

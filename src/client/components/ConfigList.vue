@@ -27,6 +27,9 @@ const editing = ref(false); // false = view mode (list only), true = editor open
 const showNewModal = ref(false);
 const newAlias = ref('');
 const newTemplateId = ref('');
+// Engine family for a new card (docs/audio.md §2.5): '' = llama.cpp, the
+// default every pre-existing card uses. Templates only apply to llama.cpp.
+const newType = ref('');
 const dragId = ref<string | null>(null);
 const dropTargetId = ref<string | null>(null);
 const dragEnabledId = ref<string | null>(null);
@@ -64,6 +67,11 @@ async function toggleParam(cfg: ModelConfig, key: string) {
 function truncateNotes(notes: string, max = 128): string {
   const flat = (notes || '').replace(/\s+/g, ' ').trim();
   return flat.length > max ? flat.slice(0, max).trimEnd() + '…' : flat;
+}
+
+// Type badge so llama.cpp and audio.cpp cards stay readable in one list.
+function typeLabel(type?: string): string {
+  return type === 'audio' ? 'audio.cpp' : '';
 }
 
 // --- Process state (shared llama-server process) ---
@@ -172,9 +180,12 @@ async function loadData() {
       const leftover = (data.configs || []).filter((c: ModelConfig) => !orderedIds.includes(c.id));
       configs.value.push(...leftover);
       templates.value = data.templates;
-      // Restore persisted launch selection
+      // Restore persisted launch selection. Router launch is a llama.cpp
+      // feature, so typed cards (audio.cpp …) never join it.
       selectedForLaunch.value = new Set(
-        configs.value.filter((c: ModelConfig) => c.includeInLaunch).map((c: ModelConfig) => c.id),
+        configs.value
+          .filter((c: ModelConfig) => c.includeInLaunch && !c.type)
+          .map((c: ModelConfig) => c.id),
       );
       // Auto-select default config
       if (data.defaultConfigId) {
@@ -207,7 +218,12 @@ async function createConfig() {
   const res = await fetch('/api/models/configs', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ alias, params: initParams, paramOrder: initOrder }),
+    body: JSON.stringify({
+      alias,
+      params: initParams,
+      paramOrder: initOrder,
+      ...(newType.value ? { type: newType.value } : {}),
+    }),
   });
   if (res.ok) {
     const newConfig = await res.json();
@@ -216,6 +232,7 @@ async function createConfig() {
     showNewModal.value = false;
     newAlias.value = '';
     newTemplateId.value = '';
+    newType.value = '';
   }
 }
 
@@ -400,6 +417,7 @@ async function exportIni() {
             @click.stop
           >⋮</button>
           <input
+            v-if="!cfg.type"
             type="checkbox"
             class="launch-check"
             :checked="selectedForLaunch.has(cfg.id)"
@@ -409,13 +427,14 @@ async function exportIni() {
           />
           <div class="config-item-text">
             <span class="config-alias">{{ cfg.alias }}</span>
+            <span v-if="typeLabel(cfg.type)" class="type-badge">{{ typeLabel(cfg.type) }}</span>
             <span v-if="getSpeeds(cfg)" class="config-speeds">
               <template v-if="getSpeeds(cfg)!.prefillTokensPerSec != null">⚡ {{ getSpeeds(cfg)!.prefillTokensPerSec!.toFixed(0) }} t/s</template>
               <template v-if="getSpeeds(cfg)!.generationTokensPerSec != null"> · ✍ {{ getSpeeds(cfg)!.generationTokensPerSec!.toFixed(1) }} t/s</template>
             </span>
           </div>
           <!-- Badge toggles: extensible, add more param toggles here -->
-          <div class="item-badges">
+          <div v-if="!cfg.type" class="item-badges">
             <button
               class="badge-toggle"
               :class="{ on: isParamOn(cfg, 'load-on-startup') }"
@@ -452,8 +471,13 @@ async function exportIni() {
         <h3>New Model Config</h3>
         <label>Alias</label>
         <input v-model="newAlias" type="text" placeholder="e.g. Qwen3.8-27b:UD-Q4_K_XL" @keyup.enter="createConfig" />
+        <label>Engine type</label>
+        <select v-model="newType">
+          <option value="">llama.cpp</option>
+          <option value="audio">audio.cpp</option>
+        </select>
         <label>Start from template (optional)</label>
-        <select v-model="newTemplateId">
+        <select v-model="newTemplateId" :disabled="!!newType">
           <option value="">Blank</option>
           <option v-for="tpl in templates" :key="tpl.id" :value="tpl.id">{{ tpl.name }}</option>
         </select>
@@ -558,6 +582,16 @@ async function exportIni() {
 .config-item[draggable] { cursor: grab; }
 .config-item:hover { background: #21262d; }
 .config-item.active { background: #1f6feb22; border-color: #1f6feb55; }
+
+.type-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid #30363d;
+  background: #21262d;
+  color: #8b949e;
+  font-size: 0.68rem;
+}
 .config-item.drop-after { border-bottom-color: #58a6ff; box-shadow: inset 0 -2px 0 #58a6ff; }
 
 .config-item-main {
