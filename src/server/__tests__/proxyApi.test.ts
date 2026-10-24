@@ -1,4 +1,19 @@
 // Reuse the same side-effect neutralizers as api.test.ts
+// Isolate the .config directory BEFORE the app module loads (its module-level
+// side effects — loadConfig, the engines file load — read the real .config and
+// would leak the developer's engine instances into these tests: an audio
+// instance there makes syncAudioBackends add a 4th proxy backend).
+const tmpDir = vi.hoisted(() => {
+  const fs = require('fs') as typeof import('fs');
+  const os = require('os') as typeof import('os');
+  const path = require('path') as typeof import('path');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'proxy-api-test-'));
+  fs.mkdirSync(path.join(dir, '.config'), { recursive: true });
+  (globalThis as any).__originalCwd = process.cwd();
+  process.chdir(dir);
+  return dir;
+});
+
 vi.mock('../gpu.js', () => ({
   startGpuPolling: () => ({ stop: () => {}, setInterval: () => {} }),
   queryGpus: async () => [],
@@ -35,21 +50,14 @@ vi.mock('http', async () => {
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import request from 'supertest';
 import fs from 'fs';
-import os from 'os';
-import path from 'path';
 import { app } from '../index.js';
 
-let tmpDir: string;
-let originalCwd: string;
-
 beforeAll(() => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'proxy-api-test-'));
-  originalCwd = process.cwd();
-  process.chdir(tmpDir);
+  // cwd already switched to tmpDir by the hoisted block above
 });
 
 afterAll(() => {
-  process.chdir(originalCwd);
+  process.chdir((globalThis as any).__originalCwd);
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
