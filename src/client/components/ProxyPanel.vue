@@ -449,12 +449,12 @@ onUnmounted(() => {
     <!-- Settings row -->
     <div class="settings-row" v-if="settings">
       <label class="field">
-        <span>Port</span>
-        <input type="number" v-model.number="settings.port" min="1" max="65535" />
-      </label>
-      <label class="field">
         <span>Host</span>
         <input type="text" v-model="settings.host" />
+      </label>
+      <label class="field">
+        <span>Port</span>
+        <input type="number" v-model.number="settings.port" min="1" max="65535" />
       </label>
       <label class="field">
         <span>API Key</span>
