@@ -1498,6 +1498,19 @@ app.put('/api/models/configs/:id/launch-include', (req, res) => {
   res.json(cfg);
 });
 
+// Toggle the favorite (star) flag on a config (persisted, UI-only marker)
+app.put('/api/models/configs/:id/favorite', (req, res) => {
+  const data = loadModels();
+  const cfg = data.configs.find((c) => c.id === req.params.id);
+  if (!cfg) {
+    res.status(404).json({ error: 'Config not found' });
+    return;
+  }
+  cfg.favorite = !!req.body?.favorite;
+  saveModels(data);
+  res.json(cfg);
+});
+
 app.delete('/api/models/configs/:id', (req, res) => {
   const data = loadModels();
   data.configs = data.configs.filter((c) => c.id !== req.params.id);

@@ -61,6 +61,8 @@ export interface ModelConfig {
   disabledParams?: string[];
   /** Whether this config is included in router launches (checkbox in the list) */
   includeInLaunch?: boolean;
+  /** Starred in the model list — purely a UI marker, ignored by launchers */
+  favorite?: boolean;
   /**
    * Engine family this card configures (docs/audio.md §2.1). The type decides
    * which parameter catalog the card edits and what the generated launch file

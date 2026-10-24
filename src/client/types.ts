@@ -25,6 +25,8 @@ export interface ModelConfig {
   disabledParams?: string[];
   /** Whether this config is included in router launches (checkbox in the list) */
   includeInLaunch?: boolean;
+  /** Starred in the model list — UI-only marker, ignored by launchers */
+  favorite?: boolean;
   /**
    * Engine family this card configures (absent = 'llamacpp'). Decides which
    * parameter catalog the editor loads and which generator renders it.

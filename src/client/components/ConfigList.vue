@@ -13,8 +13,6 @@ const props = defineProps<{
   modelMetrics?: Record<string, ModelSpeeds>;
 }>();
 
-const emit = defineEmits(['open-env']);
-
 function getSpeeds(cfg: ModelConfig): ModelSpeeds | null {
   return props.modelMetrics?.[cfg.alias] || null;
 }
@@ -36,30 +34,13 @@ const dragEnabledId = ref<string | null>(null);
 
 const selectedConfig = computed(() => configs.value.find((c) => c.id === selectedId.value) || null);
 
-// True when a param is enabled (present, not "off", and not disabled)
-function isParamOn(cfg: ModelConfig, key: string): boolean {
-  const val = cfg.params[key];
-  if (!val || val.toLowerCase() === 'off') return false;
-  if ((cfg.disabledParams || []).includes(key)) return false;
-  return true;
-}
-
-// Toggle a param on/off directly from the list and persist it
-async function toggleParam(cfg: ModelConfig, key: string) {
-  const turningOn = !isParamOn(cfg, key);
-  if (turningOn) {
-    cfg.params[key] = 'on';
-    cfg.paramOrder = [...new Set([...cfg.paramOrder, key])];
-    cfg.disabledParams = (cfg.disabledParams || []).filter((k) => k !== key);
-  } else {
-    cfg.params[key] = 'off';
-    if (!cfg.disabledParams) cfg.disabledParams = [];
-    if (!cfg.disabledParams.includes(key)) cfg.disabledParams.push(key);
-  }
-  await fetch(`/api/models/configs/${cfg.id}`, {
+// Toggle the star on a model card and persist it (UI-only marker)
+async function toggleFavorite(cfg: ModelConfig) {
+  cfg.favorite = !cfg.favorite;
+  await fetch(`/api/models/configs/${cfg.id}/favorite`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(cfg),
+    body: JSON.stringify({ favorite: cfg.favorite }),
   }).catch(() => { /* non-fatal */ });
 }
 
@@ -69,100 +50,24 @@ function truncateNotes(notes: string, max = 128): string {
   return flat.length > max ? flat.slice(0, max).trimEnd() + '…' : flat;
 }
 
-// Type badge so llama.cpp and audio.cpp cards stay readable in one list.
-function typeLabel(type?: string): string {
-  return type === 'audio' ? 'audio.cpp' : '';
+// Engine family column: every card shows its runtime; cards created before
+// typed cards existed carry no `type` and are llama.cpp. Each kind gets its
+// own icon + color so the list is scannable at a glance.
+interface TypeMeta {
+  label: string;
+  icon: string;
+  cls: string;
+}
+function typeMeta(type?: string): TypeMeta {
+  if (type === 'audio') return { label: 'audio.cpp', icon: '🔊', cls: 'type-audio' };
+  if (type === 'strata') return { label: 'strata', icon: '🧠', cls: 'type-strata' };
+  if (!type) return { label: 'llama.cpp', icon: '🦙', cls: 'type-llama' };
+  return { label: type, icon: '⚙', cls: 'type-other' };
 }
 
-// --- Process state (shared llama-server process) ---
-const processStatus = ref('stopped');
-let es: EventSource | null = null;
-
-onMounted(async () => {
-  await Promise.all([loadData(), fetchStatus()]);
-  connectSse();
+onMounted(() => {
+  loadData();
 });
-
-onUnmounted(() => {
-  es?.close();
-});
-
-// Sync process state from the server on load, so a refresh doesn't hide the Stop button
-async function fetchStatus() {
-  try {
-    const res = await fetch('/api/status');
-    if (res.ok) {
-      const data = await res.json();
-      processStatus.value = data.status;
-    }
-  } catch { /* ignore */ }
-}
-
-function connectSse() {
-  es = new EventSource('/api/events');
-  es.addEventListener('process-status', (e) => {
-    const data = JSON.parse(e.data);
-    // { instanceId, status } — this list drives the default instance only until
-    // the Engines tab lands.
-    processStatus.value = typeof data === 'string' ? data : data.status;
-  });
-}
-
-const isRunning = computed(() => processStatus.value === 'running' || processStatus.value === 'starting');
-
-// --- Router launch: select models via checkboxes, one Launch button ---
-const selectedForLaunch = ref<Set<string>>(new Set());
-const launching = ref(false);
-const launchError = ref('');
-
-function toggleLaunchSelection(id: string) {
-  const next = new Set(selectedForLaunch.value);
-  let included: boolean;
-  if (next.has(id)) {
-    next.delete(id);
-    included = false;
-  } else {
-    next.add(id);
-    included = true;
-  }
-  selectedForLaunch.value = next;
-
-  // Persist on the config so the selection survives a browser refresh
-  const cfg = configs.value.find((c) => c.id === id);
-  if (cfg) {
-    cfg.includeInLaunch = included;
-    fetch(`/api/models/configs/${id}/launch-include`, {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ include: included }),
-    }).catch(() => { /* non-fatal */ });
-  }
-}
-
-async function launchRouter() {
-  if (selectedForLaunch.value.size === 0) return;
-  launching.value = true;
-  launchError.value = '';
-  try {
-    const res = await fetch('/api/launch-router', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ configIds: [...selectedForLaunch.value] }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      launchError.value = err.error || `Launch failed (${res.status})`;
-    }
-  } catch (e) {
-    launchError.value = String(e);
-  } finally {
-    launching.value = false;
-  }
-}
-
-async function stopProcess() {
-  await fetch('/api/stop', { method: 'POST' });
-}
 
 async function loadData() {
   try {
@@ -180,13 +85,6 @@ async function loadData() {
       const leftover = (data.configs || []).filter((c: ModelConfig) => !orderedIds.includes(c.id));
       configs.value.push(...leftover);
       templates.value = data.templates;
-      // Restore persisted launch selection. Router launch is a llama.cpp
-      // feature, so typed cards (audio.cpp …) never join it.
-      selectedForLaunch.value = new Set(
-        configs.value
-          .filter((c: ModelConfig) => c.includeInLaunch && !c.type)
-          .map((c: ModelConfig) => c.id),
-      );
       // Auto-select default config
       if (data.defaultConfigId) {
         selectedId.value = data.defaultConfigId;
@@ -376,23 +274,21 @@ async function exportIni() {
     <div class="toolbar">
       <h2 class="section-title">Model Configs</h2>
       <div class="toolbar-actions">
-        <button
-          v-if="!isRunning"
-          class="btn btn-sm btn-launch"
-          :disabled="launching || selectedForLaunch.size === 0"
-          :title="selectedForLaunch.size === 0 ? 'Select models with the checkboxes first' : `Launch ${selectedForLaunch.size} model(s) via router.ini`"
-          @click="launchRouter"
-        >{{ launching ? 'Launching…' : `Launch (${selectedForLaunch.size})` }}</button>
-        <button v-else class="btn btn-sm btn-stop" @click="stopProcess">Stop</button>
         <button class="btn btn-sm" @click="importIni" title="Import router.ini">Import</button>
         <button class="btn btn-sm" @click="exportIni" title="Export to router.ini">Export</button>
-        <button class="btn btn-sm" @click="emit('open-env')" title="Environment settings">&#9881; Env</button>
         <button class="btn btn-sm btn-primary" @click="showNewModal = true">+ New</button>
       </div>
     </div>
 
-    <!-- Launch error -->
-    <div v-if="launchError" class="launch-error">{{ launchError }}</div>
+    <!-- Column headers -->
+    <div class="config-header" v-if="configs.length > 0">
+      <span class="col col-handle"></span>
+      <span class="col col-fav" title="Favorites">★</span>
+      <span class="col col-name">Name</span>
+      <span class="col col-notes">Comment</span>
+      <span class="col col-type">Engine</span>
+      <span class="col col-actions"></span>
+    </div>
 
     <!-- Config list (stays visible behind the editor dialog) -->
     <div class="config-items" v-if="configs.length > 0">
@@ -408,7 +304,7 @@ async function exportIni() {
         @drop="onConfigDrop(cfg.id, $event)"
         @dragend="clearConfigDrag"
       >
-        <div class="config-item-main">
+        <span class="col col-handle">
           <button
             class="drag-handle"
             title="Drag to reorder"
@@ -416,39 +312,33 @@ async function exportIni() {
             @mousedown="dragEnabledId = cfg.id"
             @click.stop
           >⋮</button>
-          <input
-            v-if="!cfg.type"
-            type="checkbox"
-            class="launch-check"
-            :checked="selectedForLaunch.has(cfg.id)"
-            :title="'Include in router launch'"
-            @click.stop
-            @change="toggleLaunchSelection(cfg.id)"
-          />
-          <div class="config-item-text">
-            <span class="config-alias">{{ cfg.alias }}</span>
-            <span v-if="typeLabel(cfg.type)" class="type-badge">{{ typeLabel(cfg.type) }}</span>
-            <span v-if="getSpeeds(cfg)" class="config-speeds">
-              <template v-if="getSpeeds(cfg)!.prefillTokensPerSec != null">⚡ {{ getSpeeds(cfg)!.prefillTokensPerSec!.toFixed(0) }} t/s</template>
-              <template v-if="getSpeeds(cfg)!.generationTokensPerSec != null"> · ✍ {{ getSpeeds(cfg)!.generationTokensPerSec!.toFixed(1) }} t/s</template>
-            </span>
-          </div>
-          <!-- Badge toggles: extensible, add more param toggles here -->
-          <div v-if="!cfg.type" class="item-badges">
-            <button
-              class="badge-toggle"
-              :class="{ on: isParamOn(cfg, 'load-on-startup') }"
-              title="Load on startup (click to toggle)"
-              @click.stop="toggleParam(cfg, 'load-on-startup')"
-            >load</button>
-          </div>
-          <span v-if="cfg.notes" class="config-notes" :title="cfg.notes">{{ truncateNotes(cfg.notes) }}</span>
-        </div>
-        <div class="config-item-actions" @click.stop>
+        </span>
+        <span class="col col-fav">
+          <button
+            class="fav-star"
+            :class="{ on: cfg.favorite }"
+            :title="cfg.favorite ? 'Remove from favorites' : 'Add to favorites'"
+            @click.stop="toggleFavorite(cfg)"
+          >{{ cfg.favorite ? '★' : '☆' }}</button>
+        </span>
+        <span class="col col-name">
+          <span class="config-alias">{{ cfg.alias }}</span>
+          <span v-if="getSpeeds(cfg)" class="config-speeds">
+            <template v-if="getSpeeds(cfg)!.prefillTokensPerSec != null">⚡ {{ getSpeeds(cfg)!.prefillTokensPerSec!.toFixed(0) }} t/s</template>
+            <template v-if="getSpeeds(cfg)!.generationTokensPerSec != null"> · ✍ {{ getSpeeds(cfg)!.generationTokensPerSec!.toFixed(1) }} t/s</template>
+          </span>
+        </span>
+        <span class="col col-notes" :title="cfg.notes">{{ cfg.notes ? truncateNotes(cfg.notes) : '' }}</span>
+        <span class="col col-type">
+          <span class="type-badge" :class="typeMeta(cfg.type).cls">
+            <span class="type-icon">{{ typeMeta(cfg.type).icon }}</span>{{ typeMeta(cfg.type).label }}
+          </span>
+        </span>
+        <span class="col col-actions config-item-actions" @click.stop>
           <button class="icon-btn" title="Edit" @click="startEditing(cfg.id)">&#9998;</button>
           <button class="icon-btn" title="Clone" @click="cloneConfig(cfg.id)">&#10697;</button>
           <button class="icon-btn icon-danger" title="Delete" @click="deleteConfig(cfg.id)">&times;</button>
-        </div>
+        </span>
       </div>
     </div>
     <div v-else class="empty-state">
@@ -539,22 +429,6 @@ async function exportIni() {
 
 .btn-primary:hover { background: #2ea043; }
 
-.btn-launch {
-  background: #1f6feb;
-  border-color: #1f6feb;
-  color: white;
-}
-
-.btn-launch:hover { background: #388bfd; }
-
-.btn-stop {
-  background: #da3633;
-  border-color: #da3633;
-  color: white;
-}
-
-.btn-stop:hover { background: #f85149; }
-
 .btn-sm { padding: 4px 10px; font-size: 0.75rem; }
 
 .config-items {
@@ -566,12 +440,49 @@ async function exportIni() {
   overflow-y: auto;
 }
 
+/* Shared grid so the header row and every card line up in columns */
+.config-header,
+.config-item {
+  display: grid;
+  grid-template-columns: 20px 26px minmax(120px, 2fr) minmax(100px, 3fr) 84px auto;
+  align-items: center;
+  gap: 8px;
+}
 
+.config-header {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-bottom: 1px solid #30363d;
+  color: #8b949e;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.col {
+  min-width: 0;
+}
+
+.col-handle {
+  text-align: center;
+}
+
+.col-fav {
+  text-align: center;
+}
+
+.col-type {
+  text-align: right;
+}
+
+.col-name {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
 
 .config-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   padding: 8px 10px;
   border-radius: 6px;
   border: 1px solid transparent;
@@ -583,23 +494,64 @@ async function exportIni() {
 .config-item:hover { background: #21262d; }
 .config-item.active { background: #1f6feb22; border-color: #1f6feb55; }
 
+.fav-star {
+  appearance: none;
+  background: none;
+  border: none;
+  color: #484f58;
+  font-size: 0.95rem;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
+.fav-star:hover { color: #e1e4e8; }
+
+.fav-star.on { color: #e3b341; }
+
 .type-badge {
-  margin-left: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 1px 6px;
   border-radius: 4px;
   border: 1px solid #30363d;
   background: #21262d;
   color: #8b949e;
   font-size: 0.68rem;
+  white-space: nowrap;
+}
+
+.type-icon {
+  font-size: 0.72rem;
+  line-height: 1;
+}
+
+/* Per-engine accent: tinted pill so the kind is visible at a glance */
+.type-badge.type-llama {
+  background: #23863622;
+  border-color: #3fb95055;
+  color: #3fb950;
+}
+
+.type-badge.type-audio {
+  background: #8957e522;
+  border-color: #bc8cff55;
+  color: #bc8cff;
+}
+
+.type-badge.type-strata {
+  background: #9e6a0322;
+  border-color: #d2992255;
+  color: #d29922;
+}
+
+.type-badge.type-other {
+  background: #1f6feb22;
+  border-color: #58a6ff55;
+  color: #58a6ff;
 }
 .config-item.drop-after { border-bottom-color: #58a6ff; box-shadow: inset 0 -2px 0 #58a6ff; }
-
-.config-item-main {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
 
 .drag-handle {
   appearance: none;
@@ -616,35 +568,13 @@ async function exportIni() {
 
 .drag-handle:hover { border-color: #58a6ff; color: #e1e4e8; }
 
-.launch-check {
-  accent-color: #1f6feb;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
-.launch-error {
-  flex-shrink: 0;
-  margin-bottom: 8px;
-  padding: 6px 10px;
-  background: #da363322;
-  border: 1px solid #da363355;
-  border-radius: 4px;
-  color: #f85149;
-  font-size: 0.75rem;
-}
-
-.config-item-text {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
 .config-alias {
   font-size: 0.82rem;
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  min-width: 0;
 }
 
 .config-speeds {
@@ -655,43 +585,12 @@ async function exportIni() {
   text-overflow: ellipsis;
 }
 
-.item-badges {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.badge-toggle {
-  background: #21262d;
-  border: 1px solid #30363d;
-  color: #8b949e;
-  font-size: 0.6rem;
-  padding: 1px 5px;
-  border-radius: 3px;
-  font-weight: 600;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.badge-toggle:hover { border-color: #58a6ff; color: #e1e4e8; }
-
-.badge-toggle.on {
-  background: #1f6feb33;
-  border-color: #1f6feb55;
-  color: #58a6ff;
-}
-
-.config-notes {
-  flex: 1;
-  min-width: 0;
-  margin-left: auto;
+.col-notes {
   font-size: 0.72rem;
   color: #8b949e;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  text-align: right;
 }
 
 .config-item-actions {

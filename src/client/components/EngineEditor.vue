@@ -472,7 +472,7 @@ const previewArgs = computed(() =>
     .join(' '),
 );
 
-// --- Dirty tracking (same snapshot pattern as EnvironmentConfig) ---
+// --- Dirty tracking (snapshot the loaded state, compare on change) ---
 const dirty = ref(false);
 let snapshot = '';
 function currentState() {

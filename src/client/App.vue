@@ -8,19 +8,16 @@ import EngineList from './components/EngineList.vue';
 import LogView from './components/LogView.vue';
 import ProxyPanel from './components/ProxyPanel.vue';
 import ProxyUsagePanel from './components/ProxyUsagePanel.vue';
-import EnvironmentConfig from './components/EnvironmentConfig.vue';
 import type { SystemStats, LogEntry, ModelStatusData, UsageRecord, EngineInstance } from './types';
 
 const gpus = ref<any[]>([]);
 const systemStats = ref<SystemStats | null>(null);
-const logLines = ref<LogEntry[]>([]);
 const metrics = ref({ prefillTokensPerSec: null, generationTokensPerSec: null });
 // Per-model token speeds parsed from llama.cpp logs
 const modelMetrics = ref<Record<string, { prefillTokensPerSec: number | null; generationTokensPerSec: number | null }>>({});
 const processStatus = ref('stopped');
 const modelStatusData = ref<ModelStatusData | null>(null);
 const appVersion = ref<string | null>(null);
-const showEnv = ref(false);
 // Self-update state (GitHub Releases)
 interface UpdateInfo {
   current: string;
@@ -104,8 +101,7 @@ function setRightTab(tab: RightTab) {
 const engineStatuses = ref<Record<string, string>>({});
 const engineInstances = ref<EngineInstance[]>([]);
 const defaultInstanceId = ref('default');
-// Per-instance log caches (SSE log-line carries instanceId). The default
-// instance also feeds `logLines` so the Models tab stream stays unchanged.
+// Per-instance log caches (SSE log-line carries instanceId).
 const logsByInstance = ref<Record<string, LogEntry[]>>({});
 // Arrival-ordered merge of every instance's lines, used by the "All" log view
 const mergedLogs = ref<LogEntry[]>([]);
@@ -177,15 +173,10 @@ function connect() {
     if (cache.length > 2000) cache.shift();
     mergedLogs.value.push(entry);
     if (mergedLogs.value.length > 2000) mergedLogs.value.shift();
-    if (id === defaultInstanceId.value) {
-      logLines.value.push(entry);
-      if (logLines.value.length > 2000) logLines.value.shift();
-    }
   });
   es.addEventListener('log-history', (e) => {
     // Server replays the default instance's cache on connect so logs survive refreshes
     const history = JSON.parse(e.data) as LogEntry[];
-    logLines.value = history;
     logsByInstance.value = { [defaultInstanceId.value]: history };
     mergedLogs.value = [...history];
   });
@@ -347,7 +338,8 @@ onUnmounted(() => {
         </section>
       </div>
 
-      <!-- Right: tabbed — Models (config list + logs) or Proxy (settings, usage, logs) -->
+      <!-- Right: tabbed — Models (config list), Engines (instances + logs),
+           Proxy (settings, usage, logs) or Usage -->
       <div class="right-col">
         <nav class="tab-bar">
           <button class="tab" :class="{ active: rightTab === 'models' }" @click="setRightTab('models')">
@@ -366,16 +358,7 @@ onUnmounted(() => {
 
         <template v-if="rightTab === 'models'">
           <section class="panel config-section">
-            <ConfigList :model-metrics="modelMetrics" @open-env="showEnv = true" />
-          </section>
-          <section class="panel log-panel" :class="{ collapsed: logsCollapsed }">
-            <LogView
-              :lines="logLines"
-              :metrics="metrics"
-              :collapsed="logsCollapsed"
-              @toggle-collapse="toggleLogsCollapsed"
-              @clear-logs="logLines = []"
-            />
+            <ConfigList :model-metrics="modelMetrics" />
           </section>
         </template>
         <template v-else-if="rightTab === 'engines'">
@@ -407,9 +390,6 @@ onUnmounted(() => {
         </template>
       </div>
     </main>
-
-    <!-- Environment dialog (self-contained) -->
-    <EnvironmentConfig v-if="showEnv" @close="showEnv = false" />
   </div>
 </template>
 
@@ -553,6 +533,25 @@ body {
   font-size: 0.75rem;
   font-weight: 600;
   text-transform: uppercase;
+}
+
+/* The aggregate badge is a button (click → Engines tab): strip the native
+   chrome so it matches the plain status pill it replaces */
+button.status-badge {
+  font-family: inherit;
+  border: 1px solid transparent;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+button.status-badge.running:hover {
+  background: #23863655;
+  border-color: #3fb95066;
+}
+
+button.status-badge.stopped:hover {
+  background: #30363d;
+  border-color: #8b949e55;
 }
 
 .header-right {

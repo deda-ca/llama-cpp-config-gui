@@ -673,6 +673,7 @@ mount per engine kind, plus per-instance API forwarding.
 - For the different internal proxy services create a new url to proxy to the main pages of each UIs such as audio.cpp and stable-diffusion.cpp, llama.cpp or strata. Also show a button for each to jump to the main page of each UI.
 - Keep track of watts used for each active gpu for each request, average, and add a cost to the power including different times of day power and calculate the power usage in real time.
 
+- 
 
 
 

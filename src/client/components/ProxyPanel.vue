@@ -494,7 +494,13 @@ onUnmounted(() => {
             <span class="backend-name">{{ b.name }}</span>
             <span class="backend-kind" :class="'kind-' + b.kind">{{ KIND_LABELS[b.kind] }}</span>
             <span v-if="b.engineId" class="backend-kind kind-engine" title="Mirrors an engine instance in the Engines tab — name and port follow it">engine</span>
-            <span class="backend-url">{{ b.baseUrl }}</span>
+            <a
+              class="backend-url"
+              :href="b.baseUrl"
+              target="_blank"
+              rel="noopener"
+              title="Open this proxy URL in a new browser tab"
+            >{{ b.baseUrl }}</a>
             <span
               class="health-dot"
               :class="{ up: status?.backends[b.id] === true, down: status?.backends[b.id] === false, off: !b.enabled }"
@@ -873,11 +879,16 @@ onUnmounted(() => {
 .backend-url {
   flex: 1;
   font-size: 0.75rem;
-  color: #8b949e;
+  color: #79c0ff;
   font-family: 'Cascadia Code', 'Fira Code', monospace;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  text-decoration: none;
+}
+.backend-url:hover {
+  color: #a5d6ff;
+  text-decoration: underline;
 }
 .health-dot {
   width: 9px;
