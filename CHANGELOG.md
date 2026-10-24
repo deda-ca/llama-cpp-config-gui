@@ -1,3 +1,11 @@
+# [0.19.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.18.0...v0.19.0) (2026-10-24)
+
+
+### Features
+
+* **audio:** parallel-jobs toggle gating per-model slots ([44b83d7](https://github.com/deda-ca/llama-cpp-config-gui/commit/44b83d7ed8a97c2f39fe7e9b4af49f838afec979))
+* **models:** column list with favorites, drop launch/env/log UI ([3e93bbf](https://github.com/deda-ca/llama-cpp-config-gui/commit/3e93bbf7ef7c24996e4e71cbb602e7c5df7ec13f))
+
 # [0.18.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.17.0...v0.18.0) (2026-10-23)
 
 
