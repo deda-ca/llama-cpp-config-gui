@@ -1,3 +1,10 @@
+# [0.20.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.19.0...v0.20.0) (2026-10-24)
+
+
+### Features
+
+* **models:** create cards straight into the editor ([2500e32](https://github.com/deda-ca/llama-cpp-config-gui/commit/2500e32b3097cc588cbd57a2385520d7120b3136))
+
 # [0.19.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.18.0...v0.19.0) (2026-10-24)
 
 
