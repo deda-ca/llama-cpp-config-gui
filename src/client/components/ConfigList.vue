@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue';
-import type { ModelConfig, ConfigTemplate, ParamDef } from '../types';
+import type { ModelConfig, ParamDef } from '../types';
 import ConfigEditor from './ConfigEditor.vue';
-
 interface ModelSpeeds {
   prefillTokensPerSec: number | null;
   generationTokensPerSec: number | null;
@@ -18,21 +17,28 @@ function getSpeeds(cfg: ModelConfig): ModelSpeeds | null {
 }
 
 const configs = ref<ModelConfig[]>([]);
-const templates = ref<ConfigTemplate[]>([]);
 const params = ref<ParamDef[]>([]);
 const selectedId = ref<string | null>(null);
 const editing = ref(false); // false = view mode (list only), true = editor open
-const showNewModal = ref(false);
-const newAlias = ref('');
-const newTemplateId = ref('');
-// Engine family for a new card (docs/audio.md §2.5): '' = llama.cpp, the
-// default every pre-existing card uses. Templates only apply to llama.cpp.
+// Engine family to create, picked from the toolbar dropdown (same UX as the
+// Engines tab). '' = llama.cpp, the type pre-existing cards carry implicitly.
+// Only kinds with a model-card generator are offered; sdiffusion & friends
+// join this list as their editors land.
 const newType = ref('');
+const creatableTypes: { value: string; label: string }[] = [
+  { value: '', label: 'llama.cpp' },
+  { value: 'audio', label: 'audio.cpp' },
+];
+// Draft card held only in memory until the editor's Save persists it, so
+// opening "+ New" never writes an empty config to disk.
+const draftConfig = ref<ModelConfig | null>(null);
 const dragId = ref<string | null>(null);
 const dropTargetId = ref<string | null>(null);
 const dragEnabledId = ref<string | null>(null);
 
-const selectedConfig = computed(() => configs.value.find((c) => c.id === selectedId.value) || null);
+const selectedConfig = computed(
+  () => draftConfig.value ?? configs.value.find((c) => c.id === selectedId.value) ?? null,
+);
 
 // Toggle the star on a model card and persist it (UI-only marker)
 async function toggleFavorite(cfg: ModelConfig) {
@@ -84,7 +90,6 @@ async function loadData() {
         .filter(Boolean) as ModelConfig[];
       const leftover = (data.configs || []).filter((c: ModelConfig) => !orderedIds.includes(c.id));
       configs.value.push(...leftover);
-      templates.value = data.templates;
       // Auto-select default config
       if (data.defaultConfigId) {
         selectedId.value = data.defaultConfigId;
@@ -100,38 +105,21 @@ async function loadData() {
   }
 }
 
-async function createConfig() {
-  const alias = newAlias.value.trim() || 'New Config';
-  // Apply template params if selected
-  let initParams: Record<string, string> = {};
-  let initOrder: string[] = [];
-  if (newTemplateId.value) {
-    const tpl = templates.value.find((t) => t.id === newTemplateId.value);
-    if (tpl) {
-      initParams = { ...tpl.params };
-      initOrder = [...tpl.paramOrder];
-    }
-  }
-
-  const res = await fetch('/api/models/configs', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      alias,
-      params: initParams,
-      paramOrder: initOrder,
-      ...(newType.value ? { type: newType.value } : {}),
-    }),
-  });
-  if (res.ok) {
-    const newConfig = await res.json();
-    configs.value.push(newConfig);
-    selectedId.value = newConfig.id;
-    showNewModal.value = false;
-    newAlias.value = '';
-    newTemplateId.value = '';
-    newType.value = '';
-  }
+// Open a blank card of the chosen engine family. Nothing is stored yet: the
+// editor's Save button creates the config (and requires a name first).
+function newConfig() {
+  draftConfig.value = {
+    id: '',
+    alias: '',
+    displayName: '',
+    notes: '',
+    modelPath: '',
+    params: {},
+    paramOrder: [],
+    ...(newType.value ? { type: newType.value } : {}),
+    isDefault: false,
+  };
+  editing.value = true;
 }
 
 async function deleteConfig(id: string) {
@@ -154,7 +142,15 @@ async function cloneConfig(id: string) {
 
 async function onConfigSaved(updated: ModelConfig) {
   const idx = configs.value.findIndex((c) => c.id === updated.id);
-  if (idx !== -1) configs.value[idx] = updated;
+  if (idx !== -1) {
+    configs.value[idx] = updated;
+  } else {
+    // A draft's save POSTs a new card (ConfigEditor owns that call) and comes
+    // back with a real id: append it and make it the selected row.
+    configs.value.push(updated);
+    selectedId.value = updated.id;
+  }
+  draftConfig.value = null;
 }
 
 async function persistConfigOrder() {
@@ -227,12 +223,15 @@ onUnmounted(() => {
 function startEditing(id?: string) {
   if (id) selectedId.value = id;
   if (selectedId.value) {
+    draftConfig.value = null;
     editing.value = true;
   }
 }
 
 function closeEditor() {
   editing.value = false;
+  // A draft that was never saved leaves no trace
+  draftConfig.value = null;
 }
 
 async function importIni() {
@@ -276,7 +275,10 @@ async function exportIni() {
       <div class="toolbar-actions">
         <button class="btn btn-sm" @click="importIni" title="Import router.ini">Import</button>
         <button class="btn btn-sm" @click="exportIni" title="Export to router.ini">Export</button>
-        <button class="btn btn-sm btn-primary" @click="showNewModal = true">+ New</button>
+        <select v-model="newType" class="kind-select" title="Engine type of the new model">
+          <option v-for="t in creatableTypes" :key="t.value" :value="t.value">{{ t.label }}</option>
+        </select>
+        <button class="btn btn-sm btn-primary" @click="newConfig">+ New model</button>
       </div>
     </div>
 
@@ -342,41 +344,21 @@ async function exportIni() {
       </div>
     </div>
     <div v-else class="empty-state">
-      No configs yet. Click "+ New" to create one, or "Import" to load a router.ini.
+      No configs yet. Pick an engine type and click "+ New model", or "Import" to load a router.ini.
     </div>
 
-    <!-- Editor dialog (self-contained: owns its own Dialog, footer, and close logic) -->
+    <!-- Editor dialog (self-contained: owns its own Dialog, footer, and close
+         logic). A draft card has no id yet and is only stored on Save, so the
+         key stays constant across that first save — remounting would drop the
+         editor's state mid-session. -->
     <ConfigEditor
       v-if="selectedConfig && editing"
-      :key="selectedConfig.id"
+      key="editor"
       :config="selectedConfig"
       :params="params"
       @saved="onConfigSaved"
       @close="closeEditor"
     />
-
-    <!-- New Config Modal -->
-    <div v-if="showNewModal" class="modal-overlay" @click.self="showNewModal = false">
-      <div class="modal">
-        <h3>New Model Config</h3>
-        <label>Alias</label>
-        <input v-model="newAlias" type="text" placeholder="e.g. Qwen3.8-27b:UD-Q4_K_XL" @keyup.enter="createConfig" />
-        <label>Engine type</label>
-        <select v-model="newType">
-          <option value="">llama.cpp</option>
-          <option value="audio">audio.cpp</option>
-        </select>
-        <label>Start from template (optional)</label>
-        <select v-model="newTemplateId" :disabled="!!newType">
-          <option value="">Blank</option>
-          <option v-for="tpl in templates" :key="tpl.id" :value="tpl.id">{{ tpl.name }}</option>
-        </select>
-        <div class="modal-actions">
-          <button class="btn" @click="showNewModal = false">Cancel</button>
-          <button class="btn btn-primary" @click="createConfig">Create</button>
-        </div>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -621,48 +603,18 @@ async function exportIni() {
   padding: 20px;
 }
 
-.modal-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0,0,0,0.6);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
-}
-
-.modal {
-  background: #161b22;
-  border: 1px solid #30363d;
-  border-radius: 8px;
-  padding: 20px;
-  width: 380px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.modal h3 { font-size: 1rem; margin-bottom: 4px; }
-
-.modal label {
-  font-size: 0.75rem;
-  color: #8b949e;
-}
-
-.modal input,
-.modal select {
+/* Engine-type picker next to "+ New model" (matches the Engines tab) */
+.kind-select {
   background: #0d1117;
   border: 1px solid #30363d;
   border-radius: 4px;
-  padding: 8px 10px;
+  padding: 5px 8px;
   color: #e1e4e8;
-  font-size: 0.85rem;
+  font-size: 0.75rem;
 }
 
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 8px;
+.kind-select:focus {
+  outline: none;
+  border-color: #58a6ff;
 }
 </style>

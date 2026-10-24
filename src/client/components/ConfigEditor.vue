@@ -34,6 +34,16 @@ function cloneConfig(cfg: ModelConfig): ModelConfig {
 
 const local = ref<ModelConfig>(cloneConfig(props.config));
 
+// A card with no id is a draft from "+ New model": nothing exists on the
+// server yet, so the first Save POSTs it instead of PUT-ing an update. The id
+// the server assigns is kept here so later saves in the same dialog update
+// that row instead of creating another one.
+const createdId = ref('');
+const isNew = computed(() => !props.config.id && !createdId.value);
+// The alias is the card's key (it becomes the INI section / models[] id), so a
+// new card cannot be saved until one is entered.
+const canSave = computed(() => !isNew.value || local.value.alias.trim() !== '');
+
 // --- Engine family of this card (docs/audio.md §2.1) ---
 // The llama.cpp catalog arrives as a prop; an audio card edits the audio.cpp
 // model-key catalog instead, fetched once per card type.
@@ -625,17 +635,25 @@ const saveLabel = computed(() => {
 });
 
 async function save() {
+  if (!canSave.value) return;
   saveState.value = 'saving';
+  const targetId = createdId.value || local.value.id;
   try {
-    const res = await fetch(`/api/models/configs/${local.value.id}`, {
-      method: 'PUT',
+    const res = await fetch(targetId ? `/api/models/configs/${targetId}` : '/api/models/configs', {
+      method: targetId ? 'PUT' : 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(local.value),
     });
     if (res.ok) {
+      // A created card comes back with its server-assigned id. Only that id is
+      // patched in — replacing `local` wholesale would trip the deep dirty
+      // watcher and leave the dialog looking unsaved.
+      const saved = await res.json().catch(() => null);
+      if (!targetId && saved && typeof saved.id === 'string') createdId.value = saved.id;
       saveState.value = 'saved';
       dirty.value = false;
-      emit('saved', local.value);
+      // Hand the parent the stored card, including the id a POST assigned.
+      emit('saved', { ...local.value, id: createdId.value || local.value.id });
     } else {
       saveState.value = 'error';
     }
@@ -654,13 +672,20 @@ async function setDefault() {
 </script>
 
 <template>
-  <Dialog :title="`Edit Config — ${local.alias}`" @close="requestClose">
+  <Dialog :title="isNew ? 'New Model Config' : `Edit Config — ${local.alias}`" @close="requestClose">
   <div class="config-editor">
-    <!-- Header: alias + actions -->
+    <!-- Header: alias + actions. The alias is the card's key (INI section /
+         models[] id), so it is required before a new card can be saved. -->
     <div class="editor-header">
-      <input v-model="local.alias" class="alias-input" type="text" />
+      <input
+        v-model="local.alias"
+        class="alias-input"
+        :class="{ 'alias-missing': isNew && !local.alias.trim() }"
+        type="text"
+        placeholder="Name (required) — e.g. Qwen3.8-27b:UD-Q4_K_XL"
+      />
       <div class="header-actions">
-        <button v-if="!local.isDefault" class="btn btn-sm" @click="setDefault">Set Default</button>
+        <button v-if="!isNew && !local.isDefault" class="btn btn-sm" @click="setDefault">Set Default</button>
       </div>
     </div>
 
@@ -896,7 +921,8 @@ async function setDefault() {
     <button
       class="btn"
       :class="saveState === 'saved' ? 'btn-saved' : saveState === 'error' ? 'btn-error' : 'btn-primary'"
-      :disabled="saveState === 'saving'"
+      :disabled="saveState === 'saving' || !canSave"
+      :title="canSave ? '' : 'Enter a name before saving'"
       @click="save"
     >{{ saveLabel }}</button>
   </template>
@@ -932,6 +958,9 @@ async function setDefault() {
 }
 
 .alias-input:focus { outline: none; border-color: #58a6ff; }
+
+/* New card without a name yet: the Save button stays disabled until then */
+.alias-input.alias-missing { border-color: #d29922; }
 
 .header-actions {
   display: flex;
