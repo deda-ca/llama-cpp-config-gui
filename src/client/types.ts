@@ -148,6 +148,8 @@ export interface EngineInstance {
   strata?: StrataConfig;
   /** audio.cpp only: self-contained server config (see AudioConfig). */
   audio?: AudioConfig;
+  /** stable-diffusion.cpp only: self-contained server config (see SdConfig). */
+  sd?: SdConfig;
   /** Live process status, added by GET /api/engines. */
   status?: 'stopped' | 'starting' | 'running' | 'exited' | 'error';
 }
@@ -195,6 +197,26 @@ export interface AudioConfig {
    * runtime). A CLI flag, not a config key, so it is a field not a row — and
    * it gates the per-model `slots` row, which the server rejects without it. */
   parallelJobs?: boolean;
+  modelConfigIds: string[];
+  extra: Record<string, unknown>;
+}
+
+/**
+ * stable-diffusion.cpp launch config (mirrors src/server/engines/types.ts).
+ * sd.cpp has no config file, so `serverArgs` are plain `sd-server` flags keyed
+ * by the flag verbatim (`--listen-ip`, `--listen-port`, `--model-dir`, …).
+ * Weights are not on the command line: the server starts from its `--model-dir`
+ * roots and models load over the model-management API, which is why
+ * `--model-dir` is a required row. `modelConfigIds` selects cards with
+ * `type: 'sdiffusion'`; the first one is loaded at startup (one context per
+ * instance), the rest are swap candidates.
+ */
+export interface SdConfig {
+  /** Process environment. The GUI never sets `CUDA_VISIBLE_DEVICES` for sd
+   * instances — the mask renumbers devices, so a masked `CUDA0` is not the
+   * `CUDA0` that `--backend` names. */
+  envVars: Record<string, string>;
+  serverArgs: EngineParam[];
   modelConfigIds: string[];
   extra: Record<string, unknown>;
 }

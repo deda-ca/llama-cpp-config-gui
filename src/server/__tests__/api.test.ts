@@ -1128,3 +1128,86 @@ describe('Audio Engine API', () => {
     expect(get.body.backends.some((b: any) => b.engineId === audioId)).toBe(false);
   });
 });
+
+describe('Stable Diffusion Engine API', () => {
+  let sdId: string;
+
+  it('GET /api/engines/instances/draft?kind=sdiffusion seeds an sd block without saving', async () => {
+    const before = (await request(app).get('/api/engines')).body.instances.length;
+    const res = await request(app).get('/api/engines/instances/draft?kind=sdiffusion');
+    expect(res.status).toBe(200);
+    expect(res.body.kind).toBe('sdiffusion');
+    // Self-contained like strata/audio: no definition link.
+    expect(res.body.definitionId).toBe('');
+    expect(res.body.binary).toBe('sd-server');
+    const rows = res.body.sd.serverArgs as { key: string; value?: string }[];
+    expect(rows).toEqual(expect.arrayContaining([
+      { key: '--listen-ip', value: '127.0.0.1' },
+    ]));
+    // sd-server has no --port flag, so the port row must be --listen-port.
+    expect(rows.some((p) => p.key === '--port')).toBe(false);
+    const listenPort = Number(rows.find((p) => p.key === '--listen-port')?.value);
+    expect(listenPort).toBeGreaterThanOrEqual(8080);
+    // The free-port search sees every kind's port, so an sd draft never lands on
+    // a llama.cpp / strata / audio instance.
+    const others = (await request(app).get('/api/engines')).body.instances as any[];
+    const held = others.flatMap((i) => [
+      ...(i.params ?? []).filter((p: any) => (p.key === '--port' || p.key === '-p') && !p.disabled),
+      ...(i.strata?.serverArgs ?? []).filter((p: any) => p.key === '--port' && !p.disabled),
+      ...(i.audio?.serverArgs ?? []).filter((p: any) => p.key === 'port' && !p.disabled),
+      ...(i.sd?.serverArgs ?? []).filter((p: any) => p.key === '--listen-port' && !p.disabled),
+    ].map((p: any) => Number(p.value)));
+    expect(held).not.toContain(listenPort);
+    // --model-dir rows are auto-discovered under the sd root (§5 Q4); the list
+    // is machine-dependent, so only its shape is asserted here.
+    for (const row of rows.filter((p) => p.key === '--model-dir')) {
+      expect(path.isAbsolute(row.value ?? '')).toBe(true);
+    }
+    const after = (await request(app).get('/api/engines')).body.instances.length;
+    expect(after).toBe(before);
+  });
+
+  it('POST /api/engines/instances accepts kind=sdiffusion without a definitionId', async () => {
+    const res = await request(app)
+      .post('/api/engines/instances')
+      .send({ name: 'SD Qwen Image', kind: 'sdiffusion' });
+    expect(res.status).toBe(200);
+    expect(res.body.kind).toBe('sdiffusion');
+    expect(res.body.definitionId).toBe('');
+    expect(res.body.binary).toBe('sd-server');
+    expect(res.body.sd).toBeTruthy();
+    sdId = res.body.id;
+  });
+
+  it('PUT /api/engines/instances/:id round-trips the sd block and checks its port', async () => {
+    const block = {
+      envVars: { GGML_CUDA_FORCE_MMQ: '1' },
+      serverArgs: [
+        { key: '--listen-ip', value: '127.0.0.1' },
+        { key: '--listen-port', value: '5458' },
+        { key: '--model-dir', value: '/home/u/models/sd/qwen-image-2.1' },
+        { key: '--model-dir', value: '/home/u/models/sd/sd1.5' },
+        { key: '--backend', value: 'diffusion=CUDA0,te=CUDA1,vae=CUDA1' },
+      ],
+      modelConfigIds: ['qwen-image-21'],
+      extra: { '--uncond-diffusion-model': '/home/u/models/sd/u.gguf' },
+    };
+    const res = await request(app)
+      .put(`/api/engines/instances/${sdId}`)
+      .send({ binary: '/home/u/Programs/AI/stable-diffusion.cpp/build/bin/sd-server', sd: block });
+    expect(res.status).toBe(200);
+    expect(res.body.binary).toBe('/home/u/Programs/AI/stable-diffusion.cpp/build/bin/sd-server');
+    expect(res.body.sd).toEqual(block);
+
+    // --listen-port participates in the port conflict check like a param row.
+    const clash = await request(app)
+      .put(`/api/engines/instances/${sdId}`)
+      .send({ sd: { ...block, serverArgs: [{ key: '--listen-port', value: '8080' }] } });
+    expect(clash.status).toBe(409);
+  });
+
+  it('deletes the sd instance', async () => {
+    const res = await request(app).delete(`/api/engines/instances/${sdId}`);
+    expect(res.status).toBe(200);
+  });
+});

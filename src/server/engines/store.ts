@@ -14,6 +14,7 @@ import { configDir } from '../config.js';
 import type { LlamaConfig } from '../types.js';
 import { splitArgs, tokensToParams } from './args.js';
 import { blankAudioConfig, audioPort, normalizeAudioConfig } from './audio.js';
+import { blankSdConfig, normalizeSdConfig, sdPort, SD_DEFAULT_PORT } from './sd.js';
 import { blankStrataConfig, normalizeStrataConfig, strataPort } from './strata.js';
 import { loadTemplate } from './template.js';
 import {
@@ -151,15 +152,16 @@ export function paramValueAny(params: EngineParam[], flag: string): string | und
 }
 
 /** Port an instance listens on: its --port/-p param, or for strata the
- * server-arg --port row, or for audio the `port` config-key row
- * (null = unset). */
+ * server-arg --port row, or for audio the `port` config-key row, or for
+ * stable-diffusion the `--listen-port` row (null = unset). sd-server has no
+ * `--port` flag, so an sd row never collides with the llama.cpp spellings. */
 export function instancePort(
-  inst: Pick<EngineInstance, 'params' | 'strata' | 'audio'>,
+  inst: Pick<EngineInstance, 'params' | 'strata' | 'audio' | 'sd'>,
 ): number | null {
   const raw = paramValueAny(inst.params, '--port');
   const n = Number(raw);
   if (Number.isInteger(n) && n > 0 && n <= 65535) return n;
-  return strataPort(inst.strata) ?? audioPort(inst.audio);
+  return strataPort(inst.strata) ?? audioPort(inst.audio) ?? sdPort(inst.sd);
 }
 
 /**
@@ -216,6 +218,7 @@ function normalizeInstance(raw: unknown, index: number): EngineInstance | null {
     autoLaunch: i.autoLaunch === true,
     ...(normalizeStrataConfig(i.strata) ? { strata: normalizeStrataConfig(i.strata) } : {}),
     ...(normalizeAudioConfig(i.audio) ? { audio: normalizeAudioConfig(i.audio) } : {}),
+    ...(normalizeSdConfig(i.sd) ? { sd: normalizeSdConfig(i.sd) } : {}),
   };
 }
 
@@ -351,8 +354,9 @@ export function blankInstance(name: string, def: EngineDefinition, existing: Eng
   // free-port treatment there.
   const strata = def.kind === 'strata' ? blankStrataConfig() : undefined;
   const audio = def.kind === 'audio' ? blankAudioConfig() : undefined;
+  const sd = def.kind === 'sdiffusion' ? blankSdConfig() : undefined;
   const portRow = params.find((p) => p.key === '--port' || p.key === '-p');
-  if (portRow) portRow.value = String(findFreePort(existing, instancePort({ params, strata, audio }) ?? 8080));
+  if (portRow) portRow.value = String(findFreePort(existing, instancePort({ params, strata, audio, sd }) ?? 8080));
   if (strata) {
     const row = strata.serverArgs.find((p) => p.key === '--port');
     if (row) row.value = String(findFreePort(existing, strataPort(strata) ?? 8095));
@@ -361,14 +365,20 @@ export function blankInstance(name: string, def: EngineDefinition, existing: Eng
     const row = audio.serverArgs.find((p) => p.key === 'port');
     if (row) row.value = String(findFreePort(existing, audioPort(audio) ?? 8080));
   }
+  if (sd) {
+    const row = sd.serverArgs.find((p) => p.key === '--listen-port');
+    if (row) row.value = String(findFreePort(existing, sdPort(sd) ?? SD_DEFAULT_PORT));
+  }
   return {
     id: makeEngineId(name, existing.instances),
     name,
     notes: '',
     kind: def.kind,
-    // A self-contained kind (strata, audio) keeps its whole config on the
+    // A self-contained kind (strata, audio, sd) keeps its whole config on the
     // instance, so it carries no definition link.
-    definitionId: def.kind === 'strata' || def.kind === 'audio' ? '' : def.id,
+    definitionId: def.kind === 'strata' || def.kind === 'audio' || def.kind === 'sdiffusion'
+      ? ''
+      : def.id,
     binary: defaultBinaryForKind(def.kind),
     params,
     routerMode: false,
@@ -376,5 +386,6 @@ export function blankInstance(name: string, def: EngineDefinition, existing: Eng
     autoLaunch: false,
     ...(strata ? { strata } : {}),
     ...(audio ? { audio } : {}),
+    ...(sd ? { sd } : {}),
   };
 }

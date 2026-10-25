@@ -30,6 +30,7 @@ import {
   normalizeAudioConfig,
 } from './engines/audio.js';
 import { AUDIO_MODEL_PARAMS, AUDIO_SERVER_PARAMS } from './engines/audioServerParams.js';
+import { normalizeSdConfig } from './engines/sd.js';
 import { SD_SERVER_PARAMS } from './engines/sdServerParams.js';
 import { SD_DEFAULT_PARAMS } from './sdParams-default.js';
 import { isEngineKind, type EngineDefinition, type EngineInstance, type EnginesFile } from './engines/types.js';
@@ -827,6 +828,7 @@ app.post('/api/engines/command', (req, res) => {
     autoLaunch: false,
     ...(body.strata ? { strata: normalizeStrataConfig(body.strata) } : {}),
     ...(body.audio ? { audio: normalizeAudioConfig(body.audio) } : {}),
+    ...(body.sd ? { sd: normalizeSdConfig(body.sd) } : {}),
   } as EngineInstance;
 
   const spec = instanceToLlamaConfig(
@@ -895,9 +897,9 @@ app.get('/api/engines/instances/draft', (req, res) => {
   const name = typeof req.query.name === 'string' && req.query.name.trim()
     ? req.query.name.trim()
     : `engine-${data.instances.length + 1}`;
-  // A strata or audio draft is self-contained: it must not inherit a definition
-  // of a different kind, or blankInstance() would seed the wrong kind's template.
-  const selfContained = kind === 'strata' || kind === 'audio';
+  // A strata, audio or sd draft is self-contained: it must not inherit a
+  // definition of a different kind, or blankInstance() would seed the wrong kind's template.
+  const selfContained = kind === 'strata' || kind === 'audio' || kind === 'sdiffusion';
   const def = selfContained
     ? undefined
     : data.definitions.find((d) => d.kind === kind) ?? data.definitions[0];
@@ -915,11 +917,11 @@ app.post('/api/engines/instances', (req, res) => {
     res.status(400).json({ error: 'name is required' });
     return;
   }
-  // A strata or audio instance is self-contained (its whole config lives on the
-  // instance), so it needs no shared definition. Other kinds attach to one.
+  // A strata, audio or sd instance is self-contained (its whole config lives on
+  // the instance), so it needs no shared definition. Other kinds attach to one.
   const kind = isEngineKind(req.body?.kind) ? req.body.kind : 'llamacpp';
   const def = data.definitions.find((d) => d.id === req.body?.definitionId);
-  if (!def && kind !== 'strata' && kind !== 'audio') {
+  if (!def && kind !== 'strata' && kind !== 'audio' && kind !== 'sdiffusion') {
     res.status(400).json({ error: 'a valid definitionId is required' });
     return;
   }
@@ -950,7 +952,8 @@ app.put('/api/engines/instances/:id', (req, res) => {
   const nextParams = body.params !== undefined ? normalizeEngineParams(body.params) : inst.params;
   const nextStrata = body.strata !== undefined ? normalizeStrataConfig(body.strata) : inst.strata;
   const nextAudio = body.audio !== undefined ? normalizeAudioConfig(body.audio) : inst.audio;
-  const nextPort = instancePort({ params: nextParams, strata: nextStrata, audio: nextAudio });
+  const nextSd = body.sd !== undefined ? normalizeSdConfig(body.sd) : inst.sd;
+  const nextPort = instancePort({ params: nextParams, strata: nextStrata, audio: nextAudio, sd: nextSd });
   if (nextPort !== null && isPortTaken(data, nextPort, inst.id)) {
     res.status(409).json({ error: `Port ${nextPort} is already used by another instance` });
     return;
@@ -986,7 +989,8 @@ app.put('/api/engines/instances/:id', (req, res) => {
   inst.params = nextParams;
   if (body.strata !== undefined) inst.strata = nextStrata;
   if (body.audio !== undefined) inst.audio = nextAudio;
-  // '' clears the link: a self-contained (strata/audio) instance has no definition.
+  if (body.sd !== undefined) inst.sd = nextSd;
+  // '' clears the link: a self-contained (strata/audio/sd) instance has no definition.
   if (typeof body.definitionId === 'string'
     && (body.definitionId === '' || data.definitions.some((d) => d.id === body.definitionId))) {
     inst.definitionId = body.definitionId;

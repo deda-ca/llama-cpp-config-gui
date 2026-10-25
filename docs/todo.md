@@ -604,8 +604,12 @@ socket timeouts; generation happens in sd.cpp's own Web UI).
 (parameter catalogs) — `scripts/gen-sd-params.ts` (`npm run gen:sd-params`) parses
 `sd-cli -h` + `sd-server -h` into `.config/params.sdiffusion.json` (146 rows) plus
 a shipped `SD_DEFAULT_PARAMS` fallback, and `SD_SERVER_PARAMS` +
-`GET /api/params/sd-server` are wired. Remaining items in
-docs/stable-diffusion.md §4.
+`GET /api/params/sd-server` are wired. §4 item 3 (types + store) — `SdConfig` in
+`engines/types.ts` (+ client mirror) and `engines/sd.ts` (`blankSdConfig`,
+`normalizeSdConfig`, `sdPort` on `--listen-port` only, `sdRunDir`, `sdHost`,
+`sdModelDirs`, `discoverSdModelDirs` sorted over `~/Programs/AI/models/sd`),
+`EngineInstance.sd`, `instancePort()` chain, self-contained create/draft/PUT
+wiring. Remaining items in docs/stable-diffusion.md §4.
 
 - [ ] **OpenAI → sd.cpp translation (deferred from #21 Phase 4, spec §5 Q3).**
   Today the proxy forwards `/v1/images/generations` untouched, so only

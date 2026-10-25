@@ -564,6 +564,32 @@ model folder auto-discovered under the sd root** (`~/Programs/AI/models/sd`,
 which also holds llama.cpp/audio GGUFs, and never the `sd/` parent itself, which
 would scan nothing).
 
+Implemented 2026-10-25 in `src/server/engines/sd.ts` (+ `SdConfig` in
+`engines/types.ts` and mirrored in `src/client/types.ts`):
+
+- `sdModelsRoot()` = `~/Programs/AI/models/sd` — derived from `os.homedir()`, not
+  a hardcoded path, and **not** the user's `modelsDir` setting (that is the
+  llama.cpp GGUF root, which §5 Q4 rules out).
+- `SD_CATEGORY_DIRS` + `isSdModelRoot()`: a folder counts as a root only when one
+  of the server's own category names is an **immediate** child. The list is
+  `k_model_slots`' categories plus the two aliases `model_category_directories`
+  accepts (`stable-diffusion` for `checkpoints`, `lora` for `loras`), matched
+  case-insensitively because the server lowercases before comparing.
+- `discoverSdModelDirs()` returns the sorted list; `blankSdConfig()` emits one
+  `--model-dir` row per entry. Sorting is asserted in tests because root order
+  decides which root keeps plain file-ids (§1.3.1 caveat 1).
+- `sdPort()` reads `--listen-port` only — **`-l` is deliberately not aliased**
+  (it is the listen IP on sd-server), and `--listen-port` can never collide with
+  the llama.cpp `--port`/`-p` spellings `instancePort()` checks first.
+- `instancePort()` chain extended: `strataPort ?? audioPort ?? sdPort`; the PUT
+  conflict check, `findFreePort` nudging in `blankInstance()`, and the draft /
+  create / update endpoints all treat sdiffusion as self-contained
+  (`definitionId: ''`), like strata and audio.
+- `sdHost()` (for the "open sd.cpp UI" link, §3.8), `sdModelDirs()` (enabled rows
+  in launch order) and `sdRunDir()` (executable's folder, mirroring
+  `audioRunDir`) round out the helpers; `defaultBinaryForKind('sdiffusion')` is
+  `sd-server`.
+
 **One loaded model per instance** is an engine constraint, and it is *not* a
 reason to run several instances: `models/load` releases the previous context and
 loads the next one in a single call (§1.4.1). So `modelConfigIds` is a

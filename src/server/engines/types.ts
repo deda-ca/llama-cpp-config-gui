@@ -136,6 +136,43 @@ export interface AudioConfig {
   extra: Record<string, unknown>;
 }
 
+/**
+ * stable-diffusion.cpp launch config (docs/stable-diffusion.md §3.1).
+ *
+ * sd.cpp has **no config file**, so `serverArgs` are plain `sd-server` flags
+ * (keyed by the flag verbatim, unlike audio's config-key rows). Unlike
+ * strata/audio there is no generated file, and unlike llama.cpp/audio the
+ * weights are **not** on the command line: the server starts empty from its
+ * `--model-dir` roots and models arrive over `POST /sdcpp/v1/models/load`,
+ * which resolves catalog file-ids inside those roots — which is what makes
+ * `--model-dir` a required row (§1.4.1).
+ *
+ * `modelConfigIds` selects model cards with `type: 'sdiffusion'`. sd-server
+ * holds exactly one context, so this is a *selection list whose first entry is
+ * loaded at startup*; the rest are swap candidates for the "Load model"
+ * action (§3.10), not extra models to run side by side.
+ *
+ * `extra` preserves flags the UI has no row for, verbatim, so an
+ * import/export round-trip never loses data (mirrors `AudioConfig.extra`).
+ */
+export interface SdConfig {
+  /** Environment for the spawned process. Note: the GUI never sets
+   * `CUDA_VISIBLE_DEVICES` for sd instances — the mask **renumbers** devices,
+   * so a masked `CUDA0` is not the unmasked `CUDA0` that `--backend` names
+   * (§5 Q5). Placement goes through `--backend`/`--params-backend`/`--max-vram`. */
+  envVars: Record<string, string>;
+  /** `sd-server` flags as ordered rows. `--listen-ip`, `--listen-port` and
+   * `--model-dir` lead the Server tab (model-dir is what makes loading possible
+   * at all); plus any Context/Default-Generation flag the user adds. Weight
+   * flags are only emitted by the argv fallback (§3.3). */
+  serverArgs: EngineParam[];
+  /** Model config ids (models.json entries with `type: 'sdiffusion'`). Exactly
+   * one is loaded at a time; the first selected card is loaded at startup. */
+  modelConfigIds: string[];
+  /** Flags with no UI row, preserved verbatim and re-emitted on export. */
+  extra: Record<string, unknown>;
+}
+
 /** A launchable engine: definition + runtime settings + model selection. */
 export interface EngineInstance {
   /** Stable slug id, derived from name on creation. */
@@ -168,6 +205,8 @@ export interface EngineInstance {
   strata?: StrataConfig;
   /** audio.cpp only: self-contained server config (see AudioConfig). */
   audio?: AudioConfig;
+  /** stable-diffusion.cpp only: self-contained server config (see SdConfig). */
+  sd?: SdConfig;
 }
 
 export interface EnginesFile {
@@ -197,6 +236,10 @@ export function defaultBinaryForKind(kind: EngineKind): string {
       // path, or resolved against the audio block's cwd — audio is
       // self-contained, so there is no definition build folder to join).
       return 'audiocpp_server';
+    case 'sdiffusion':
+      // sd-server is a single binary, named by the instance with a full path
+      // (same self-contained rule as audio; docs/stable-diffusion.md §3.4).
+      return 'sd-server';
     default:
       return '';
   }
