@@ -882,6 +882,8 @@ Implemented 2026-10-25 in `syncEngineBackends()` (`index.ts`) and
 
 ### 3.8 UI
 
+Implemented 2026-10-25 — see §3.10.1 for what landed and what is deferred.
+
 - `EngineList.vue`: add `'sdiffusion'` to `creatableKinds`.
 - New `SDEditor.vue` (mirrors `AudioEditor.vue`): Basics + **Server** tab
   (listen ip/port, **model-dir (required)**, log level, backend/threads/offload
@@ -1024,11 +1026,42 @@ Implemented 2026-10-25 in `src/server/engines/sdProxy.ts` + the
 
 ### 3.10.1 What the UI still has to do
 
-The server side is complete; the client is not. `SDEditor.vue` (§3.9) needs the
-Model tab wired to these routes: a **Load** action per selected card, an
-**Unload**, and a poll of `…/sd/models/status` for the loaded badge and the
-loading spinner. The component dropdowns filter by the `root` field of
-`…/sd/model-files` (§3.8).
+Implemented 2026-10-25 (`src/client/components/SDEditor.vue` + the
+`sdiffusion` wiring in `EngineList.vue` / `ConfigList.vue` / `ConfigEditor.vue`):
+
+- **Model tab** posts to the routes above: a **Load** button per selected card
+  (`POST …/sd/models/load {modelConfigId}`), an **Unload** (`…/models/unload`), a
+  **Refresh catalog** (`…/models/refresh`), and a **status poll** of
+  `…/sd/models/status` driving the state badge (`empty`/`loading`/`ready`/
+  `error`), the `loaded: <recipe>` readout, and the per-card **loaded** tag. The
+  poll auto-runs only while the process is `running`/`starting` (a stopped
+  instance would answer every poll with a connection error); the manual Status
+  button and Load/Unload still work and surface the 502. A load is busy-gated so
+  two swaps can't race, and the poll speeds up while one is in flight.
+- **Startup card** is tagged `startup` (it is `modelConfigIds[0]`, the one
+  `sdStartupLoad` loads after launch); the selection list's order is preserved
+  from the global model list, exactly like the audio Router tab.
+- **Link out** (§5 Q8): the Model tab and the instance drawer both expose an
+  "open sd.cpp UI" link to `http://<listen-ip>:<listen-port>/` (0.0.0.0 →
+  127.0.0.1), mirroring the server's `sdBaseUrl()`. No generate panel of our own.
+- **Card editor** (`ConfigEditor.vue`, `type: 'sdiffusion'`): the catalog is
+  `GET /api/params?kind=sdiffusion`, **re-keyed by `flag`** so a card's rows are
+  stored under the flag verbatim (`--clip_l`, `--steps`) — the spelling
+  `sdModelToLoadRequest` / `SD_FLAG_SLOTS` look up (§3.2). The generated
+  catalog's `key` is the flag without dashes (llama.cpp convention), so this
+  re-key is what keeps the UI's rows and the server's mapping in sync. The
+  **recipe id** and **capabilities** (`k_recipe_features` checkboxes) are
+  structured rows on `sdExtras` (an unknown feature name invalidates the whole
+  emitted recipe, so they are not free-form JSON); `hf_repo`/`hf_file`/notes ride
+  in a raw-JSON block merged back on Apply. The Preview tab shows the
+  `models/load` body the card implies (paths, not file-ids — only a running
+  server hands those out).
+
+**Deferred (later nicety, not blocking):** the card editor's component dropdowns
+filtering by the `root` field of `…/sd/model-files` (§3.8) so the UI cannot
+assemble a mismatched bundle. v1 keeps component rows as free path fields; the
+load path already fails a file outside every `--model-dir` root with the
+actionable §3.3 message, so the guard is server-side for now.
 
 ---
 

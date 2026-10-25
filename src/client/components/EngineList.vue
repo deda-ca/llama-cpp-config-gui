@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted } from 'vue';
 import EngineEditor from './EngineEditor.vue';
 import StrataEditor from './StrataEditor.vue';
 import AudioEditor from './AudioEditor.vue';
+import SDEditor from './SDEditor.vue';
 import type { EngineDefinition, EngineInstance, EngineKind, EngineParam } from '../types';
 import { ENGINE_KIND_LABELS } from '../types';
 
@@ -38,7 +39,7 @@ const isNewInstance = ref(false);
 const newKind = ref<EngineKind>('llamacpp');
 // Only kinds with a real driver get offered; the rest stay in the generic
 // editor's kind list for advanced use.
-const creatableKinds: EngineKind[] = ['llamacpp', 'strata', 'audio'];
+const creatableKinds: EngineKind[] = ['llamacpp', 'strata', 'audio', 'sdiffusion'];
 
 const statusOf = (i: EngineInstance) => props.statuses?.[i.id] ?? i.status ?? 'stopped';
 const isLive = (i: EngineInstance) => {
@@ -51,12 +52,14 @@ const kindOf = (i: EngineInstance): EngineKind =>
 
 // --port is a plain parameter now; the list column reads it back out.
 // Disabled rows never reach the command line, so they don't count here either.
-// strata keeps its port in the separate server-arg list instead, and audio in
-// its `port` config-key row.
+// strata keeps its port in the separate server-arg list instead, audio in
+// its `port` config-key row, and sd in `--listen-port` (sd-server has no
+// --port; `-l` is the listen IP).
 const portOf = (i: EngineInstance) => {
   const p = i.params.find((x) => (x.key === '--port' || x.key === '-p') && !x.disabled)
     ?? i.strata?.serverArgs.find((x) => x.key === '--port' && !x.disabled)
-    ?? i.audio?.serverArgs.find((x) => x.key === 'port' && !x.disabled);
+    ?? i.audio?.serverArgs.find((x) => x.key === 'port' && !x.disabled)
+    ?? i.sd?.serverArgs.find((x) => x.key === '--listen-port' && !x.disabled);
   return p?.value ? `:${p.value}` : '';
 };
 
@@ -143,13 +146,15 @@ async function duplicateInstance(inst: EngineInstance) {
   error.value = '';
   try {
     // --port is a param now: shift the copy's port clear of every instance
-    const portKey = (p: EngineParam) => (p.key === '--port' || p.key === '-p' || p.key === 'port') && !p.disabled;
+    const portKey = (p: EngineParam) =>
+      (p.key === '--port' || p.key === '-p' || p.key === 'port' || p.key === '--listen-port') && !p.disabled;
     const taken = new Set(
       instances.value
         .map((i) => Number(
           i.params.find(portKey)?.value
           ?? i.strata?.serverArgs.find(portKey)?.value
-          ?? i.audio?.serverArgs.find(portKey)?.value,
+          ?? i.audio?.serverArgs.find(portKey)?.value
+          ?? i.sd?.serverArgs.find(portKey)?.value,
         ))
         .filter((n) => Number.isFinite(n)),
     );
@@ -167,15 +172,26 @@ async function duplicateInstance(inst: EngineInstance) {
           extra: { ...inst.audio.extra },
         }
       : undefined;
+    const sd = inst.sd
+      ? {
+          ...inst.sd,
+          envVars: { ...inst.sd.envVars },
+          serverArgs: inst.sd.serverArgs.map((p) => ({ ...p })),
+          modelConfigIds: [...inst.sd.modelConfigIds],
+          extra: { ...inst.sd.extra },
+        }
+      : undefined;
     const strataPortRow = strata?.serverArgs.find(portKey);
     const audioPortRow = audio?.serverArgs.find(portKey);
-    const currentPort = Number(portRow?.value ?? strataPortRow?.value ?? audioPortRow?.value);
-    if (portRow || strataPortRow || audioPortRow) {
+    const sdPortRow = sd?.serverArgs.find(portKey);
+    const currentPort = Number(portRow?.value ?? strataPortRow?.value ?? audioPortRow?.value ?? sdPortRow?.value);
+    if (portRow || strataPortRow || audioPortRow || sdPortRow) {
       let port = Number.isFinite(currentPort) ? currentPort : (inst.kind === 'strata' ? 8095 : 8080);
       while (taken.has(port)) port++;
       if (portRow) portRow.value = String(port);
       if (strataPortRow) strataPortRow.value = String(port);
       if (audioPortRow) audioPortRow.value = String(port);
+      if (sdPortRow) sdPortRow.value = String(port);
     }
     const copy = await postJson('/api/engines/instances', 'POST', {
       name: `${inst.name}-copy`,
@@ -193,6 +209,7 @@ async function duplicateInstance(inst: EngineInstance) {
       autoLaunch: false,
       ...(strata ? { strata } : {}),
       ...(audio ? { audio } : {}),
+      ...(sd ? { sd } : {}),
     });
     await loadData();
   } catch (e) {
@@ -269,6 +286,26 @@ function audioModelNames(inst: EngineInstance): string {
   return (inst.audio?.modelConfigIds ?? [])
     .map((id) => models.value.find((m) => m.id === id)?.alias ?? id)
     .join(', ');
+}
+
+// Same for the sd block (§3.1): the selection lives on the instance, and its
+// first entry is the card loaded at startup.
+function sdModelNames(inst: EngineInstance): string {
+  return (inst.sd?.modelConfigIds ?? [])
+    .map((id) => models.value.find((m) => m.id === id)?.alias ?? id)
+    .join(', ');
+}
+
+// "open sd.cpp UI" link (§3.8 / §5 Q8): generation — video in particular — is
+// only reachable through sd.cpp's own Web UI, so the row links out instead of
+// rebuilding it. Mirrors the server's sdBaseUrl(): 0.0.0.0 is reached locally as
+// 127.0.0.1, and the port row is --listen-port only.
+function sdUiUrlOf(inst: EngineInstance): string {
+  const row = (key: string) => inst.sd?.serverArgs.find((p) => p.key === key && !p.disabled)?.value?.trim() ?? '';
+  const port = row('--listen-port');
+  if (!/^\d+$/.test(port)) return '';
+  const ip = row('--listen-ip') || '127.0.0.1';
+  return `http://${ip === '0.0.0.0' ? '127.0.0.1' : ip}:${port}/`;
 }
 
 onMounted(loadData);
@@ -364,6 +401,22 @@ onUnmounted(() => es?.close());
             <span class="drawer-label">Server</span>
             <code>{{ fmtParams(inst.audio.serverArgs) || '(defaults)' }}</code>
           </div>
+          <div v-if="inst.sd" class="drawer-section">
+            <span class="drawer-label">SD</span>
+            <code>{{ inst.binary || '(no executable)' }}</code>
+          </div>
+          <div v-if="inst.sd" class="drawer-section">
+            <span class="drawer-label">Server</span>
+            <code>{{ fmtParams(inst.sd.serverArgs) || '(defaults)' }}</code>
+          </div>
+          <div v-if="inst.sd" class="drawer-section">
+            <span class="drawer-label">Models</span>
+            <code>{{ inst.sd.modelConfigIds.length }} model(s): {{ sdModelNames(inst) || '(none selected)' }}</code>
+          </div>
+          <div v-if="inst.sd && sdUiUrlOf(inst)" class="drawer-section">
+            <span class="drawer-label">UI</span>
+            <a class="drawer-link" :href="sdUiUrlOf(inst)" target="_blank" rel="noopener">open sd.cpp UI</a>
+          </div>
           <div v-if="inst.routerMode" class="drawer-section">
             <span class="drawer-label">Router</span>
             <code>{{ inst.modelConfigIds.length }} model(s): {{ modelNames(inst) || '(none selected)' }}</code>
@@ -380,8 +433,15 @@ onUnmounted(() => es?.close());
       </div>
     </div>
 
+    <SDEditor
+      v-if="editingInstance && kindOf(editingInstance) === 'sdiffusion'"
+      :instance="editingInstance"
+      :is-new="isNewInstance"
+      @saved="onEditorSaved"
+      @close="editingInstance = null"
+    />
     <AudioEditor
-      v-if="editingInstance && kindOf(editingInstance) === 'audio'"
+      v-else-if="editingInstance && kindOf(editingInstance) === 'audio'"
       :instance="editingInstance"
       :is-new="isNewInstance"
       @saved="onEditorSaved"
@@ -585,6 +645,11 @@ onUnmounted(() => es?.close());
   font-family: 'Cascadia Code', monospace;
   color: #79c0ff;
   word-break: break-all;
+}
+
+.drawer-link {
+  font-family: 'Cascadia Code', monospace;
+  color: #58a6ff;
 }
 
 .btn {

@@ -28,6 +28,7 @@ const newType = ref('');
 const creatableTypes: { value: string; label: string }[] = [
   { value: '', label: 'llama.cpp' },
   { value: 'audio', label: 'audio.cpp' },
+  { value: 'sdiffusion', label: 'stable-diffusion.cpp' },
 ];
 // Draft card held only in memory until the editor's Save persists it, so
 // opening "+ New" never writes an empty config to disk.
@@ -67,6 +68,7 @@ interface TypeMeta {
 function typeMeta(type?: string): TypeMeta {
   if (type === 'audio') return { label: 'audio.cpp', icon: '🔊', cls: 'type-audio' };
   if (type === 'strata') return { label: 'strata', icon: '🧠', cls: 'type-strata' };
+  if (type === 'sdiffusion') return { label: 'sd.cpp', icon: '🖼', cls: 'type-sd' };
   if (!type) return { label: 'llama.cpp', icon: '🦙', cls: 'type-llama' };
   return { label: type, icon: '⚙', cls: 'type-other' };
 }
@@ -526,6 +528,12 @@ async function exportIni() {
   background: #9e6a0322;
   border-color: #d2992255;
   color: #d29922;
+}
+
+.type-badge.type-sd {
+  background: #da363322;
+  border-color: #f8514955;
+  color: #f85149;
 }
 
 .type-badge.type-other {

@@ -37,6 +37,13 @@ export interface ModelConfig {
    * `live_ingest`, …), preserved verbatim on export.
    */
   audioExtras?: Record<string, unknown>;
+  /**
+   * stable-diffusion.cpp only (docs/stable-diffusion.md §3.2): the card-level
+   * keys with no param row — `recipe` (the id submitted to `models/load`),
+   * `capabilities` (mirrors a recipe's `features[]`), `hf_repo`/`hf_file`.
+   * Preserved verbatim on export, mirroring `audioExtras`.
+   */
+  sdExtras?: Record<string, unknown>;
   isDefault: boolean;
 }
 

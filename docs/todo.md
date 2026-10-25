@@ -657,6 +657,23 @@ endpoints); Node only *emits* `timeout`, so the handler destroys the request.
 Client aborts propagate through `res.on('close')` — **not** `req.on('close')`,
 which fires as soon as the body is consumed and would kill every upstream
 request — with a `finalizeOnce` guard so an abort records exactly one `499` row.
+§4 item 9 (UI, §3.8/§3.10.1) — `src/client/components/SDEditor.vue` (mirrors
+`AudioEditor.vue`): Server tab (`ParamRows` over `GET /api/params/sd-server`,
+`--model-dir` marked required), Model tab (checkbox picker filtered to
+`type: 'sdiffusion'` cards, first = `startup` tag, per-card **Load** + **Unload**
++ **Refresh catalog** posting the `…/sd/models/*` routes, state badge +
+`loaded: <recipe>` + per-card `loaded` tag from a `models/status` poll that
+auto-runs only while the process is live), Other Keys raw JSON for `extra`, and
+the Command preview through `/api/engines/command`. "open sd.cpp UI" links on the
+Model tab and the instance drawer (§5 Q8). `EngineList.vue`: `sdiffusion` in
+`creatableKinds`, `--listen-port` in `portOf`/`duplicateInstance`, SD drawer
+sections, `SDEditor` mount. `ConfigList.vue`: `sdiffusion` creatable type + badge.
+`ConfigEditor.vue`: `type: 'sdiffusion'` catalog switch to
+`GET /api/params?kind=sdiffusion` **re-keyed by `flag`** so rows store the flag
+verbatim (`--clip_l`) as `sdModelToLoadRequest` expects, structured `sdExtras`
+recipe-id row + `k_recipe_features` capability checkboxes, and a `models/load`
+body preview. Deferred: component dropdowns filtered by `model-files` `root`
+(§3.8) — the server-side §3.3 path check is the guard for now.
 Remaining items in docs/stable-diffusion.md §4.
 
 - [ ] **OpenAI → sd.cpp translation (deferred from #21 Phase 4, spec §5 Q3).**

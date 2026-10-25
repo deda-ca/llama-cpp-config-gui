@@ -46,11 +46,28 @@ const canSave = computed(() => !isNew.value || local.value.alias.trim() !== '');
 
 // --- Engine family of this card (docs/audio.md §2.1) ---
 // The llama.cpp catalog arrives as a prop; an audio card edits the audio.cpp
-// model-key catalog instead, fetched once per card type.
+// model-key catalog instead, fetched once per card type. A stable-diffusion.cpp
+// card (docs/stable-diffusion.md §3.2) edits the generated sd flag catalog —
+// rows keyed by the flag verbatim (`--clip_l`, `--steps`, …), since sd.cpp has
+// no config file and a card is a filled-in recipe.
 const isAudio = computed(() => local.value.type === 'audio');
+const isSd = computed(() => local.value.type === 'sdiffusion');
 const audioModelParams = ref<ParamDef[] | null>(null);
+const sdModelParams = ref<ParamDef[] | null>(null);
 
-const catalog = computed(() => (isAudio.value ? audioModelParams.value ?? [] : props.params));
+const catalog = computed<ParamDef[]>(() => {
+  if (isAudio.value) return audioModelParams.value ?? [];
+  if (isSd.value) {
+    // An sd card's rows are keyed by the **flag verbatim** (`--clip_l`,
+    // `--steps`) because that is what `sdModelToLoadRequest` / the argv
+    // fallback look up (`SD_FLAG_SLOTS`, docs/stable-diffusion.md §3.2). The
+    // generated catalog's `key` is the flag without its dashes (llama.cpp
+    // convention), so re-key the defs by `flag` — everything downstream then
+    // stores and matches rows by the flag without special cases.
+    return (sdModelParams.value ?? []).map((p) => ({ ...p, key: p.flag }));
+  }
+  return props.params;
+});
 
 watchEffect(() => {
   if (isAudio.value && audioModelParams.value === null) {
@@ -58,6 +75,14 @@ watchEffect(() => {
       .then((res) => (res.ok ? res.json() : []))
       .then((defs) => { audioModelParams.value = defs; })
       .catch(() => { audioModelParams.value = []; });
+  }
+  if (isSd.value && sdModelParams.value === null) {
+    // The full generated vocabulary (146 rows, npm run gen:sd-params) — the
+    // card's rows are real sd-cli/sd-server flags, not config keys (§3.2).
+    fetch('/api/params?kind=sdiffusion')
+      .then((res) => (res.ok ? res.json() : []))
+      .then((defs) => { sdModelParams.value = defs; })
+      .catch(() => { sdModelParams.value = []; });
   }
 });
 
@@ -163,6 +188,29 @@ const categoryLabels: Record<string, string> = {
   speculative: 'Speculative Decoding',
   other: 'Other',
   [UNKNOWN_GROUP]: 'Unknown',
+  // stable-diffusion.cpp catalog (npm run gen:sd-params) — the generated
+  // categories, spelled like the engine's own flag groups (§3.9).
+  model: 'Model Files',
+  'text-encoder': 'Text Encoder',
+  vae: 'VAE',
+  addon: 'Add-ons',
+  device: 'Device & Compute',
+  memory: 'Memory & Speed',
+  kernel: 'Kernels',
+  size: 'Image Size',
+  hires: 'Hires Fix',
+  guidance: 'Guidance',
+  moe: 'MoE / High-Noise',
+  video: 'Video',
+  reference: 'Reference Images',
+  adetailer: 'ADetailer',
+  cache: 'Cache',
+  convert: 'Convert',
+  serve: 'Serve',
+  output: 'Output',
+  prompt: 'Prompt',
+  rng: 'RNG',
+  logging: 'Logging',
 };
 
 // --- Preset inputs: free text + dropdown of preset values from param def ---
@@ -435,6 +483,158 @@ function applyExtras() {
   }
 }
 
+// --- stable-diffusion.cpp card extras (docs/stable-diffusion.md §3.2) ---
+// A card is a filled-in recipe: `sdExtras.recipe` is the id submitted to
+// `models/load`, and `sdExtras.capabilities` mirrors a recipe's `features[]`.
+// Both are structured rows (the recipe id is load-bearing, and an unknown
+// feature name makes the whole emitted recipe invalid — `validate_recipe_features`),
+// so they are edited directly rather than through raw JSON. The remaining keys
+// (`hf_repo`, `hf_file`, quant notes…) ride along verbatim in a raw-JSON block.
+//
+// The capability vocabulary is `k_recipe_features` (`model_catalog.cpp:294-319`).
+// `ip_adapter`, `controlnet`, `high_noise` and `preview_tae` are implied by
+// declaring the matching component slot, so a card usually only lists the
+// opt-in flags here (§3.3).
+const SD_RECIPE_FEATURES = [
+  'img2img', 'mask_image', 'lora', 'vae_tiling', 'cache', 'cache_dit', 'preview',
+  'flow_shift', 'distilled_guidance', 'shifted_timestep', 'img_cfg', 'slg',
+  'clip_skip', 'ref_images', 'controlnet', 'control_image', 'ip_adapter',
+  'init_image', 'end_image', 'control_frames', 'vace', 'high_noise', 'cache_unet',
+  'preview_tae',
+] as const;
+
+function sdExtra(key: string): string {
+  const v = local.value.sdExtras?.[key];
+  return typeof v === 'string' ? v : '';
+}
+function setSdExtra(key: string, value: string) {
+  const extras = { ...(local.value.sdExtras ?? {}) };
+  if (value.trim()) extras[key] = value.trim();
+  else delete extras[key];
+  local.value.sdExtras = Object.keys(extras).length ? extras : undefined;
+}
+
+const sdRecipe = computed({
+  get: () => sdExtra('recipe'),
+  set: (v: string) => setSdExtra('recipe', v),
+});
+
+const sdCapabilities = computed<string[]>(() => {
+  const caps = local.value.sdExtras?.capabilities;
+  return Array.isArray(caps) ? caps.filter((c): c is string => typeof c === 'string') : [];
+});
+
+function toggleCapability(name: string) {
+  const current = new Set(sdCapabilities.value);
+  if (current.has(name)) current.delete(name);
+  else current.add(name);
+  const extras = { ...(local.value.sdExtras ?? {}) };
+  if (current.size) extras.capabilities = [...current];
+  else delete extras.capabilities;
+  local.value.sdExtras = Object.keys(extras).length ? extras : undefined;
+}
+
+// The raw-JSON block for the sd keys the structured rows don't own (recipe and
+// capabilities are edited above, so they are excluded here and merged back on
+// Apply so the two views never clobber each other).
+const sdExtrasText = ref('');
+const sdExtrasError = ref('');
+const sdExtrasApplied = ref(false);
+
+function syncSdExtrasText() {
+  const { recipe: _r, capabilities: _c, ...rest } = local.value.sdExtras ?? {};
+  sdExtrasText.value = Object.keys(rest).length ? JSON.stringify(rest, null, 2) : '';
+  sdExtrasError.value = '';
+}
+syncSdExtrasText();
+
+function applySdExtras() {
+  const { recipe, capabilities } = local.value.sdExtras ?? {};
+  const text = sdExtrasText.value.trim();
+  let rest: Record<string, unknown> = {};
+  if (text) {
+    try {
+      const parsed = JSON.parse(text);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        sdExtrasError.value = 'Expected a JSON object of model keys';
+        return;
+      }
+      rest = parsed as Record<string, unknown>;
+    } catch (e) {
+      sdExtrasError.value = `Invalid JSON: ${(e as Error).message}`;
+      return;
+    }
+  }
+  // Merge the structured keys back in, dropping empties.
+  const merged: Record<string, unknown> = { ...rest };
+  if (typeof recipe === 'string' && recipe.trim()) merged.recipe = recipe.trim();
+  if (Array.isArray(capabilities) && capabilities.length) merged.capabilities = capabilities;
+  local.value.sdExtras = Object.keys(merged).length ? merged : undefined;
+  sdExtrasError.value = '';
+  sdExtrasApplied.value = true;
+  setTimeout(() => (sdExtrasApplied.value = false), 1500);
+}
+
+// The `models/load` body this card implies (docs/stable-diffusion.md §3.3),
+// shown as a preview. The server resolves each path to a live catalog file-id
+// at load time, so the preview shows the on-disk paths the card carries rather
+// than the file-ids (which only a running server can hand out). `SD_SLOT_FLAGS`
+// mirrors the server table (`engines/sd.ts`) — a component row's flag names its
+// slot.
+const SD_SLOT_FLAGS: Record<string, string> = {
+  model: '--model',
+  diffusion_model: '--diffusion-model',
+  high_noise_diffusion_model: '--high-noise-diffusion-model',
+  uncond_diffusion_model: '--uncond-diffusion-model',
+  clip_l: '--clip_l',
+  clip_g: '--clip_g',
+  clip_vision: '--clip_vision',
+  t5xxl: '--t5xxl',
+  llm: '--llm',
+  llm_vision: '--llm_vision',
+  tokenizer: '--tokenizer',
+  vae: '--vae',
+  audio_vae: '--audio-vae',
+  audio_encoder: '--audio-encoder',
+  embeddings_connectors: '--embeddings-connectors',
+  tae: '--tae',
+  taesd: '--taesd',
+  control_net: '--control-net',
+  ip_adapter: '--ip-adapter',
+  motion_module: '--motion-module',
+  photo_maker: '--photo-maker',
+  pulid_weights: '--pulid-weights',
+};
+const SD_FLAG_SLOTS: Record<string, string> = Object.fromEntries(
+  Object.entries(SD_SLOT_FLAGS).map(([slot, flag]) => [flag, slot]),
+);
+
+const sdLoadPreview = computed(() => {
+  const cfg = local.value;
+  const recipe = sdRecipe.value;
+  const disabled = new Set(cfg.disabledParams ?? []);
+  const rows = cfg.paramOrder
+    .filter((k) => !disabled.has(k))
+    .map((k) => ({ key: k, value: cfg.params[k] ?? '' }));
+  // Primary slot: modelPath is the checkpoint when there are no component rows,
+  // otherwise the diffusion model (§3.2).
+  const hasComponents = rows.some((r) => SD_FLAG_SLOTS[r.key] && SD_FLAG_SLOTS[r.key] !== 'model');
+  const primarySlot = hasComponents ? 'diffusion_model' : 'model';
+  const models: Record<string, string> = {};
+  const primaryFlag = SD_SLOT_FLAGS[primarySlot];
+  const primaryValue = cfg.modelPath || rows.find((r) => r.key === primaryFlag)?.value || '';
+  if (primaryValue) models[primarySlot] = primaryValue;
+  for (const r of rows) {
+    const slot = SD_FLAG_SLOTS[r.key];
+    if (!slot || slot === primarySlot) continue;
+    if (r.value) models[slot] = r.value;
+  }
+  const out: Record<string, unknown> = { recipe: recipe || '(no recipe id set)', models };
+  const caps = sdCapabilities.value;
+  if (caps.length) out.features = caps;
+  return JSON.stringify(out, null, 2);
+});
+
 // The `models[]` entry this card produces, mirroring the server's generator
 // enough to show what a launch writes (docs/audio.md §2.3).
 const audioEntryPreview = computed(() => {
@@ -542,7 +742,8 @@ const previewIni = computed(() => {
 
 const copied = ref(false);
 function copyPreview() {
-  navigator.clipboard.writeText(isAudio.value ? audioEntryPreview.value : previewIni.value).then(() => {
+  const text = isSd.value ? sdLoadPreview.value : isAudio.value ? audioEntryPreview.value : previewIni.value;
+  navigator.clipboard.writeText(text).then(() => {
     copied.value = true;
     setTimeout(() => (copied.value = false), 1500);
   });
@@ -693,7 +894,7 @@ async function setDefault() {
     <div class="tab-bar">
       <button class="tab-btn" :class="{ active: activeTab === 'params' }" @click="activeTab = 'params'">Params</button>
       <button class="tab-btn" :class="{ active: activeTab === 'preview' }" @click="activeTab = 'preview'">Preview</button>
-      <button v-if="!isAudio" class="tab-btn" :class="{ active: activeTab === 'export' }" @click="activeTab = 'export'">Export</button>
+      <button v-if="!isAudio && !isSd" class="tab-btn" :class="{ active: activeTab === 'export' }" @click="activeTab = 'export'">Export</button>
     </div>
 
     <!-- Params tab content -->
@@ -706,8 +907,13 @@ async function setDefault() {
 
     <!-- Model path -->
     <div class="field">
-      <label>{{ isAudio ? 'Model path' : 'Model (.gguf)' }}</label>
-      <input v-model="local.modelPath" type="text" :placeholder="isAudio ? '/path/to/model or repo dir' : '/path/to/model.gguf'" />
+      <label>{{ isSd ? 'Primary component (checkpoint or diffusion model)' : isAudio ? 'Model path' : 'Model (.gguf)' }}</label>
+      <input v-model="local.modelPath" type="text" :placeholder="isSd ? '/path/to/models/<root>/checkpoints/model.safetensors' : isAudio ? '/path/to/model or repo dir' : '/path/to/model.gguf'" />
+      <small v-if="isSd" class="field-hint">
+        The <code>model</code> slot for an all-in-one checkpoint, the <code>diffusion_model</code> slot once
+        component rows (<code>--clip_l</code>, <code>--vae</code>, …) are present. The path must live under one
+        of the engine's <code>--model-dir</code> roots — a load resolves it to a catalog file-id (§3.3).
+      </small>
     </div>
 
     <!-- Active params grouped by category -->
@@ -806,7 +1012,7 @@ async function setDefault() {
         <span class="drag-handle" title="Drag to reorder" @mousedown="onHandleMousedown(up.key)">&#8942;</span>
         <span class="param-flag">{{ up.key }}</span>
         <input v-model="local.params[up.key]" type="text" />
-        <span class="param-desc" :title="isAudio ? 'Not a known audio.cpp model key — kept as-is' : 'Not a known llama.cpp parameter — kept as-is'">unknown parameter</span>
+        <span class="param-desc" :title="isSd ? 'Not a known sd.cpp flag — kept as-is' : isAudio ? 'Not a known audio.cpp model key — kept as-is' : 'Not a known llama.cpp parameter — kept as-is'">unknown parameter</span>
         <button
           class="toggle-enabled-btn"
           :class="{ 'is-disabled': isDisabled(up.key) }"
@@ -843,6 +1049,43 @@ async function setDefault() {
       <div v-if="extrasError" class="bulk-unknown">{{ extrasError }}</div>
       <div class="picker-actions">
         <button class="btn btn-sm btn-primary" @click="applyExtras">{{ extrasApplied ? '✓ Applied' : 'Apply' }}</button>
+      </div>
+    </div>
+
+    <!-- stable-diffusion.cpp card extras: the recipe id + capability markers the
+         card submits to models/load (§3.2). Structured rows, not raw JSON — an
+         unknown feature name invalidates the whole emitted recipe. -->
+    <div v-if="isSd" class="bulk-paste">
+      <h4 class="group-title">Recipe</h4>
+      <div class="param-row">
+        <span class="param-flag">recipe</span>
+        <input v-model="sdRecipe" type="text" placeholder="qwen-image-21" />
+        <span class="param-desc" title="The id submitted to POST /sdcpp/v1/models/load: one of sd.cpp's built-ins, or an id the GUI emits into &lt;model-dir&gt;/recipes/&lt;id&gt;.json">
+          built-in recipe id, or one the GUI emits as a user recipe
+        </span>
+      </div>
+      <div class="capability-grid">
+        <label v-for="f in SD_RECIPE_FEATURES" :key="f" class="capability-item">
+          <input type="checkbox" :checked="sdCapabilities.includes(f)" @change="toggleCapability(f)" />
+          <span>{{ f }}</span>
+        </label>
+      </div>
+      <small class="field-hint">
+        Capabilities mirror a recipe's <code>features[]</code> (<code>k_recipe_features</code>).
+        <code>ip_adapter</code>, <code>controlnet</code>, <code>high_noise</code> and
+        <code>preview_tae</code> are implied by declaring the matching component slot, so usually
+        only the opt-in flags belong here.
+      </small>
+    </div>
+
+    <!-- sd.cpp other keys: hf_repo / hf_file / quant notes — verbatim raw JSON.
+         recipe and capabilities are edited above and merged back on Apply. -->
+    <div v-if="isSd" class="bulk-paste">
+      <h4 class="group-title">Other Keys (raw JSON)</h4>
+      <textarea v-model="sdExtrasText" rows="6" placeholder='{"hf_repo": "…", "hf_file": "…"}'></textarea>
+      <div v-if="sdExtrasError" class="bulk-unknown">{{ sdExtrasError }}</div>
+      <div class="picker-actions">
+        <button class="btn btn-sm btn-primary" @click="applySdExtras">{{ sdExtrasApplied ? '✓ Applied' : 'Apply' }}</button>
       </div>
     </div>
 
@@ -901,14 +1144,14 @@ async function setDefault() {
     <!-- Preview tab content -->
     <div v-if="activeTab === 'preview'" class="preview-panel">
       <div class="preview-header">
-        <span class="preview-label">{{ isAudio ? 'models[] entry' : 'router.ini output' }}</span>
+        <span class="preview-label">{{ isSd ? 'models/load body (paths resolve to file-ids at load)' : isAudio ? 'models[] entry' : 'router.ini output' }}</span>
         <button class="btn btn-sm" @click="copyPreview">{{ copied ? '✓ Copied' : 'Copy' }}</button>
       </div>
-      <pre class="preview-code">{{ isAudio ? audioEntryPreview : previewIni }}</pre>
+      <pre class="preview-code">{{ isSd ? sdLoadPreview : isAudio ? audioEntryPreview : previewIni }}</pre>
     </div>
 
     <!-- Export tab content -->
-    <div v-if="activeTab === 'export' && !isAudio" class="preview-panel">
+    <div v-if="activeTab === 'export' && !isAudio && !isSd" class="preview-panel">
       <div class="preview-header">
         <span class="preview-label">Command line</span>
         <button class="btn btn-sm" @click="copyExport">{{ copiedExport ? '✓ Copied' : 'Copy' }}</button>
@@ -1263,6 +1506,37 @@ async function setDefault() {
 }
 
 .bulk-paste textarea:focus { outline: none; }
+
+/* Inline hint under a field (sd card model-path note, capability note) */
+.field-hint {
+  font-size: 0.66rem;
+  color: #484f58;
+  line-height: 1.4;
+}
+
+.field-hint code {
+  font-family: 'Cascadia Code', monospace;
+  color: #79c0ff;
+}
+
+/* Recipe capability checkboxes (k_recipe_features vocabulary) */
+.capability-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 4px 10px;
+  padding: 2px 0;
+}
+
+.capability-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: #8b949e;
+  cursor: pointer;
+}
+
+.capability-item:hover { color: #e1e4e8; }
 
 .param-picker {
   border: 1px solid #30363d;
