@@ -1,3 +1,17 @@
+# [0.21.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.20.0...v0.21.0) (2026-10-25)
+
+
+### Features
+
+* **sd:** add the SdConfig block and wire it through the engine store ([846c0e7](https://github.com/deda-ca/llama-cpp-config-gui/commit/846c0e789dd2b715cc433ddce10b542c8e350711))
+* **sd:** add the stable-diffusion.cpp engine driver ([7de0837](https://github.com/deda-ca/llama-cpp-config-gui/commit/7de08370086ee8a864dc967e4140d70035f3a058))
+* **sd:** editor UI, list wiring and card catalog (docs/stable-diffusion.md 3.8) ([b4bb523](https://github.com/deda-ca/llama-cpp-config-gui/commit/b4bb5233c39e625638f9a19dbb16e900d93576b8))
+* **sd:** generate the stable-diffusion.cpp parameter catalogs ([4eed294](https://github.com/deda-ca/llama-cpp-config-gui/commit/4eed29494753a0b845e5ad7302bf72e887afd8c3))
+* **sd:** launch path validates model-dir and selected card ([f8a34eb](https://github.com/deda-ca/llama-cpp-config-gui/commit/f8a34ebb3507a288cf47ea499939135f6df2bfca))
+* **sd:** map sd model cards to load requests and the argv fallback ([d2fa807](https://github.com/deda-ca/llama-cpp-config-gui/commit/d2fa8070744eff7a0e767d1558206f05741b9d58))
+* **sd:** mirror sd instances into the proxy and add image-edit + timeouts ([1bffd13](https://github.com/deda-ca/llama-cpp-config-gui/commit/1bffd131e2490a865bd8530dc41f5557bf35fdbc))
+* **sd:** model-management proxy and startup load ([a8b6794](https://github.com/deda-ca/llama-cpp-config-gui/commit/a8b67941db1b6d32a80a928cf9d49e550fe8f11a))
+
 # [0.20.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.19.0...v0.20.0) (2026-10-24)
 
 
