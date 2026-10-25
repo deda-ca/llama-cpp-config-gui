@@ -31,6 +31,14 @@ import {
 } from './engines/audio.js';
 import { AUDIO_MODEL_PARAMS, AUDIO_SERVER_PARAMS } from './engines/audioServerParams.js';
 import { normalizeSdConfig, sdModelDirs } from './engines/sd.js';
+import {
+  sdBaseUrl,
+  sdInitialLoad,
+  sdLoadCard,
+  sdModelFiles,
+  sdRequest,
+  sdUnloadModel,
+} from './engines/sdProxy.js';
 import { SD_SERVER_PARAMS } from './engines/sdServerParams.js';
 import { SD_DEFAULT_PARAMS } from './sdParams-default.js';
 import { isEngineKind, type EngineDefinition, type EngineInstance, type EnginesFile } from './engines/types.js';
@@ -1126,6 +1134,109 @@ app.get('/api/engines/instances/:id/audio/export', (req, res) => {
   res.json(audioToConfig(inst.audio, selected, audioRunDir(inst.binary)));
 });
 
+// --- stable-diffusion.cpp model management (docs/stable-diffusion.md §3.10) ---
+//
+// sd.cpp's catalog is live server state, so the GUI proxies the sdcpp model
+// endpoints to the instance's own baseUrl — the browser never talks to
+// sd-server directly (no CORS), and file-ids stay the server's own (§1.4.1).
+
+/** Resolve an instance + its sd-server baseUrl, answering the request on failure. */
+function sdTarget(
+  req: express.Request,
+  res: express.Response,
+): { inst: EngineInstance; baseUrl: string } | null {
+  const inst = engines.getEngines().instances.find((i) => i.id === req.params.id);
+  if (!inst) {
+    res.status(404).json({ error: `Instance "${req.params.id}" not found` });
+    return null;
+  }
+  if (!inst.sd) {
+    res.status(400).json({ error: 'Instance has no stable diffusion configuration' });
+    return null;
+  }
+  const baseUrl = sdBaseUrl(inst);
+  if (!baseUrl) {
+    res.status(400).json({ error: 'Set --listen-port before using the model API' });
+    return null;
+  }
+  return { inst, baseUrl };
+}
+
+/** Relay one sdcpp call, passing the upstream status through (§3.10 error table). */
+async function sdRelay(
+  req: express.Request,
+  res: express.Response,
+  apiPath: string,
+  init?: { method?: string; body?: unknown; timeoutMs?: number },
+): Promise<void> {
+  const target = sdTarget(req, res);
+  if (!target) return;
+  try {
+    const result = await sdRequest(target.baseUrl, apiPath, init);
+    res.status(result.status).json(result.body);
+  } catch (e) {
+    res.status(502).json({ error: `sd-server is not answering at ${target.baseUrl}: ${e instanceof Error ? e.message : e}` });
+  }
+}
+
+app.get('/api/engines/instances/:id/sd/model-files', (req, res) =>
+  sdRelay(req, res, '/sdcpp/v1/model-files'));
+
+app.get('/api/engines/instances/:id/sd/recipes', (req, res) =>
+  sdRelay(req, res, '/sdcpp/v1/recipes'));
+
+app.get('/api/engines/instances/:id/sd/models/status', (req, res) =>
+  sdRelay(req, res, '/sdcpp/v1/models/status'));
+
+app.post('/api/engines/instances/:id/sd/models/refresh', (req, res) =>
+  sdRelay(req, res, '/sdcpp/v1/models/refresh', { method: 'POST', timeoutMs: 30_000 }));
+
+// Load (or swap to) one of the instance's selected cards. The card's component
+// paths are resolved to live file-ids first, so a file outside every
+// --model-dir root fails with the actionable message instead of a 400 from
+// upstream (§3.3). A recipe the server has never seen is emitted as a user
+// recipe and retried once (sdProxy.sdLoadCard).
+app.post('/api/engines/instances/:id/sd/models/load', async (req, res) => {
+  const target = sdTarget(req, res);
+  if (!target) return;
+  const cardId = typeof req.body?.modelConfigId === 'string' ? req.body.modelConfigId : '';
+  if (!cardId) {
+    res.status(400).json({ error: 'modelConfigId is required' });
+    return;
+  }
+  const card = loadModels().configs.find((c) => c.id === cardId);
+  if (!card) {
+    res.status(404).json({ error: `Model config "${cardId}" not found` });
+    return;
+  }
+  try {
+    const files = await sdModelFiles(target.baseUrl);
+    const outcome = await sdLoadCard(target.baseUrl, card, files, sdModelDirs(target.inst.sd));
+    if (!outcome.ok) {
+      res.status(400).json({ error: outcome.error, warnings: outcome.warnings });
+      return;
+    }
+    res.json({ status: outcome.status, warnings: outcome.warnings, recipeWritten: outcome.recipeWritten ?? null });
+  } catch (e) {
+    res.status(502).json({ error: `sd-server is not answering at ${target.baseUrl}: ${e instanceof Error ? e.message : e}` });
+  }
+});
+
+app.post('/api/engines/instances/:id/sd/models/unload', async (req, res) => {
+  const target = sdTarget(req, res);
+  if (!target) return;
+  try {
+    const outcome = await sdUnloadModel(target.baseUrl);
+    if (!outcome.ok) {
+      res.status(400).json({ error: outcome.error });
+      return;
+    }
+    res.json({ status: outcome.status });
+  } catch (e) {
+    res.status(502).json({ error: `sd-server is not answering at ${target.baseUrl}: ${e instanceof Error ? e.message : e}` });
+  }
+});
+
 app.delete('/api/engines/instances/:id', (req, res) => {
   const id = req.params.id;
   const data = engines.getEngines();
@@ -1265,6 +1376,39 @@ async function buildLaunchSpec(
   return { spec, routerIniPath, strataConfigPath: generatedConfigPath, audioConfigPath: generatedAudioPath };
 }
 
+// sd.cpp starts **empty** (Option A, §1.4.1): the launch line carries
+// `--model-dir` but no weights, so the first model has to arrive over the API
+// once the server answers. Fire-and-forget — a load that takes tens of seconds
+// must never block the launch response, and a failed one leaves the instance up
+// with state `error`, which the UI's status poll surfaces.
+async function sdStartupLoad(id: string): Promise<void> {
+  const inst = engines.getEngines().instances.find((i) => i.id === id);
+  if (!inst) return;
+  const modelsData = loadModels();
+  try {
+    const outcome = await sdInitialLoad(
+      inst,
+      (cardId) => modelsData.configs.find((c) => c.id === cardId),
+      () => {
+        const status = engines.getStatus(id);
+        return status === 'starting' || status === 'running';
+      },
+    );
+    if (outcome.ok) {
+      console.log(`[server] sd instance "${inst.name}" loaded ${outcome.status?.recipe ?? 'a model'}`);
+    } else {
+      console.warn(`[server] sd instance "${inst.name}" initial load failed: ${outcome.error}`);
+    }
+    for (const warning of outcome.warnings) {
+      console.warn(`[server] sd instance "${inst.name}": ${warning}`);
+    }
+  } catch (e) {
+    // The instance died mid-load, or a request was aborted — never let a
+    // fire-and-forget task reject unhandled.
+    console.warn(`[server] sd instance "${inst.name}" initial load aborted: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
 // Launch an engine instance from its stored definition + settings.
 app.post('/api/engines/instances/:id/launch', async (req, res) => {
   const id = req.params.id;
@@ -1283,6 +1427,7 @@ app.post('/api/engines/instances/:id/launch', async (req, res) => {
   metricsPoller.reset();
   startMetricsPolling();
   engines.launch(id, built.spec);
+  if (inst.kind === 'sdiffusion') void sdStartupLoad(id);
   res.json({
     status: engines.getStatus(id),
     routerIniPath: built.routerIniPath ?? null,
@@ -2082,6 +2227,7 @@ async function autoLaunchEngines(): Promise<void> {
       continue;
     }
     engines.launch(inst.id, built.spec);
+    if (inst.kind === 'sdiffusion') void sdStartupLoad(inst.id);
     console.log(`[server] auto-launched engine "${inst.name}" (${inst.id})`);
   }
   await refreshDeviceMatch();

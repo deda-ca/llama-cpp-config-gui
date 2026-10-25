@@ -627,6 +627,20 @@ self-contained (no definition needed) and validates the two things a launch
 needs: at least one `--model-dir` row and a selected card; **no generated file**
 (unlike router/strata/audio) since sd.cpp reads no config — the model arrives
 over the API once the server is up (§3.10, item 7).
+§4 item 7 (model-management proxy) — `engines/sdProxy.ts` + the
+`/api/engines/instances/:id/sd/{model-files,recipes,models/status,models/refresh,
+models/load,models/unload}` routes: `sdBaseUrl` from `--listen-ip`/`--listen-port`,
+`sdRequest` keeps the upstream status so `409 model_busy` /
+`400 invalid_model_config` / `422 model_load_failed` / `503 model_loading` reach
+the browser with the §3.10 wording, and `load` resolves the card's paths to
+**live file-ids** before submitting (a file the server never scanned fails with
+the §3.3 message and never reaches upstream). A `400 unknown recipe` is repaired:
+the card is emitted as a user recipe into `<first --model-dir>/recipes/<id>.json`,
+the catalog refreshed, the load retried once — but only for an id the server's
+`valid_identifier` accepts, since a file with a bad id is silently skipped at
+scan time. `sdStartupLoad` (launch endpoint + `autoLaunchEngines`) waits on
+`models/status` then loads `modelConfigIds[0]`, fire-and-forget, and gives up if
+the process dies.
 Remaining items in docs/stable-diffusion.md §4.
 
 - [ ] **OpenAI → sd.cpp translation (deferred from #21 Phase 4, spec §5 Q3).**

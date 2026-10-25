@@ -954,6 +954,47 @@ Q4 that is ~10 GB of weights, order of tens of seconds. It still beats a
 restart (no port churn, no proxy re-mirror, no stopped-instance window), but it
 is not free and the UI must show progress.
 
+Implemented 2026-10-25 in `src/server/engines/sdProxy.ts` + the
+`/api/engines/instances/:id/sd/*` routes in `index.ts`:
+
+- `sdBaseUrl(inst)` builds the target from `--listen-ip`/`--listen-port`
+  (`0.0.0.0` → `127.0.0.1`), and is `null` without a usable port — so an
+  instance that cannot be reached is a clear 400, never a guessed URL.
+- `sdRequest` is the single JSON call to the instance's sdcpp API; it keeps the
+  **upstream status code** so the error table below reaches the browser intact,
+  and passes a non-JSON body through as text.
+- Endpoints relay straight through: `GET …/sd/model-files`, `…/sd/recipes`,
+  `…/sd/models/status`, `POST …/sd/models/refresh`.
+- `POST …/sd/models/load {modelConfigId}` is **not** a bare relay: the card's
+  component paths are resolved to live file-ids first
+  (`sdModelToLoadRequest`), so a file the server never scanned fails with the
+  actionable §3.3 message and never reaches upstream.
+- **Unknown recipe is repaired, not just reported**: on `400 unknown recipe` the
+  card is emitted as a user recipe into `<first --model-dir>/recipes/<id>.json`,
+  the catalog is refreshed, and the load is retried once. The id must satisfy
+  the server's own `valid_identifier` (1–128 of `[A-Za-z0-9._-]`) or the file
+  would be skipped at scan time — so an invalid id is refused with an
+  explanation instead of writing a file nothing reads.
+- `sdUpstreamError` maps `409 model_busy` / `400 invalid_model_config` /
+  `422 model_load_failed` / `503 model_loading` onto the wording §3.10
+  promises, always including the server's own text (it names the slot/file).
+- **Startup load** (`sdStartupLoad`, fired from both the launch endpoint and
+  `autoLaunchEngines`): `sdWaitUntilReady` polls `models/status` until the
+  server answers with a state (sd.cpp logs `listening on:` immediately before
+  `svr.listen()`), then loads `modelConfigIds[0]`. It is fire-and-forget — a
+  load that takes tens of seconds must not block the launch response — and it
+  stops waiting when the process is no longer `starting`/`running`, so a failed
+  spawn cannot poll a dead port for 30 s. Failures are logged, not thrown: the
+  server is up either way, and the status poll shows `error` + the message.
+
+### 3.10.1 What the UI still has to do
+
+The server side is complete; the client is not. `SDEditor.vue` (§3.9) needs the
+Model tab wired to these routes: a **Load** action per selected card, an
+**Unload**, and a poll of `…/sd/models/status` for the loaded badge and the
+loading spinner. The component dropdowns filter by the `root` field of
+`…/sd/model-files` (§3.8).
+
 ---
 
 ## 4. Work breakdown

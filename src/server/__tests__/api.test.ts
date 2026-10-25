@@ -1290,6 +1290,35 @@ describe('Stable Diffusion Engine API', () => {
     expect(res.body.error).toContain('model config');
   });
 
+  it('model-management endpoints reject an instance without an sd block', async () => {
+    const res = await request(app).get('/api/engines/instances/default/sd/model-files');
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('stable diffusion');
+    expect((await request(app).get('/api/engines/instances/nope/sd/recipes')).status).toBe(404);
+  });
+
+  it('model-management endpoints 502 when sd-server is not answering', async () => {
+    // The saved block points at a port nothing listens on, so the proxy call
+    // fails to connect rather than hanging.
+    const res = await request(app).get(`/api/engines/instances/${sdId}/sd/models/status`);
+    expect(res.status).toBe(502);
+    expect(res.body.error).toContain('not answering');
+  });
+
+  it('load requires a modelConfigId and a known card', async () => {
+    const missing = await request(app)
+      .post(`/api/engines/instances/${sdId}/sd/models/load`)
+      .send({});
+    expect(missing.status).toBe(400);
+    expect(missing.body.error).toContain('modelConfigId');
+
+    const unknown = await request(app)
+      .post(`/api/engines/instances/${sdId}/sd/models/load`)
+      .send({ modelConfigId: 'no-such-card' });
+    expect(unknown.status).toBe(404);
+    expect(unknown.body.error).toContain('not found');
+  });
+
   it('deletes the sd instance', async () => {
     const res = await request(app).delete(`/api/engines/instances/${sdId}`);
     expect(res.status).toBe(200);
