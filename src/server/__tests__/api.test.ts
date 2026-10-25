@@ -173,6 +173,45 @@ describe('Params API', () => {
     expect(res.body[0]).toHaveProperty('key');
     expect(res.body[0]).toHaveProperty('flag');
   });
+
+  it('GET /api/params?kind=sdiffusion returns the seeded sd.cpp catalog', async () => {
+    const res = await request(app).get('/api/params?kind=sdiffusion');
+    expect(res.status).toBe(200);
+    // Seeded from SD_DEFAULT_PARAMS on first run (params.sdiffusion.json).
+    expect(res.body.length).toBeGreaterThan(100);
+    expect(res.body).toEqual(expect.arrayContaining([
+      // Component slots are path rows; the slot vocabulary is the flag verbatim.
+      expect.objectContaining({ flag: '--diffusion-model', category: 'model', inputType: 'path' }),
+      expect.objectContaining({ flag: '--llm', category: 'text-encoder', inputType: 'path' }),
+      expect.objectContaining({ flag: '--vae', category: 'vae', inputType: 'path' }),
+      // Video family is in scope (docs/stable-diffusion.md §5 Q6).
+      expect.objectContaining({ flag: '--video-frames', category: 'video', inputType: 'number' }),
+      expect.objectContaining({ flag: '--moe-boundary', category: 'moe' }),
+    ]));
+    // Deprecated aliases the binary tells users to replace are excluded.
+    const flags = res.body.map((p: { flag: string }) => p.flag);
+    for (const gone of ['--fa', '--clip-on-cpu', '--qwen2vl', '--vae-on-cpu', '--diffusion-fa']) {
+      expect(flags).not.toContain(gone);
+    }
+    // sd-cli-only flags would abort an sd-server launch ("unknown argument").
+    for (const cliOnly of ['--mode', '--output', '--preview']) {
+      expect(flags).not.toContain(cliOnly);
+    }
+  });
+
+  it('GET /api/params/sd-server returns the sd-server option catalog', async () => {
+    const res = await request(app).get('/api/params/sd-server');
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual(expect.arrayContaining([
+      // The port flag is --listen-port, never --port (§1.2).
+      expect.objectContaining({ flag: '--listen-port', key: 'listen-port', inputType: 'number' }),
+      expect.objectContaining({ flag: '--listen-ip', key: 'listen-ip' }),
+      // model-dir is what makes API loading possible at all (§1.4.1).
+      expect.objectContaining({ flag: '--model-dir', key: 'model-dir', inputType: 'path' }),
+      expect.objectContaining({ flag: '--backend', category: 'device' }),
+    ]));
+    expect(res.body.map((p: { flag: string }) => p.flag)).not.toContain('--port');
+  });
 });
 
 describe('Router INI Import/Export', () => {

@@ -30,10 +30,12 @@ import {
   normalizeAudioConfig,
 } from './engines/audio.js';
 import { AUDIO_MODEL_PARAMS, AUDIO_SERVER_PARAMS } from './engines/audioServerParams.js';
+import { SD_SERVER_PARAMS } from './engines/sdServerParams.js';
+import { SD_DEFAULT_PARAMS } from './sdParams-default.js';
 import { isEngineKind, type EngineDefinition, type EngineInstance, type EnginesFile } from './engines/types.js';
 import { getDriver } from './engines/driver.js';
 import type { WsMessage, LlamaConfig, GpuInfo, LlamaDevice, GpuSortMode, SystemStats } from './types.js';
-import { loadModels, saveModels, loadParams, saveParams, generateId, type ModelConfig, type ConfigTemplate, type ParamDef } from './modelConfig.js';
+import { loadModels, saveModels, loadParams, saveParams, paramsFileForKind, generateId, type ModelConfig, type ConfigTemplate, type ParamDef } from './modelConfig.js';
 import { DEFAULT_PARAMS } from './params-default.js';
 import { parseRouterIni, exportRouterIni } from './routerIni.js';
 import { createProxyApp } from './proxy/index.js';
@@ -1576,6 +1578,15 @@ app.delete('/api/models/templates/:id', (req, res) => {
 
 // --- Params API ---
 
+// Seed the stable-diffusion.cpp catalog on first run. Unlike the llama.cpp
+// re-seed above, this only fills a missing file: the generated catalog is large
+// and machine-generated (npm run gen:sd-params), so user edits are never
+// overwritten by an app update. Tests the file, not loadParams() — that falls
+// back to the llama.cpp catalog, which would hide a missing sd file.
+if (!fs.existsSync(paramsFileForKind('sdiffusion'))) {
+  saveParams(SD_DEFAULT_PARAMS, 'sdiffusion');
+}
+
 // Per-kind param catalog (?kind=audio etc). llama.cpp is the default and keeps
 // the original params.json file.
 app.get('/api/params', (req, res) => {
@@ -1606,6 +1617,12 @@ app.get('/api/params/audio-server', (_req, res) => {
 // shapes live in the card's raw-JSON extras.
 app.get('/api/params/audio-model', (_req, res) => {
   res.json(AUDIO_MODEL_PARAMS);
+});
+
+// The sd-server option list (sdiffusion kind's "Server" group). Fixed by the
+// server's own parser (examples/server/main.cpp), so it ships with the app.
+app.get('/api/params/sd-server', (_req, res) => {
+  res.json(SD_SERVER_PARAMS);
 });
 
 app.post('/api/params/refresh', async (_req, res) => {

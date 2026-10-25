@@ -600,8 +600,12 @@ instance like audio, **Option A — model hot swap over `/sdcpp/v1/models/load`*
 proxy = minimal passthrough + `/v1/images/edits` raw multipart route + idle
 socket timeouts; generation happens in sd.cpp's own Web UI).
 
-**stable-diffusion.cpp kind 📋** — spec written, implementation not started.
-See docs/stable-diffusion.md §4 for the work breakdown.
+**stable-diffusion.cpp kind �** — implementation started. Done: §4 item 2
+(parameter catalogs) — `scripts/gen-sd-params.ts` (`npm run gen:sd-params`) parses
+`sd-cli -h` + `sd-server -h` into `.config/params.sdiffusion.json` (146 rows) plus
+a shipped `SD_DEFAULT_PARAMS` fallback, and `SD_SERVER_PARAMS` +
+`GET /api/params/sd-server` are wired. Remaining items in
+docs/stable-diffusion.md §4.
 
 - [ ] **OpenAI → sd.cpp translation (deferred from #21 Phase 4, spec §5 Q3).**
   Today the proxy forwards `/v1/images/generations` untouched, so only

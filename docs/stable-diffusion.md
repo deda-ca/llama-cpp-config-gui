@@ -759,27 +759,44 @@ disconnect**, which is survivable for llama.cpp (fast first token) but not for a
 
 ### 3.9 Catalogs
 
-- `.config/params.sdiffusion.json` — generated from `sd-cli -h` (174 flags),
-  curated into categories: `model`, `text-encoder`, `vae`, `addon`, `device`,
-  `offload`, `sampler`, `guidance`, `size`, `hires`, `video`, `cache`,
-  `convert`, `logging`. `inputType`s: `path` for every file flag, `select` for
-  the enumerated ones (`--rng`, `--prediction`, `--sampling-method`,
-  `--scheduler`, `--preview`, `--vae-format`, `--lora-apply-mode`, `-M`),
-  `number`/`text` otherwise, `toggle` for the boolean switches.
-  Deprecated flags (`--clip-on-cpu`, `--vae-on-cpu`, `--control-net-cpu`,
-  `--fa`, `--diffusion-fa`, `--qwen2vl*`, `--*-conv-direct`) are **excluded**
-  from the catalog — the binary itself tells users to use `--backend` /
-  `--flash-attn` / `--conv-direct` instead.
-- Shipped `SD_SERVER_PARAMS` (a new `src/server/engines/sdServerParams.ts`,
-  mirroring `audioServerParams.ts`) for the Server tab:
-  `--listen-ip`, `--listen-port`, `--model-dir`, `--log-level`, `--backend`,
-  `--params-backend`, `--split-mode`, `--max-vram`, `--threads`,
-  `--conditioning-cache-size`, `--offload-to-cpu`, `--mmap`, `--auto-fit`,
-  `--flash-attn`, `--conv-direct`, `--type`, plus the model-directory rows
-  `--lora-model-dir`, `--embd-dir`, `--hires-upscalers-dir` (with a warning that
-  `--lora-model-dir` **disables per-root `loras/` discovery** across all roots,
-  §1.3.1 caveat 4). `--serve-html-path` is omitted — v1 links out to the embedded
-  UI instead (§5 Q8).
+Implemented 2026-10-25 (`scripts/gen-sd-params.ts`, `npm run gen:sd-params`).
+
+- **Generator, not hand-written.** It parses `sd-cli -h` **and** `sd-server -h`
+  (175 + 163 flags) and applies curation tables (category, label, inputType,
+  select options, exclusions). Re-runnable against a new engine build; unknown
+  flags land in `other` with an inferred type so nothing disappears silently.
+  Two facts the generator encodes that a single-binary parse would miss:
+  - **sd-server hard-fails on an unknown argument** (`error: unknown argument:
+    --preview`, non-zero exit), so the 16 **sd-cli-only** flags
+    (`--mode`, `--output`, `--preview*`, `--imat-*`, `--metadata-*`,
+    `--convert-name`, `--image`, `--compression-quality`,
+    `--output-begin-idx`) are excluded — the catalog is the server's vocabulary.
+  - The help prints **no `<type>` token** for `--model-dir`, `--log-level`,
+    `--type`, `--ref-image`, `--audio` and friends, so naive inference reads
+    them as bare toggles; they are pinned explicitly.
+- **Output: 146 rows** in `.config/params.sdiffusion.json`, categories
+  `model`, `text-encoder`, `vae`, `addon`, `device`, `memory`, `kernel`, `size`,
+  `hires`, `sampler`, `guidance`, `moe`, `video`, `reference`, `adetailer`,
+  `cache`, `convert`, `serve`, `output`, `prompt`, `rng`, `logging`.
+  32 exclusions: the deprecated aliases (`--clip-on-cpu`, `--vae-on-cpu`,
+  `--control-net-cpu`, `--fa`, `--diffusion-fa`, `--qwen2vl*`, `--*-conv-direct`),
+  the sd-cli-only set above, per-request flags (`--prompt`, `--negative-prompt`,
+  `--seed`, `--*-prompt-file`), `--list-devices` (driver probe) and `--color`
+  (ANSI codes in the log pipe break level parsing, §1.2).
+- **Shipped fallback `src/server/sdParams-default.ts`** (`SD_DEFAULT_PARAMS`,
+  generated into the same run). `.config/` is gitignored, so without this a fresh
+  install would fall back to the *llama.cpp* catalog for sd cards. `index.ts`
+  seeds `params.sdiffusion.json` from it **only when the file is absent** — user
+  edits are never overwritten, unlike the llama.cpp re-seed.
+- Shipped `SD_SERVER_PARAMS` (`src/server/engines/sdServerParams.ts`, mirroring
+  `audioServerParams.ts`) for the Server tab: `--listen-ip`, `--listen-port`,
+  `--model-dir`, `--lora-model-dir`, `--embd-dir`, `--hires-upscalers-dir`,
+  `--backend`, `--params-backend`, `--split-mode`, `--max-vram`, `--auto-fit`,
+  `--threads`, `--offload-to-cpu`, `--mmap`, `--conditioning-cache-size`,
+  `--flash-attn`, `--conv-direct`, `--type`, `--log-level`. The `--lora-model-dir`
+  description warns that it **disables per-root `loras/` discovery** across all
+  roots (§1.3.1 caveat 4). `--serve-html-path` is omitted — v1 links out to the
+  embedded UI instead (§5 Q8).
   `--backend`/`--params-backend`/`--max-vram` are **plain text rows in v1**
   (§5 Q5 decided), with the device names from `listDevices()` shown as a hint;
   a per-module device picker is a later nicety. No `CUDA_VISIBLE_DEVICES` row —

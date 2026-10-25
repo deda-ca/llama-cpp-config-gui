@@ -38,6 +38,7 @@
     "build:client": "vite build",
     "build:server": "tsc -p tsconfig.server.json",
     "start": "node dist/server/index.js",
+    "gen:sd-params": "tsx scripts/gen-sd-params.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "release": "bun run scripts/build-release.ts",
