@@ -587,6 +587,31 @@ optional `vision` encoder, so it is **self-contained** (no shared definition).
 
 **Open questions to resolve before remaining Phase 4 kinds** (spec §4): audio.cpp /
 sd.cpp HTTP vs CLI-only, per-instance GPU allocation UX.
+— both answered for sd.cpp: it serves HTTP (`sd-server`, OpenAI + `/sdapi/v1` +
+`/sdcpp/v1`) *and* is CLI-only as `sd-cli`; integration targets `sd-server`.
+Spec: [docs/stable-diffusion.md](./stable-diffusion.md) (decisions locked
+2026-10-24, all §5 questions closed 2026-10-25: sd-server only, self-contained
+instance like audio, **Option A — model hot swap over `/sdcpp/v1/models/load`**
+(server starts with `--model-dir`, no weight flags; one instance serves many
+`type: 'sdiffusion'` cards, one loaded at a time), catalog generated from
+`sd-cli -h`; `--model-dir` rows **auto-discovered** from
+`~/Programs/AI/models/sd/<model>` sorted; **video in scope**; **no**
+`CUDA_VISIBLE_DEVICES` — real `--list-devices` names in `--backend`;
+proxy = minimal passthrough + `/v1/images/edits` raw multipart route + idle
+socket timeouts; generation happens in sd.cpp's own Web UI).
+
+**stable-diffusion.cpp kind 📋** — spec written, implementation not started.
+See docs/stable-diffusion.md §4 for the work breakdown.
+
+- [ ] **OpenAI → sd.cpp translation (deferred from #21 Phase 4, spec §5 Q3).**
+  Today the proxy forwards `/v1/images/generations` untouched, so only
+  `prompt/n/size/output_format` work and steps/cfg/sampler/seed require the
+  client to embed `<sd_cpp_extra_args>` in `prompt` itself. To design: map
+  `response_format` (sd.cpp always returns `data[].b64_json`, never `url`),
+  `quality`, `style`, `output_compression` and per-route/card defaults onto
+  `<sd_cpp_extra_args>` or the native `POST /sdcpp/v1/img_gen` body; decide
+  whether to decode/re-encode the base64 image; and whether `model` should ever
+  trigger a load (it currently only routes — sd.cpp ignores the field, §3.7).
 
 ## 22. Serve the llama.cpp Web UI from the GUI server 🚧
 
