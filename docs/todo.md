@@ -609,7 +609,13 @@ a shipped `SD_DEFAULT_PARAMS` fallback, and `SD_SERVER_PARAMS` +
 `normalizeSdConfig`, `sdPort` on `--listen-port` only, `sdRunDir`, `sdHost`,
 `sdModelDirs`, `discoverSdModelDirs` sorted over `~/Programs/AI/models/sd`),
 `EngineInstance.sd`, `instancePort()` chain, self-contained create/draft/PUT
-wiring. Remaining items in docs/stable-diffusion.md §4.
+wiring. §4 item 4 (card → load request) — `engines/sd.ts` maps a
+`type: 'sdiffusion'` card to a `models/load` body (`sdModelToLoadRequest`
+resolves absolute paths to **live catalog file-ids**, never constructs them;
+`sdBuildUserRecipe`/`sdRecipeDefaults` emit a `schema_version: 1` recipe with the
+closed `defaults`/`context` vocabularies and a `skipped` list so a stray row
+can't poison the file; `sdModelToArgs`/`sdModelFromArgs` are the argv fallback),
+plus `sdExtras` on `ModelConfig`. Remaining items in docs/stable-diffusion.md §4.
 
 - [ ] **OpenAI → sd.cpp translation (deferred from #21 Phase 4, spec §5 Q3).**
   Today the proxy forwards `/v1/images/generations` untouched, so only

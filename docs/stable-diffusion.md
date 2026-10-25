@@ -664,6 +664,53 @@ absolutized against the instance run folder (the executable's folder), matching
 the audio rule. Choosing this mode means restart-to-swap and the
 `@command-line` restrictions (§1.4.1).
 
+Implemented 2026-10-25 in `src/server/engines/sd.ts` (+ `sdExtras` on
+`ModelConfig`):
+
+- `SD_SLOT_FLAGS` / `SD_FLAG_SLOTS`: the 22 `k_model_slots` ids ↔ the server's
+  own flag spellings, which are **not** uniform (`--clip_l`/`--llm_vision` are
+  snake_case, `--diffusion-model`/`--audio-vae` are kebab). Card rows are keyed
+  by the flag verbatim, so the slot comes from this table, never from a
+  normalised flag name.
+- `sdPrimarySlot()`: `modelPath` is the `model` slot when the card has no
+  component rows (all-in-one checkpoint), otherwise `diffusion_model`.
+- `resolveSdFileId()` + `sdModelToLoadRequest()`: paths are matched against the
+  live `model-files` list — exact `<category>/<rel>` per root first, then the
+  longest suffix — and ids are **never constructed**. A path outside every root
+  returns an actionable error naming the argv fallback; `tae` + `taesd` both
+  filled is an error (upstream rejects it); `errors` block the load, `warnings`
+  do not.
+- `sdBuildUserRecipe()` / `sdRecipeDefaults()` / `sdRecipePath()` /
+  `slugifySdRecipeId()`: emit the card as a `schema_version: 1` recipe. Two
+  upstream constraints shape this: `apply_recipe_defaults` and
+  `apply_recipe_context` accept a **closed vocabulary** (20 default keys, 4
+  context keys), so `sdRecipeDefaults()` returns `skipped` instead of letting a
+  stray row (`--clip-skip`, `--seed`) poison the whole file — `check_keys`
+  rejects the recipe outright; and `required_any: [["vae","tae"]]` is emitted
+  **only** when the card declares both, so a checkpoint with a bundled VAE stays
+  loadable (`prepare_model_load` enforces it, `model_catalog.cpp:673-680`).
+  `taesd` rows canonicalise to the `tae` slot id. The `defaults`/`context` keys
+  are looked up by the **CLI** spelling, not the JSON name: `--sigmas`→
+  `custom_sigmas`, `--timestep-shift`→`shifted_timestep` (`common.cpp:1252`),
+  and `--model-args`→`model_args`; `custom_sigmas` parses to a number array
+  because `apply_recipe_defaults` rejects string elements.
+- **Capability vocabulary**: `features[]` / `disabled_features[]` must be names
+  from `k_recipe_features` (`model_catalog.cpp:294-319` — `flow_shift`,
+  `ref_images`, `controlnet`, `ip_adapter`, `clip_skip`, …), no duplicates, ≤
+  that list's size; an unknown name makes the whole recipe file invalid.
+  `sdExtras.capabilities` is copied verbatim into `features[]`, so the UI's
+  picker has to offer that vocabulary — and note `ip_adapter`, `controlnet`,
+  `high_noise` and `preview_tae` are implied by declaring the matching **slot**,
+  so a card usually only needs the opt-in flags.
+- An invalid user-recipe file is not fatal: the catalog `report()`s it and skips
+  it (`model_catalog.cpp:483-509`), so a bad emission surfaces as a missing
+  recipe rather than a broken server. Duplicate ids across roots are reported
+  too; the earliest root wins.
+- `sdModelToArgs()` / `sdModelFromArgs()` round-trip the fallback mode (tested
+  card → argv → card); generation rows are *not* emitted as argv since they are
+  recipe defaults, and no listen flags are emitted (`-l` is the listen **IP**,
+  the port is `--listen-port` only — the instance owns both).
+
 ### 3.4 Driver (`engines/sdDriver.ts`, new)
 
 - `buildLaunch(spec)`: `command = path.resolve(instance.binary)`,

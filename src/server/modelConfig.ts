@@ -79,6 +79,20 @@ export interface ModelConfig {
    * re-emitted on export, mirroring `AudioConfig.extra` at server level.
    */
   audioExtras?: Record<string, unknown>;
+  /**
+   * stable-diffusion.cpp only (docs/stable-diffusion.md §3.2): the card-level
+   * keys that have no param row.
+   * - `recipe: string` — the **recipe id** submitted to `models/load`: one of
+   *   sd.cpp's ~100 built-ins (`qwen-image-21`, `flux1-dev`, …) or an id we
+   *   emit into `<model-dir>/recipes/<id>.json`. A recipe names *slots*, never
+   *   files, so the component rows stay the source of the files.
+   * - `capabilities: string[]` — mirrors a recipe's `features[]`
+   *   (`ref_images`, `controlnet`, `ip_adapter`, `flow_shift`, …) so the UI only
+   *   offers controls the checkpoint actually supports (§1.5.2).
+   * - `hf_repo` / `hf_file` — provenance notes for a future Download button.
+   * Preserved verbatim and re-emitted on export, mirroring `audioExtras`.
+   */
+  sdExtras?: Record<string, unknown>;
   isDefault: boolean;
 }
 
@@ -114,13 +128,16 @@ function modelsFile(): string {
  * Defensive per-card normalization. Most fields are trusted as written (the
  * editor owns them), but the kind-specific ones added later are validated so a
  * hand-edited models.json can never smuggle a wrong shape into a generator:
- * `type` must be a string, `audioExtras` a plain object.
+ * `type` must be a string, `audioExtras`/`sdExtras` a plain object.
  */
 function normalizeModelCard(cfg: any): ModelConfig {
   const out: ModelConfig = cfg;
   if (typeof out.type !== 'string' || !out.type) delete out.type;
   if (!out.audioExtras || typeof out.audioExtras !== 'object' || Array.isArray(out.audioExtras)) {
     delete out.audioExtras;
+  }
+  if (!out.sdExtras || typeof out.sdExtras !== 'object' || Array.isArray(out.sdExtras)) {
+    delete out.sdExtras;
   }
   return out;
 }
