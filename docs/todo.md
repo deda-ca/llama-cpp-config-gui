@@ -600,7 +600,7 @@ instance like audio, **Option A — model hot swap over `/sdcpp/v1/models/load`*
 proxy = minimal passthrough + `/v1/images/edits` raw multipart route + idle
 socket timeouts; generation happens in sd.cpp's own Web UI).
 
-**stable-diffusion.cpp kind �** — implementation started. Done: §4 item 2
+**stable-diffusion.cpp kind ✅** — all §4 items (1–10) done. Done: §4 item 2
 (parameter catalogs) — `scripts/gen-sd-params.ts` (`npm run gen:sd-params`) parses
 `sd-cli -h` + `sd-server -h` into `.config/params.sdiffusion.json` (146 rows) plus
 a shipped `SD_DEFAULT_PARAMS` fallback, and `SD_SERVER_PARAMS` +
@@ -674,7 +674,26 @@ verbatim (`--clip_l`) as `sdModelToLoadRequest` expects, structured `sdExtras`
 recipe-id row + `k_recipe_features` capability checkboxes, and a `models/load`
 body preview. Deferred: component dropdowns filtered by `model-files` `root`
 (§3.8) — the server-side §3.3 path check is the guard for now.
-Remaining items in docs/stable-diffusion.md §4.
+§4 item 10 (tests) — coverage already landed alongside each layer, audited
+2026-10-25 (479 tests / 22 files): `sd.test.ts` (model-root discovery, `sd`
+block shape, `--listen-port`/host/`--model-dir`, `sdRunDir`, path→file-id
+resolution incl. the outside-all-roots and shared-prefix cases, card→`models/load`
+request, card→user recipe, argv fallback round-trip); `sdDriver.test.ts`
+(`buildLaunch` argv plan — full-path binary from its own folder, disabled/flag-only
+rows, relative + bare binaries; `getVersion` real one-line banner + missing/failing
+probe; `listDevices` index-joined VRAM; `toLogEntry` tag colours); `sdProxy.test.ts`
+against a **real** stub sd-server (`sdBaseUrl`, `sdRequest` status passthrough,
+`sdModelFiles`/`sdModelStatus`, `sdUpstreamError` 409/400/422/503 wording,
+`sdLoadCard` file-id submission + unknown-recipe retry + bad-id refusal,
+`sdUnloadModel` busy mapping, `sdWaitUntilReady`, `sdInitialLoad`);
+`api.test.ts` "Stable Diffusion Engine API" block (params catalogs, definitions
+probe, draft seeding, create without `definitionId`, PUT round-trip + `--listen-port`
+conflict 409, `/api/engines/command` preview, launch argv with no generated file,
+`--model-dir`/selected-card launch validation, model-management 400/404/502,
+proxy mirror with card aliases, delete removes the mirror);
+`enginesManager.test.ts` `driverFor` resolves the `sdiffusion` driver. No new tests
+were needed — every §4 item-10 bullet maps to an existing test.
+All docs/stable-diffusion.md §4 items (1–10) are now done.
 
 - [ ] **OpenAI → sd.cpp translation (deferred from #21 Phase 4, spec §5 Q3).**
   Today the proxy forwards `/v1/images/generations` untouched, so only

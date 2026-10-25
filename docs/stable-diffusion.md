@@ -1104,6 +1104,15 @@ actionable §3.3 message, so the guard is server-side for now.
     passthrough incl. 409/400/422 mapping), `enginesManager.test.ts` kind
     coverage.
 
+**Status (2026-10-25): all ten items landed.** Item 10 needed no new tests —
+coverage arrived with each layer: `sd.test.ts` (mapping, file-id resolution,
+argv round-trip), `sdDriver.test.ts` (launch plan, version parse, devices, log
+tags), `sdProxy.test.ts` (model-management against a real stub sd-server,
+409/400/422/503 wording, recipe retry), the `api.test.ts` "Stable Diffusion
+Engine API" block (draft, create, PUT round-trip + port conflict, launch argv,
+`--model-dir`/card validation, proxy mirror, delete), and
+`enginesManager.test.ts` `driverFor` kind resolution. 479 tests / 22 files pass.
+
 ---
 
 ## 5. Design questions — all decided
