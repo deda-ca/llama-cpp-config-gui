@@ -320,8 +320,8 @@ describe('driver selection', () => {
     expect(mgr.driverFor('i-llama').kind).toBe('llamacpp');
     // audio.cpp has its own driver now (docs/audio.md)
     expect(mgr.driverFor('i-audio').kind).toBe('audio');
-    // kinds without a dedicated driver fall back to passthrough
-    expect(mgr.driverFor('i-sdiff').kind).toBe('custom');
+    // stable-diffusion.cpp has its own driver now (docs/stable-diffusion.md)
+    expect(mgr.driverFor('i-sdiff').kind).toBe('sdiffusion');
   });
 });
 

@@ -79,6 +79,14 @@ export interface LlamaConfig {
   /** audio.cpp only: launch with `--parallel-jobs`, the experimental parallel
    * runtime (a CLI flag, never part of the generated JSON — see AudioConfig). */
   audioParallelJobs?: boolean;
+  /**
+   * sdiffusion kind: the `sd-server` flags as ordered rows (the instance's
+   * `sd.serverArgs`). sd.cpp has no config file, so unlike strata/audio there is
+   * no generated path — the driver spawns argv directly from these rows
+   * (docs/stable-diffusion.md §3.4). Weight flags are absent in Option A; the
+   * model arrives over the API after startup.
+   */
+  sdArgs?: import('./engines/types.js').EngineParam[];
 }
 
 export interface PerfMetrics {

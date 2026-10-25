@@ -615,7 +615,14 @@ resolves absolute paths to **live catalog file-ids**, never constructs them;
 `sdBuildUserRecipe`/`sdRecipeDefaults` emit a `schema_version: 1` recipe with the
 closed `defaults`/`context` vocabularies and a `skipped` list so a stray row
 can't poison the file; `sdModelToArgs`/`sdModelFromArgs` are the argv fallback),
-plus `sdExtras` on `ModelConfig`. Remaining items in docs/stable-diffusion.md §4.
+plus `sdExtras` on `ModelConfig`. §4 item 5 (driver) — `engines/sdDriver.ts`
+(`buildLaunch` = full-path binary from its own folder, argv straight from
+`sd.serverArgs` with no weight flags in Option A; `getVersion` parses the
+`version <build>, commit <sha>` banner; `listDevices` runs `sd-cli
+--list-devices` and joins VRAM **by device index** so identical GPUs don't
+collapse; `toLogEntry` colours the real single-letter `[E]/[W]/[I]` tags),
+registered in `driver.ts`; `LlamaConfig.sdArgs` + `paramsToArgv` carry the rows.
+Remaining items in docs/stable-diffusion.md §4.
 
 - [ ] **OpenAI → sd.cpp translation (deferred from #21 Phase 4, spec §5 Q3).**
   Today the proxy forwards `/v1/images/generations` untouched, so only

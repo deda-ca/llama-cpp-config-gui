@@ -14,6 +14,7 @@ import type { LlamaConfig } from '../types.js';
 import { paramsToArgs } from './args.js';
 import { strataPort, strataRepoRoot } from './strata.js';
 import { audioPort, audioRunDir } from './audio.js';
+import { sdPort, sdRunDir } from './sd.js';
 import { paramValue, paramValueAny } from './store.js';
 import type { EngineDefinition, EngineInstance } from './types.js';
 
@@ -46,23 +47,32 @@ export function instanceToLlamaConfig(
   const port = Number(portParam);
   const strata = instance.strata;
   const audio = instance.audio;
+  const sd = instance.sd;
   const kind = instance.kind || definition.kind;
   return {
     ...DEFAULT_CONFIG,
     // A strata instance carries its own repo root in the `cwd` deployment row.
-    // An audio instance names its executable with a full path, so the working
-    // directory is that executable's folder; the definition's build folder is
-    // a llama.cpp concept neither kind uses.
-    llamaCppPath: strata ? strataRepoRoot(strata) : audio ? audioRunDir(instance.binary) : definition.buildPath,
+    // An audio or sd instance names its executable with a full path, so the
+    // working directory is that executable's folder; the definition's build
+    // folder is a llama.cpp concept none of these kinds use.
+    llamaCppPath: strata ? strataRepoRoot(strata)
+      : audio ? audioRunDir(instance.binary)
+      : sd ? sdRunDir(instance.binary)
+      : definition.buildPath,
     modelsDir: '',
     routerIniPath: routerIniPath ?? '',
     strataConfigPath: strataConfigPath ?? '',
     audioConfigPath: audioConfigPath ?? '',
     audioParallelJobs: audio?.parallelJobs === true,
-    // An audio instance has no definition to carry env vars, so its block owns
-    // them (CUDA_VISIBLE_DEVICES etc.); every other kind inherits the
-    // definition's environment.
-    envVars: audio ? { ...definition.envVars, ...audio.envVars } : definition.envVars,
+    // sd.cpp has no config file, so the driver spawns argv straight from the
+    // block's flag rows (docs/stable-diffusion.md §3.4).
+    sdArgs: sd ? sd.serverArgs : undefined,
+    // A self-contained instance (audio, sd) has no definition to carry env vars,
+    // so its block owns them (CUDA_VISIBLE_DEVICES etc.); every other kind
+    // inherits the definition's environment.
+    envVars: audio ? { ...definition.envVars, ...audio.envVars }
+      : sd ? { ...definition.envVars, ...sd.envVars }
+      : definition.envVars,
     // llama.cpp kinds pick one of the two known binaries; other kinds launch
     // whatever executable the instance names (passthrough driver).
     binary: kind === 'llamacpp'
@@ -73,7 +83,7 @@ export function instanceToLlamaConfig(
     host: paramValue(instance.params, '--host') ?? '',
     port: Number.isInteger(port) && port > 0
       ? port
-      : (strataPort(strata) ?? audioPort(audio) ?? DEFAULT_CONFIG.port),
+      : (strataPort(strata) ?? audioPort(audio) ?? sdPort(sd) ?? DEFAULT_CONFIG.port),
     apiKey: paramValue(instance.params, '--api-key') ?? '',
     extraArgs: paramsToArgs(instance.params),
     paramsOnly: true,

@@ -322,24 +322,38 @@ describe('Engine API', () => {
     await request(app).delete(`/api/engines/definitions/${created.body.id}`);
   });
 
-  it('non-llamacpp definitions validate by folder existence (no probe yet)', async () => {
+  it('kinds without a driver validate by folder existence (no probe)', async () => {
     const created = await request(app)
       .post('/api/engines/definitions')
-      .send({ name: 'SD Build', kind: 'sdiffusion', buildPath: tmpDir });
+      .send({ name: 'Emb Build', kind: 'embeddings', buildPath: tmpDir });
     expect(created.status).toBe(200);
     const ok = await request(app).get(`/api/engines/definitions/${created.body.id}/version`);
     expect(ok.status).toBe(200);
-    expect(ok.body.kind).toBe('sdiffusion');
+    expect(ok.body.kind).toBe('embeddings');
     expect(ok.body.valid).toBe(true);
 
     const missing = await request(app)
       .post('/api/engines/definitions')
-      .send({ name: 'SD Missing', kind: 'sdiffusion', buildPath: '/nonexistent/sd/build' });
+      .send({ name: 'Emb Missing', kind: 'embeddings', buildPath: '/nonexistent/emb/build' });
     const bad = await request(app).get(`/api/engines/definitions/${missing.body.id}/version`);
     expect(bad.body.valid).toBe(false);
 
     await request(app).delete(`/api/engines/definitions/${created.body.id}`);
     await request(app).delete(`/api/engines/definitions/${missing.body.id}`);
+  });
+
+  it('sdiffusion definitions probe sd-server in the build folder', async () => {
+    // sdiffusion now has a driver (docs/stable-diffusion.md §3.4), so a build
+    // folder is valid only when it actually holds the executable — not merely
+    // because the folder exists.
+    const noExe = await request(app)
+      .post('/api/engines/definitions')
+      .send({ name: 'SD No Exe', kind: 'sdiffusion', buildPath: tmpDir });
+    const res = await request(app).get(`/api/engines/definitions/${noExe.body.id}/version`);
+    expect(res.status).toBe(200);
+    expect(res.body.kind).toBe('sdiffusion');
+    expect(res.body.valid).toBe(false); // tmpDir has no sd-server
+    await request(app).delete(`/api/engines/definitions/${noExe.body.id}`);
   });
 
   it('GET /api/engines/templates/:kind returns the seeded llamacpp template', async () => {
@@ -1204,6 +1218,38 @@ describe('Stable Diffusion Engine API', () => {
       .put(`/api/engines/instances/${sdId}`)
       .send({ sd: { ...block, serverArgs: [{ key: '--listen-port', value: '8080' }] } });
     expect(clash.status).toBe(409);
+  });
+
+  it('POST /api/engines/command previews the sd-server spawn plan (server options only)', async () => {
+    const res = await request(app)
+      .post('/api/engines/command')
+      .send({
+        kind: 'sdiffusion',
+        executable: '/home/u/Programs/AI/stable-diffusion.cpp/build/bin/sd-server',
+        sd: {
+          envVars: { GGML_CUDA_FORCE_MMQ: '1' },
+          serverArgs: [
+            { key: '--listen-ip', value: '127.0.0.1' },
+            { key: '--listen-port', value: '5458' },
+            { key: '--model-dir', value: '/home/u/models/sd/qwen-image-2.1' },
+            { key: '--backend', value: 'diffusion=CUDA0,te=CUDA1' },
+          ],
+          modelConfigIds: ['qwen-image-21'],
+        },
+      });
+    expect(res.status).toBe(200);
+    // Full-path binary is the command; cwd is the executable's folder (sdRunDir).
+    expect(res.body.binaryPath).toBe('/home/u/Programs/AI/stable-diffusion.cpp/build/bin/sd-server');
+    expect(res.body.cwd).toBe('/home/u/Programs/AI/stable-diffusion.cpp/build/bin');
+    // The sd block's env vars reach the spawn environment (no definition to carry them).
+    expect(res.body.envVars).toEqual({ GGML_CUDA_FORCE_MMQ: '1' });
+    // Option A: server options only — no weight flags; the model arrives over the API.
+    expect(res.body.args).toEqual([
+      '--listen-ip', '127.0.0.1',
+      '--listen-port', '5458',
+      '--model-dir', '/home/u/models/sd/qwen-image-2.1',
+      '--backend', 'diffusion=CUDA0,te=CUDA1',
+    ]);
   });
 
   it('deletes the sd instance', async () => {

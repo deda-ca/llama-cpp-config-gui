@@ -66,3 +66,18 @@ export function paramsToArgs(params: { key: string; value?: string; disabled?: b
     })
     .join(' ');
 }
+
+/**
+ * Params straight to argv tokens (no quoting round-trip). `paramsToArgs` +
+ * `splitArgs` is lossy for a value containing a quote, so a driver that spawns
+ * argv directly uses this instead: each enabled row is its key, plus the value
+ * as one token when present.
+ */
+export function paramsToArgv(params: { key: string; value?: string; disabled?: boolean }[]): string[] {
+  const out: string[] = [];
+  for (const p of enabledParams(params)) {
+    out.push(p.key);
+    if (p.value !== undefined && p.value !== '') out.push(p.value);
+  }
+  return out;
+}

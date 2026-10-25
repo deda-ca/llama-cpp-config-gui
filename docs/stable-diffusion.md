@@ -339,10 +339,12 @@ the launch config.
 
 ### 1.7 Log shape
 
-Level-tagged lines (`[DEBUG]/[VERBOSE]/[INFO]/[WARN]/[ERROR]`, `--color` off by
-default). Generation prints per-step progress and a timing summary. No
-structured perf lines like llama.cpp's `print_timing`. Driver v1: level
-coloring only, no metrics.
+Level-tagged lines. Verified against `examples/common/log.cpp`: the tag is a
+**single letter** in brackets — `[D]/[V]/[I]/[W]/[E] message --- file.cpp:123`
+(`--color` off by default wraps the tag in ANSI). `ERROR` goes to **stderr**,
+everything else to **stdout**. Generation prints per-step progress and a timing
+summary. No structured perf lines like llama.cpp's `print_timing`. Driver v1:
+level coloring only, no metrics.
 
 ### 1.8 Model formats and acquisition
 
@@ -726,6 +728,32 @@ Implemented 2026-10-25 in `src/server/engines/sd.ts` (+ `sdExtras` on
   share a small helper.
 - `toLogEntry(line)`: level coloring from `[ERROR]/[WARN]/[INFO]/[DEBUG]`
   prefixes plus `error|failed` heuristics. No `extractMetrics` in v1.
+
+Implemented 2026-10-25 in `src/server/engines/sdDriver.ts` (registered in
+`driver.ts`):
+
+- `buildLaunch`: `command = resolve(binary)`, `cwd = dirname` (`sdRunDir`, set
+  as `llamaCppPath` by `instanceToLlamaConfig`), `args = paramsToArgv(sdArgs)` —
+  the block's flag rows verbatim, disabled rows dropped, repeated `--model-dir`
+  rows kept in order. A new `LlamaConfig.sdArgs` carries them (sd.cpp has no
+  config file, so there is no generated path like strata/audio). A bare binary
+  is left to PATH, matching audio.
+- `getVersion`: parses the real one-line banner
+  `stable-diffusion.cpp version <build>, commit <sha>` (stdout, exit 0).
+  `build`/`compiler`/`backend` stay null — the banner carries none.
+- `listDevices`: runs `sd-cli --list-devices` (falls back to `sd-server`),
+  parsing the `name<TAB>description` lines on **stdout** for name/type/index and
+  the ggml banner on **stderr** for VRAM. **VRAM is joined by device index, not
+  name** — a box with four identical GPUs (the common case here) would otherwise
+  collapse them onto one VRAM value. Device names are exactly what `--backend`
+  accepts (§1.6).
+- `toLogEntry`: the real tag is a **single letter** — `[D]/[V]/[I]/[W]/[E]
+  message --- file.cpp:123` (`examples/common/log.cpp`), not the `[ERROR]`/
+  `[WARN]` words §1.7 assumed. `[E]`→E, `[W]`→W, `[I]/[V]/[D]`→plain; an
+  untagged `failed to initialize` (ggml init) still reads as E. No metrics.
+- The probes take the **full executable path** (the Environment dialog posts
+  `{path, kind}`), like audio's `getAudioVersion`; a build folder is accepted
+  too, so `getVersion`/`listDevices` resolve `sd-server`/`sd-cli` beside it.
 
 ### 3.5 Launch path (`index.ts`)
 
