@@ -1252,6 +1252,44 @@ describe('Stable Diffusion Engine API', () => {
     ]);
   });
 
+  it('launching an sd instance spawns server options only, no generated file', async () => {
+    const res = await request(app).post(`/api/engines/instances/${sdId}/launch`);
+    expect(res.status).toBe(200);
+    // sd.cpp has no config file: nothing is generated, unlike router/strata/audio.
+    expect(res.body.routerIniPath).toBeNull();
+    expect(res.body.strataConfigPath).toBeNull();
+    expect(res.body.audioConfigPath).toBeNull();
+    await request(app).post(`/api/engines/instances/${sdId}/stop`);
+  });
+
+  it('launch rejects an sd instance with no --model-dir', async () => {
+    const get = await request(app).get('/api/engines');
+    const inst = get.body.instances.find((i: any) => i.id === sdId);
+    await request(app)
+      .put(`/api/engines/instances/${sdId}`)
+      .send({ sd: { ...inst.sd, serverArgs: [{ key: '--listen-port', value: '5458' }] } });
+    const res = await request(app).post(`/api/engines/instances/${sdId}/launch`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('--model-dir');
+  });
+
+  it('launch rejects an sd instance with no selected model', async () => {
+    await request(app)
+      .put(`/api/engines/instances/${sdId}`)
+      .send({
+        sd: {
+          serverArgs: [
+            { key: '--listen-port', value: '5458' },
+            { key: '--model-dir', value: '/home/u/models/sd/qwen-image-2.1' },
+          ],
+          modelConfigIds: [],
+        },
+      });
+    const res = await request(app).post(`/api/engines/instances/${sdId}/launch`);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('model config');
+  });
+
   it('deletes the sd instance', async () => {
     const res = await request(app).delete(`/api/engines/instances/${sdId}`);
     expect(res.status).toBe(200);

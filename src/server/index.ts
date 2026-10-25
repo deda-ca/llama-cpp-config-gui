@@ -30,7 +30,7 @@ import {
   normalizeAudioConfig,
 } from './engines/audio.js';
 import { AUDIO_MODEL_PARAMS, AUDIO_SERVER_PARAMS } from './engines/audioServerParams.js';
-import { normalizeSdConfig } from './engines/sd.js';
+import { normalizeSdConfig, sdModelDirs } from './engines/sd.js';
 import { SD_SERVER_PARAMS } from './engines/sdServerParams.js';
 import { SD_DEFAULT_PARAMS } from './sdParams-default.js';
 import { isEngineKind, type EngineDefinition, type EngineInstance, type EnginesFile } from './engines/types.js';
@@ -1171,9 +1171,9 @@ async function buildLaunchSpec(
 }> {
   const kind = inst.kind || 'llamacpp';
   const def = data.definitions.find((d) => d.id === inst.definitionId);
-  // A strata or audio instance carries its own config, so it needs no
+  // A strata, audio or sd instance carries its own config, so it needs no
   // definition; every other kind launches through one (build folder + env).
-  if (!def && kind !== 'strata' && kind !== 'audio') {
+  if (!def && kind !== 'strata' && kind !== 'audio' && kind !== 'sdiffusion') {
     return { error: `Instance references missing definition "${inst.definitionId}"` };
   }
   const effDef: EngineDefinition = def ?? { id: '', name: inst.name, kind, buildPath: '', envVars: {} };
@@ -1243,6 +1243,21 @@ async function buildLaunchSpec(
       );
     } catch (e) {
       return { error: `Failed to write audio config: ${e}` };
+    }
+  }
+
+  // sd.cpp has no config file at all (§3.5): the launch spawns `sd-server` with
+  // only its server options — crucially `--model-dir`, never weight flags — and
+  // the model arrives over the API once the server is up (§3.10). So there is
+  // nothing to generate here; we only validate the two things the launch needs:
+  // at least one scanned model folder, and a selected card to load first.
+  if (kind === 'sdiffusion') {
+    if (!inst.sd) return { error: 'This stable diffusion engine has no configuration yet' };
+    if (sdModelDirs(inst.sd).length === 0) {
+      return { error: 'Add at least one --model-dir folder before launching' };
+    }
+    if (inst.sd.modelConfigIds.length === 0) {
+      return { error: 'Select at least one stable diffusion model config before launching' };
     }
   }
 

@@ -766,6 +766,17 @@ process reports ready, the server issues the initial
 `instanceToLlamaConfig()` gains `sd ? sdRunDir(instance.binary) : …` for
 `llamaCppPath` and merges `envVars` like audio's.
 
+Implemented 2026-10-25 in `buildLaunchSpec()` (`index.ts`): `sdiffusion` joins
+strata/audio as self-contained (no definition required), and the branch validates
+at least one enabled `--model-dir` row and a non-empty `modelConfigIds` —
+returning a clear 400 otherwise. **No file is generated** (sd.cpp reads none), so
+the launch returns `routerIniPath`/`strataConfigPath`/`audioConfigPath` all null.
+The "primary path is empty" check is *not* here: resolving a card to a load
+request needs the live catalog file-ids (§3.3), which only exist once the server
+is up, so `sdModelToLoadRequest`'s errors surface at the initial
+`models/load` (item 7, §3.10) rather than at spawn. `instanceToLlamaConfig`'s
+`llamaCppPath`/`envVars`/`port` sd wiring landed with item 5.
+
 ### 3.6 Port, conflicts, drafts
 
 `instancePort()` must consult `--listen-port` (and `-l` is the IP, not a port —

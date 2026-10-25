@@ -622,6 +622,11 @@ plus `sdExtras` on `ModelConfig`. §4 item 5 (driver) — `engines/sdDriver.ts`
 --list-devices` and joins VRAM **by device index** so identical GPUs don't
 collapse; `toLogEntry` colours the real single-letter `[E]/[W]/[I]` tags),
 registered in `driver.ts`; `LlamaConfig.sdArgs` + `paramsToArgv` carry the rows.
+§4 item 6 (launch path) — `buildLaunchSpec()` treats `sdiffusion` as
+self-contained (no definition needed) and validates the two things a launch
+needs: at least one `--model-dir` row and a selected card; **no generated file**
+(unlike router/strata/audio) since sd.cpp reads no config — the model arrives
+over the API once the server is up (§3.10, item 7).
 Remaining items in docs/stable-diffusion.md §4.
 
 - [ ] **OpenAI → sd.cpp translation (deferred from #21 Phase 4, spec §5 Q3).**
