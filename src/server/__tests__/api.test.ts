@@ -1319,8 +1319,41 @@ describe('Stable Diffusion Engine API', () => {
     expect(unknown.body.error).toContain('not found');
   });
 
+  it('mirrors the sd instance into the proxy backends with its card aliases', async () => {
+    // A real card so the mirror has alias route names to publish (§3.7).
+    const card = await request(app)
+      .post('/api/models/configs')
+      .send({ alias: 'qwen-image-21', type: 'sdiffusion', params: { '--diffusion-model': '/home/u/models/sd/qwen-image-2.1/dm.gguf' } });
+    expect(card.status).toBe(200);
+    const get = await request(app).get('/api/engines');
+    const inst = get.body.instances.find((i: any) => i.id === sdId);
+    await request(app)
+      .put(`/api/engines/instances/${sdId}`)
+      .send({ sd: { ...inst.sd, modelConfigIds: [card.body.id] } });
+
+    const settings = await request(app).get('/api/proxy/settings');
+    const mirror = settings.body.backends.find((b: any) => b.engineId === sdId);
+    expect(mirror).toBeTruthy();
+    expect(mirror.kind).toBe('sdiffusion');
+    expect(mirror.name).toBe('SD Qwen Image');
+    // The mirror targets the sd block's own --listen-ip/--listen-port, the same
+    // base the model-management proxy uses (§3.10).
+    expect(mirror.baseUrl).toBe('http://127.0.0.1:5458');
+    // sd.cpp's upstream /v1/models is a fixed id, so the mirror publishes the
+    // selected card's alias as the route name (§3.7).
+    expect(mirror.models).toEqual(['qwen-image-21']);
+
+    const status = await request(app).get('/api/proxy/status');
+    const route = status.body.models.find((m: any) => m.model === 'qwen-image-21');
+    expect(route.backend).toBe(mirror.id);
+  });
+
   it('deletes the sd instance', async () => {
     const res = await request(app).delete(`/api/engines/instances/${sdId}`);
     expect(res.status).toBe(200);
+    // The proxy mirror follows the instance out, routes included.
+    const get = await request(app).get('/api/proxy/settings');
+    expect(get.body.backends.some((b: any) => b.engineId === sdId)).toBe(false);
+    expect(get.body.models.some((m: any) => m.model === 'qwen-image-21')).toBe(false);
   });
 });

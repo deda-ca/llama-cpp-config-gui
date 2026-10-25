@@ -38,6 +38,17 @@ const ENDPOINT_KINDS: Record<string, ProxyBackendKind[]> = {
 /** Kinds accepted by the raw audio passthrough endpoints. */
 const AUDIO_KINDS: ProxyBackendKind[] = ['audio', 'default', 'custom'];
 
+/** Kinds accepted by the raw image-edit passthrough (multipart body, §3.7). */
+const IMAGE_KINDS: ProxyBackendKind[] = ['sdiffusion', 'default', 'custom'];
+
+/** Idle (inactivity) timeout on the upstream socket: a 20-step 2048² render
+ *  legitimately runs for minutes, so the budget is per-gap-in-traffic, not
+ *  per-request (docs/stable-diffusion.md §3.7). `ProxyBackend.timeoutMs`
+ *  overrides it per backend; 0 disables it. */
+const DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS = 5 * 60_000;
+/** Connect timeout: a dead instance should fail fast, not sit for minutes. */
+const CONNECT_TIMEOUT_MS = 5_000;
+
 /** Endpoints whose `prompt` string feeds the estimated-token fallback. */
 const TEXT_ENDPOINTS = ['/v1/completions', '/v1/embeddings'];
 
@@ -90,6 +101,9 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
   // Audio endpoints: raw passthrough (multipart / binary bodies are not parsed)
   app.post('/v1/audio/speech', (req, res) => handleRaw(req, res));
   app.post('/v1/audio/transcriptions', (req, res) => handleRaw(req, res));
+  // Image edits: sd.cpp accepts multipart here (api.md:428-441), which
+  // express.json would consume — raw passthrough like audio (§3.7).
+  app.post('/v1/images/edits', (req, res) => handleRaw(req, res));
 
   // Express 5 wildcard syntax: {*splat}
   app.all('/v1/{*splat}', (_req, res) => openaiError(res, 404, 'Unknown endpoint', 'unknown_endpoint'));
@@ -167,22 +181,23 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
     forward(req, res, backend, req.path, payload, rec, stream);
   }
 
-  /** Raw passthrough endpoints (audio): body is piped unmodified. */
+  /** Raw passthrough endpoints (audio, image edits): body is piped unmodified. */
   function handleRaw(req: Request, res: Response): void {
     const modelHeader = (req.headers['x-model'] as string) || undefined;
     // Try to peek model from JSON content-type bodies without consuming the stream
-    const resolved = resolveOr404(req, res, modelHeader ?? inferAudioModel(req));
+    const resolved = resolveOr404(req, res, modelHeader ?? inferRawModel(req));
     if (!resolved) return;
     const { route, backend } = resolved;
-    if (!AUDIO_KINDS.includes(backend.kind)) {
-      openaiError(res, 400, `Endpoint ${req.path} requires an audio model`, 'unsupported_model');
+    const allowed = req.path.startsWith('/v1/images/') ? IMAGE_KINDS : AUDIO_KINDS;
+    if (!allowed.includes(backend.kind)) {
+      openaiError(res, 400, `Endpoint ${req.path} requires a ${req.path.startsWith('/v1/images/') ? 'stable diffusion' : 'audio'} model`, 'unsupported_model');
       return;
     }
-    const rec = makeRecorder(req, modelHeader ?? inferAudioModel(req) ?? '', route.backend, false);
+    const rec = makeRecorder(req, modelHeader ?? inferRawModel(req) ?? '', route.backend, false);
     forward(req, res, backend, req.path, null, rec, false);
   }
 
-  function inferAudioModel(req: Request): string | undefined {
+  function inferRawModel(req: Request): string | undefined {
     // Multipart bodies: rip out a `model` field heuristically from the first KB is
     // overkill; rely on x-model header or path fallback instead.
     void req;
@@ -193,7 +208,7 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
   function forward(
     req: Request,
     res: Response,
-    backend: { baseUrl: string; apiKey?: string },
+    backend: ProxyBackend,
     path: string,
     jsonPayload: Buffer | null,
     rec: RequestRecorder,
@@ -212,6 +227,15 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
       headers['content-length'] = String(jsonPayload.length);
     }
 
+    // One usage row per request: the upstream paths below finalize normally,
+    // and the client-abort path must not record a second one.
+    let recorded = false;
+    const finalizeOnce = (status: number, error?: string | null): void => {
+      if (recorded) return;
+      recorded = true;
+      finalize(rec, status, error ?? undefined);
+    };
+
     const upstream = http.request(
       {
         protocol: target.protocol,
@@ -220,8 +244,12 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
         path,
         method: req.method,
         headers,
+        // Socket idle timeout from the start, covering the connect phase (§3.7).
+        timeout: CONNECT_TIMEOUT_MS,
       },
       (upRes) => {
+        // Connected: swap the fast connect timeout for the idle budget (§3.7).
+        upstream.setTimeout(backend.timeoutMs === 0 ? 0 : (backend.timeoutMs ?? DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS));
         rec.markTtfb();
         const statusCode = upRes.statusCode ?? 502;
         const contentType = String(upRes.headers['content-type'] ?? '');
@@ -239,9 +267,9 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
           scanner.on('error', () => { /* passthrough continues below */ });
           upRes.on('end', () => {
             rec.adoptScanner(scanner);
-            finalize(rec, statusCode);
+            finalizeOnce(statusCode);
           });
-          upRes.on('error', () => finalize(rec, statusCode, 'upstream stream error'));
+          upRes.on('error', () => finalizeOnce(statusCode, 'upstream stream error'));
           upRes.pipe(scanner).pipe(res);
         } else if (contentType.includes('application/json')) {
           const chunks: Buffer[] = [];
@@ -257,25 +285,45 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
               const usage = extractJsonUsage(JSON.parse(buf.toString('utf8')));
               rec.setUsage(usage.input, usage.output, usage.cached);
             } catch { /* non-parseable JSON: leave usage null */ }
-            finalize(rec, statusCode);
+            finalizeOnce(statusCode);
             res.end(buf);
           });
-          upRes.on('error', () => finalize(rec, statusCode, 'upstream read error'));
+          upRes.on('error', () => finalizeOnce(statusCode, 'upstream read error'));
         } else {
-          upRes.on('end', () => finalize(rec, statusCode));
-          upRes.on('error', () => finalize(rec, statusCode, 'upstream stream error'));
+          upRes.on('end', () => finalizeOnce(statusCode));
+          upRes.on('error', () => finalizeOnce(statusCode, 'upstream stream error'));
           upRes.pipe(res);
         }
       },
     );
 
     upstream.on('error', (e) => {
-      finalize(rec, 502, `upstream error: ${e.message}`);
+      finalizeOnce(502, `upstream error: ${e.message}`);
       if (!res.headersSent) {
         openaiError(res, 502, `Backend ${backend.baseUrl} unreachable: ${e.message}`, 'backend_unreachable');
       } else {
         res.end();
       }
+    });
+
+    // Node only *emits* `timeout` on an idle socket — destroying the request is
+    // on us. The message distinguishes a stalled/dead backend from a reset.
+    upstream.on('timeout', () => {
+      const budget = backend.timeoutMs === 0 ? CONNECT_TIMEOUT_MS : (backend.timeoutMs ?? DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS);
+      upstream.destroy(new Error(`timed out after ${res.headersSent ? budget : CONNECT_TIMEOUT_MS}ms without data`));
+    });
+
+    // Propagate client aborts (§3.7): an abandoned client must not keep the
+    // upstream socket open. (It does not cancel an sd.cpp generation — its
+    // mutex is held regardless — but it frees the proxy.)
+    // `res.on('close')` is the reliable hangup signal: `req.on('close')` fires
+    // as soon as the request body has been consumed, long before any abort.
+    // `writableEnded === false` means the response was cut short; an upstream
+    // failure already recorded above, so the once-guard keeps it to one row.
+    res.on('close', () => {
+      if (res.writableEnded) return;
+      finalizeOnce(499, 'client disconnected');
+      upstream.destroy();
     });
 
     if (jsonPayload) upstream.end(jsonPayload);

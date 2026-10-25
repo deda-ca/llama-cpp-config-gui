@@ -46,6 +46,10 @@ export interface ProxyBackend {
    *  the sync keeps name/baseUrl in step with the instance and removes the
    *  row when the instance goes away. Manual edits of kind/apiKey stick. */
   engineId?: string;
+  /** Idle (inactivity) timeout on the upstream socket in ms; 0 disables it.
+   *  Default 5 min (docs/stable-diffusion.md §3.7) — long enough for a
+   *  multi-minute image render, short enough to catch a wedged backend. */
+  timeoutMs?: number;
 }
 
 /** A model route in the proxy registry. Several routes may share the same
@@ -132,6 +136,7 @@ function normalizeBackend(raw: unknown, fallbackId: string, fallbackKind: ProxyB
     ...(Array.isArray(b.models) ? { models: b.models.filter((m): m is string => typeof m === 'string') } : {}),
     ...(typeof b.modelsFetchedAt === 'string' ? { modelsFetchedAt: b.modelsFetchedAt } : {}),
     ...(typeof b.engineId === 'string' && b.engineId ? { engineId: b.engineId } : {}),
+    ...(typeof b.timeoutMs === 'number' && Number.isFinite(b.timeoutMs) && b.timeoutMs >= 0 ? { timeoutMs: b.timeoutMs } : {}),
   };
 }
 

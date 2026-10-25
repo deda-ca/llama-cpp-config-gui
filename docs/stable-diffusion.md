@@ -845,6 +845,41 @@ disconnect**, which is survivable for llama.cpp (fast first token) but not for a
    (that route does **not** take `sd_ctx_mutex`, so it answers while a render
    runs) and as `409 model_busy` on a swap attempt.
 
+Implemented 2026-10-25 in `syncEngineBackends()` (`index.ts`) and
+`createProxyApp()` (`proxy/index.ts`):
+
+- **The audio mirror became a shared mirror.** `syncAudioBackends` is now
+  `syncEngineBackends` over a `MIRROR_SOURCES` table (audio + sdiffusion), so
+  the stale-row cleanup, the dirty check and the `engineId` tagging are written
+  once. The audio target is unchanged (GUI host + `instancePort`); the sd target
+  is `sdBaseUrl(inst)` — the instance's own `--listen-ip`/`--listen-port`, the
+  same base §3.10 talks to — so a `0.0.0.0` bind mirrors to `127.0.0.1`.
+  `models[]` for sd is the selected cards' aliases (`selectedCardAliases`),
+  because upstream `/v1/models` is a fixed `sd-cpp-local` and discovery cannot
+  supply them. Mirror ids are `sd-<instanceId>`.
+- **`/v1/images/edits` is registered as a raw passthrough** next to
+  `/v1/audio/*`, so `express.json` never touches the multipart body and
+  `JSON_BODY_LIMIT` does not apply (verified with an 11 MiB body). `handleRaw`
+  is now endpoint-aware: `IMAGE_KINDS = ['sdiffusion','default','custom']`
+  gates `/v1/images/*`, `AUDIO_KINDS` the rest, and model resolution is the
+  existing `x-model`-header → path-fallback rule (`inferAudioModel` renamed to
+  `inferRawModel`).
+- **Timeouts.** `forward()` sets `timeout: CONNECT_TIMEOUT_MS` (5 s) on the
+  request and swaps in the idle budget (`upstream.setTimeout`) once the response
+  headers arrive. Node only *emits* `timeout`; the handler destroys the request
+  with a message naming the budget that fired, which surfaces as the usual
+  `502 backend_unreachable` plus a usage row. `ProxyBackend.timeoutMs`
+  overrides per backend (`0` = disabled, so a video backend can raise it); it is
+  normalised in `normalizeBackend` and settable through
+  `POST`/`PUT /api/proxy/backends`.
+- **Client aborts propagate — via `res.on('close')`, not `req.on('close')`.**
+  Measured: `req.on('close')` fires the moment the request body has been
+  consumed (3 ms in, with `req.destroyed === true`), long before any hangup —
+  acting on it would destroy every upstream request. `res.on('close')` with
+  `writableEnded === false` is the real hangup signal. A `finalizeOnce` guard
+  keeps it to exactly one usage row: an upstream failure that already recorded
+  is not joined by a second `499`.
+
 ### 3.8 UI
 
 - `EngineList.vue`: add `'sdiffusion'` to `creatableKinds`.

@@ -200,34 +200,73 @@ function proxyLlamaBaseUrl(): string {
 
 function rebuildProxyRegistry(): void {
   // Mirrors ride along with every rebuild, so an instance rename, a port edit
-  // or a model-card alias change refreshes the audio rows immediately.
-  syncAudioBackends();
+  // or a model-card alias change refreshes the audio/sd rows immediately.
+  syncEngineBackends();
   proxyRouter.rebuild(proxySettings, proxyLlamaAliases());
 }
 
 /**
- * Mirror every audio engine instance into the proxy backend list
- * (docs/audio.md §3.2, docs/todo.md #21 Phase 4). Audio instances are
- * self-contained like strata, so the proxy needs a row per instance to route
- * `/v1/audio/*` to it; the mirror is tagged `engineId` and follows the
- * instance's name/port. Discovered model ids (`models[]`) are kept — the
- * audio.cpp upstream answers `GET /v1/models` in OpenAI shape — so the
- * instance's model cards become auto routes without a manual Refresh.
+ * Mirror every audio and stable-diffusion engine instance into the proxy
+ * backend list (docs/audio.md §3.2, docs/stable-diffusion.md §3.7). These
+ * instances are self-contained like strata, so the proxy needs a row per
+ * instance to route `/v1/audio/*` (audio) or `/v1/images/*` (sd) to it; the
+ * mirror is tagged `engineId` and follows the instance's name/port. Discovered
+ * model ids (`models[]`) are kept — the audio.cpp upstream answers
+ * `GET /v1/models` in OpenAI shape — so the instance's model cards become auto
+ * routes without a manual Refresh. sd.cpp's upstream `/v1/models` is a fixed
+ * `sd-cpp-local` (§1.5), so discovery cannot help there: the mirror publishes
+ * the selected cards' aliases as the route names, and the alias only selects
+ * *which instance* we forward to (§3.7).
  * A mirror whose instance disappeared (rename/delete) is dropped along with
  * its declared routes.
  */
-/** Upstream model ids an audio instance serves: the aliases of its selected
- * audio model cards — the same ids `audioToConfig` writes into the generated
- * file's `models[].id`, which the launched server reports on GET /v1/models. */
-function audioUpstreamIds(inst: EngineInstance): string[] {
+/** The aliases of the model cards an instance selects, in selection order. For
+ *  audio these are the same ids `audioToConfig` writes into the generated
+ *  file's `models[].id`, which the launched server reports on GET /v1/models;
+ *  the sd block keeps its selected cards the same way, so the same lookup
+ *  supplies the sd mirror's route names (§3.7). */
+function selectedCardAliases(ids: string[]): string[] {
   const modelsData = loadModels();
-  return (inst.audio?.modelConfigIds ?? [])
+  return ids
     .map((id) => modelsData.configs.find((c) => c.id === id)?.alias)
     .filter((a): a is string => !!a);
 }
 
-function syncAudioBackends(): void {
-  const instances = engines.getEngines().instances.filter((i) => i.kind === 'audio' && i.audio);
+interface EngineMirrorSource {
+  kind: 'audio' | 'sdiffusion';
+  /** Where the proxy forwards to, or null when the block has no usable port. */
+  baseUrl: (inst: EngineInstance) => string | null;
+  /** Route names published for the instance. */
+  upstreamIds: (inst: EngineInstance) => string[];
+}
+
+const MIRROR_SOURCES: EngineMirrorSource[] = [
+  {
+    kind: 'audio',
+    // audio.cpp binds the host from the generated config; the GUI's own host is
+    // the local address that reaches it (unchanged from the audio-only mirror).
+    baseUrl: (inst) => {
+      const port = instancePort(inst);
+      if (port === null) return null; // no port row -> nothing to route to
+      const host = config.host === '0.0.0.0' ? '127.0.0.1' : (config.host || '127.0.0.1');
+      return `http://${host}:${port}`;
+    },
+    upstreamIds: (inst) => selectedCardAliases(inst.audio?.modelConfigIds ?? []),
+  },
+  {
+    kind: 'sdiffusion',
+    // sd.cpp's own `--listen-ip`/`--listen-port` — the same target the
+    // model-management proxy (§3.10) talks to.
+    baseUrl: (inst) => sdBaseUrl(inst),
+    upstreamIds: (inst) => selectedCardAliases(inst.sd?.modelConfigIds ?? []),
+  },
+];
+
+function syncEngineBackends(): void {
+  const sources = new Map(MIRROR_SOURCES.map((s) => [s.kind, s]));
+  const instances = engines
+    .getEngines()
+    .instances.filter((i): i is EngineInstance & { kind: 'audio' | 'sdiffusion' } => i.kind === 'audio' || i.kind === 'sdiffusion');
   const liveIds = new Set(instances.map((i) => i.id));
   let changed = false;
 
@@ -240,15 +279,14 @@ function syncAudioBackends(): void {
     changed = true;
   }
 
-  const host = config.host === '0.0.0.0' ? '127.0.0.1' : (config.host || '127.0.0.1');
   for (const inst of instances) {
-    const port = instancePort(inst);
-    if (port === null) continue; // no port row -> nothing to route to
-    const baseUrl = `http://${host}:${port}`;
+    const source = sources.get(inst.kind)!;
+    const baseUrl = source.baseUrl(inst);
+    if (!baseUrl) continue; // no usable port -> nothing to route to
     // The upstream ids are the selected cards' aliases — exactly what
-    // `audioToConfig` writes into the generated file's `models[].id`, so the
-    // routes match what the launched server reports on GET /v1/models.
-    const upstream = audioUpstreamIds(inst);
+    // `audioToConfig` writes into the generated file's `models[].id` (audio),
+    // and the only ids worth routing for sd.cpp (§3.7).
+    const upstream = source.upstreamIds(inst);
     const mirror = proxySettings.backends.find((b) => b.engineId === inst.id);
     if (mirror) {
       const dirty = mirror.baseUrl !== baseUrl || mirror.name !== inst.name
@@ -262,9 +300,9 @@ function syncAudioBackends(): void {
       }
     } else {
       proxySettings.backends.push({
-        id: makeBackendId(`audio-${inst.id}`, proxySettings.backends),
+        id: makeBackendId(`${source.kind === 'audio' ? 'audio' : 'sd'}-${inst.id}`, proxySettings.backends),
         name: inst.name,
-        kind: 'audio',
+        kind: source.kind,
         baseUrl,
         enabled: true,
         engineId: inst.id,
@@ -1864,8 +1902,19 @@ app.post('/api/proxy/restart', (_req, res) => {
   res.json({ running: proxyServer !== null });
 });
 
+/** Normalize an optional per-backend idle timeout (§3.7). `undefined` = field
+ *  absent (keep whatever is set), `null` = explicit reset to the default
+ *  budget, a number >= 0 = the value (0 disables the timeout). Invalid input
+ *  returns false so the caller can 400. */
+function proxyTimeoutMs(raw: unknown): number | null | undefined | false {
+  if (raw === undefined) return undefined;
+  if (raw === null || raw === '') return null;
+  const n = typeof raw === 'number' ? raw : Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : false;
+}
+
 app.post('/api/proxy/backends', (req, res) => {
-  const body = req.body as { name?: string; kind?: string; baseUrl?: string; apiKey?: string; enabled?: boolean };
+  const body = req.body as { name?: string; kind?: string; baseUrl?: string; apiKey?: string; enabled?: boolean; timeoutMs?: number };
   const name = typeof body?.name === 'string' ? body.name.trim() : '';
   if (!name) {
     res.status(400).json({ error: 'name is required' });
@@ -1883,6 +1932,11 @@ app.post('/api/proxy/backends', (req, res) => {
     res.status(400).json({ error: 'baseUrl is not a valid URL' });
     return;
   }
+  const timeoutMs = proxyTimeoutMs(body.timeoutMs);
+  if (timeoutMs === false) {
+    res.status(400).json({ error: 'timeoutMs must be a non-negative number of milliseconds' });
+    return;
+  }
   const backend: ProxyBackend = {
     id: makeBackendId(name, proxySettings.backends),
     name,
@@ -1890,6 +1944,7 @@ app.post('/api/proxy/backends', (req, res) => {
     baseUrl: body.baseUrl,
     enabled: body.enabled !== false,
     ...(typeof body.apiKey === 'string' && body.apiKey ? { apiKey: body.apiKey } : {}),
+    ...(typeof timeoutMs === 'number' ? { timeoutMs } : {}),
   };
   proxySettings.backends.push(backend);
   saveProxySettings();
@@ -1942,7 +1997,7 @@ app.put('/api/proxy/backends/:id', (req, res) => {
     res.status(404).json({ error: `Backend "${req.params.id}" not found` });
     return;
   }
-  const body = req.body as { name?: string; kind?: string; baseUrl?: string; apiKey?: string; enabled?: boolean };
+  const body = req.body as { name?: string; kind?: string; baseUrl?: string; apiKey?: string; enabled?: boolean; timeoutMs?: number | null };
   if (typeof body.name === 'string' && body.name.trim()) b.name = body.name.trim();
   if (body.kind !== undefined) {
     if (!isBackendKind(body.kind)) {
@@ -1962,6 +2017,13 @@ app.put('/api/proxy/backends/:id', (req, res) => {
     if (body.apiKey) b.apiKey = body.apiKey;
     else delete b.apiKey;
   }
+  const timeoutMs = proxyTimeoutMs(body.timeoutMs);
+  if (timeoutMs === false) {
+    res.status(400).json({ error: 'timeoutMs must be a non-negative number of milliseconds' });
+    return;
+  }
+  if (timeoutMs === null) delete b.timeoutMs; // back to the default idle budget
+  else if (typeof timeoutMs === 'number') b.timeoutMs = timeoutMs;
   if (typeof body.enabled === 'boolean') b.enabled = body.enabled;
   saveProxySettings();
   rebuildProxyRegistry();

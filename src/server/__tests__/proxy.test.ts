@@ -33,6 +33,11 @@ let upstream: http.Server;
 let upstreamUrl = '';
 let lastUpstreamBody = '';
 let lastUpstreamAuth = '';
+let lastUpstreamContentType = '';
+/** Set when the stub never answers: the request is parked so the proxy's idle
+ *  timeout is the only thing that can end it. */
+let stallNext = false;
+const stalledRequests: http.IncomingMessage[] = [];
 
 beforeAll(async () => {
   upstream = http.createServer((req, res) => {
@@ -41,6 +46,12 @@ beforeAll(async () => {
     req.on('end', () => {
       lastUpstreamBody = body;
       lastUpstreamAuth = String(req.headers.authorization ?? '');
+      lastUpstreamContentType = String(req.headers['content-type'] ?? '');
+      if (stallNext) {
+        stallNext = false;
+        stalledRequests.push(req);
+        return; // deliberately never respond
+      }
       if (req.url === '/v1/chat/completions') {
         const wantsStream = JSON.parse(body).stream === true;
         if (wantsStream) {
@@ -58,6 +69,10 @@ beforeAll(async () => {
       } else if (req.url === '/v1/images/generations') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ data: [{ b64_json: 'AA' }] }));
+      } else if (req.url === '/v1/images/edits') {
+        // sd.cpp's image-edit endpoint: multipart in, JSON out (api.md:428-441)
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: [{ b64_json: 'RkZC' }] }));
       } else if (req.url === '/v1/embeddings') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
@@ -322,5 +337,132 @@ describe('proxy passthrough + usage recording', () => {
     // Estimated input tokens used as fallback
     expect(row.inputTokens).toBeGreaterThan(0);
     expect(row.tokensEstimated).toBe(true);
+  });
+});
+
+// --- image-edit raw passthrough + upstream timeouts (docs/stable-diffusion.md §3.7) ---
+
+describe('/v1/images/edits raw passthrough', () => {
+  it('pipes a multipart body untouched to an sdiffusion backend', async () => {
+    const boundary = '----sdTestBoundary123';
+    const multipart = [
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="model"',
+      '',
+      'sd-xl',
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="prompt"',
+      '',
+      'make it blue',
+      `--${boundary}`,
+      'Content-Disposition: form-data; name="image[]"; filename="cat.png"',
+      'Content-Type: image/png',
+      '',
+      'PNGDATA',
+      `--${boundary}--`,
+      '',
+    ].join('\r\n');
+    const res = await request(app)
+      .post('/v1/images/edits')
+      .set('content-type', `multipart/form-data; boundary=${boundary}`)
+      .set('x-model', 'sd-xl')
+      .send(multipart);
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].b64_json).toBe('RkZC');
+    // The body reached upstream byte-for-byte: express.json never consumed it,
+    // and the JSON_BODY_LIMIT is irrelevant to a raw route.
+    expect(lastUpstreamContentType).toBe(`multipart/form-data; boundary=${boundary}`);
+    expect(lastUpstreamBody).toContain('make it blue');
+    expect(lastUpstreamBody).toContain('PNGDATA');
+    await settle();
+    const [row] = db.query({});
+    expect(row.backend).toBe('sdiffusion');
+    expect(row.model).toBe('sd-xl');
+    expect(row.endpoint).toBe('/v1/images/edits');
+  });
+
+  it('resolves the model from the path fallback when no x-model header is set', async () => {
+    // /v1/images/* falls back to the sdiffusion backend like /v1/audio/* does
+    // for audio (§3.7 reuses handleRaw's resolution rule).
+    const res = await request(app)
+      .post('/v1/images/edits')
+      .set('content-type', 'multipart/form-data; boundary=x')
+      .send('--x--\r\n');
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].b64_json).toBe('RkZC');
+  });
+
+  it('rejects a non-image model on the image-edit endpoint', async () => {
+    const res = await request(app)
+      .post('/v1/images/edits')
+      .set('content-type', 'multipart/form-data; boundary=x')
+      .set('x-model', 'qwen')
+      .send('--x--\r\n');
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('unsupported_model');
+  });
+
+  it('a huge multipart body passes despite the 10mb JSON body limit', async () => {
+    const big = 'A'.repeat(11 * 1024 * 1024);
+    const res = await request(app)
+      .post('/v1/images/edits')
+      .set('content-type', 'multipart/form-data; boundary=x')
+      .set('x-model', 'sd-xl')
+      .send(`--x\r\n\r\n${big}\r\n--x--\r\n`);
+    expect(res.status).toBe(200);
+    expect(lastUpstreamBody.length).toBeGreaterThan(11 * 1024 * 1024);
+  });
+});
+
+describe('upstream idle timeout + client abort (proxy §3.7)', () => {
+  it('502s and records when the backend stalls past timeoutMs', async () => {
+    settings.backends.find((b) => b.id === 'sdiffusion')!.timeoutMs = 300;
+    router.rebuild(settings, ['qwen']);
+    stallNext = true;
+    const res = await request(app).post('/v1/images/generations')
+      .send({ model: 'sd-xl', prompt: 'slow render' });
+    expect(res.status).toBe(502);
+    expect(res.body.error.code).toBe('backend_unreachable');
+    expect(res.body.error.message).toContain('timed out');
+    await settle();
+    const [row] = db.query({});
+    expect(row.status).toBe(502);
+    expect(row.errorMessage).toContain('timed out');
+  });
+
+  it('a client abort records one 499 row and kills the upstream request', async () => {
+    settings.backends.find((b) => b.id === 'sdiffusion')!.timeoutMs = 0; // no idle budget: only the abort ends this
+    router.rebuild(settings, ['qwen']);
+    stallNext = true;
+    // supertest always completes its request, so drive the proxy through a real
+    // listener and hang up mid-response.
+    const server = app.listen(0, '127.0.0.1');
+    await new Promise<void>((r) => server.once('listening', r));
+    const port = (server.address() as AddressInfo).port;
+    const req = http.request(
+      { host: '127.0.0.1', port, path: '/v1/images/generations', method: 'POST', headers: { 'content-type': 'application/json' } },
+      () => { /* never expected: the stub stalls */ },
+    );
+    req.on('error', () => { /* the aborted client sees ECONNRESET */ });
+    req.end(JSON.stringify({ model: 'sd-xl', prompt: 'abandoned' }));
+    await new Promise<void>((resolve) => {
+      const check = setInterval(() => {
+        if (db.query({}).length > 0) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 50);
+      setTimeout(() => req.destroy(), 250);
+    });
+    const [row] = db.query({});
+    expect(row.status).toBe(499);
+    expect(row.errorMessage).toContain('client disconnected');
+    // Exactly one row: the abort path must not double-record alongside upstream.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(db.query({})).toHaveLength(1);
+    // The upstream request was destroyed by the proxy, not left hanging.
+    expect(stalledRequests[stalledRequests.length - 1].destroyed).toBe(true);
+    req.destroy();
+    await new Promise<void>((r) => server.close(() => r()));
   });
 });

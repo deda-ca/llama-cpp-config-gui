@@ -267,6 +267,9 @@ export interface ProxyBackend {
   modelsFetchedAt?: string;
   /** Set when the row mirrors a launched engine instance (kept in sync). */
   engineId?: string;
+  /** Idle (inactivity) timeout on the upstream socket in ms; 0 disables it.
+   *  Default 5 min — long enough for a multi-minute image render. */
+  timeoutMs?: number;
 }
 
 /** USD price per 1M tokens. */

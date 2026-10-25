@@ -641,6 +641,22 @@ the catalog refreshed, the load retried once — but only for an id the server's
 scan time. `sdStartupLoad` (launch endpoint + `autoLaunchEngines`) waits on
 `models/status` then loads `modelConfigIds[0]`, fire-and-forget, and gives up if
 the process dies.
+§4 item 8 (proxy integration, §3.7) — `syncAudioBackends` is now
+`syncEngineBackends` over a `MIRROR_SOURCES` table, so an sdiffusion instance is
+mirrored into `proxy.backends` (`kind: 'sdiffusion'`, `id: sd-<instanceId>`) with
+`baseUrl` from `sdBaseUrl` and `models` = the selected cards' aliases (upstream
+`/v1/models` is a fixed `sd-cpp-local`, so discovery cannot supply them).
+`POST /v1/images/edits` is registered as a **raw** passthrough next to
+`/v1/audio/*` — `express.json` never consumes the multipart body and
+`JSON_BODY_LIMIT` does not apply — gated by `IMAGE_KINDS`
+(`['sdiffusion','default','custom']`) with the existing `x-model`/path-fallback
+resolution. `forward()` now sets a 5 s connect timeout, swaps in an idle
+(inactivity) budget once headers arrive, and honours a new
+`ProxyBackend.timeoutMs` (`0` = disabled, settable through the backend
+endpoints); Node only *emits* `timeout`, so the handler destroys the request.
+Client aborts propagate through `res.on('close')` — **not** `req.on('close')`,
+which fires as soon as the body is consumed and would kill every upstream
+request — with a `finalizeOnce` guard so an abort records exactly one `499` row.
 Remaining items in docs/stable-diffusion.md §4.
 
 - [ ] **OpenAI → sd.cpp translation (deferred from #21 Phase 4, spec §5 Q3).**
