@@ -1,3 +1,10 @@
+# [0.22.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.21.0...v0.22.0) (2026-10-26)
+
+
+### Features
+
+* **proxy:** translate image generations to native sd.cpp jobs (docs/proxy-server.md 4.3.2) ([d27ec68](https://github.com/deda-ca/llama-cpp-config-gui/commit/d27ec680967d050f4a8661e4c190dcc8b27e004a))
+
 # [0.21.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.20.0...v0.21.0) (2026-10-25)
 
 
