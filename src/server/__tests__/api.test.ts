@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest';
+import net from 'net';
+import type { AddressInfo } from 'net';
 import request from 'supertest';
 
 // Isolate the .config directory BEFORE the app module loads (its module-level
@@ -1146,6 +1148,18 @@ describe('Audio Engine API', () => {
 describe('Stable Diffusion Engine API', () => {
   let sdId: string;
 
+  // A port that is definitely closed: the model-management proxy has to fail to
+  // connect rather than reach a real sd-server. Hardcoding one made this suite
+  // machine-dependent — sd-server's usual :5458 is live on a dev box, so the
+  // 502 test passed in CI and failed locally.
+  let deadPort: number;
+  beforeAll(async () => {
+    const probe = net.createServer();
+    await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
+    deadPort = (probe.address() as AddressInfo).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+  });
+
   it('GET /api/engines/instances/draft?kind=sdiffusion seeds an sd block without saving', async () => {
     const before = (await request(app).get('/api/engines')).body.instances.length;
     const res = await request(app).get('/api/engines/instances/draft?kind=sdiffusion');
@@ -1198,7 +1212,7 @@ describe('Stable Diffusion Engine API', () => {
       envVars: { GGML_CUDA_FORCE_MMQ: '1' },
       serverArgs: [
         { key: '--listen-ip', value: '127.0.0.1' },
-        { key: '--listen-port', value: '5458' },
+        { key: '--listen-port', value: String(deadPort) },
         { key: '--model-dir', value: '/home/u/models/sd/qwen-image-2.1' },
         { key: '--model-dir', value: '/home/u/models/sd/sd1.5' },
         { key: '--backend', value: 'diffusion=CUDA0,te=CUDA1,vae=CUDA1' },
@@ -1230,7 +1244,7 @@ describe('Stable Diffusion Engine API', () => {
           envVars: { GGML_CUDA_FORCE_MMQ: '1' },
           serverArgs: [
             { key: '--listen-ip', value: '127.0.0.1' },
-            { key: '--listen-port', value: '5458' },
+            { key: '--listen-port', value: '5458' }, // preview only — never connected to
             { key: '--model-dir', value: '/home/u/models/sd/qwen-image-2.1' },
             { key: '--backend', value: 'diffusion=CUDA0,te=CUDA1' },
           ],
@@ -1267,7 +1281,7 @@ describe('Stable Diffusion Engine API', () => {
     const inst = get.body.instances.find((i: any) => i.id === sdId);
     await request(app)
       .put(`/api/engines/instances/${sdId}`)
-      .send({ sd: { ...inst.sd, serverArgs: [{ key: '--listen-port', value: '5458' }] } });
+      .send({ sd: { ...inst.sd, serverArgs: [{ key: '--listen-port', value: String(deadPort) }] } });
     const res = await request(app).post(`/api/engines/instances/${sdId}/launch`);
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('--model-dir');
@@ -1279,7 +1293,7 @@ describe('Stable Diffusion Engine API', () => {
       .send({
         sd: {
           serverArgs: [
-            { key: '--listen-port', value: '5458' },
+            { key: '--listen-port', value: String(deadPort) },
             { key: '--model-dir', value: '/home/u/models/sd/qwen-image-2.1' },
           ],
           modelConfigIds: [],
@@ -1338,7 +1352,7 @@ describe('Stable Diffusion Engine API', () => {
     expect(mirror.name).toBe('SD Qwen Image');
     // The mirror targets the sd block's own --listen-ip/--listen-port, the same
     // base the model-management proxy uses (§3.10).
-    expect(mirror.baseUrl).toBe('http://127.0.0.1:5458');
+    expect(mirror.baseUrl).toBe(`http://127.0.0.1:${deadPort}`);
     // sd.cpp's upstream /v1/models is a fixed id, so the mirror publishes the
     // selected card's alias as the route name (§3.7).
     expect(mirror.models).toEqual(['qwen-image-21']);
