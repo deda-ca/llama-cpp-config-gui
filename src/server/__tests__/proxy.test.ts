@@ -113,12 +113,14 @@ beforeEach(() => {
       { id: 'llamacpp', name: 'llama.cpp', kind: 'llamacpp', baseUrl: upstreamUrl, apiKey: 'upstream-key', enabled: true },
       { id: 'audio', name: 'audio.cpp', kind: 'audio', baseUrl: 'http://127.0.0.1:1', enabled: true },
       { id: 'sdiffusion', name: 'stable-diffusion.cpp', kind: 'sdiffusion', baseUrl: upstreamUrl, enabled: true },
+      { id: 'custom-img', name: 'OpenAI images', kind: 'custom', baseUrl: upstreamUrl, enabled: true },
       { id: 'embeddings', name: 'embeddings.cpp', kind: 'embeddings', baseUrl: upstreamUrl, enabled: true },
       { id: 'moderation', name: 'moderation.cpp', kind: 'moderation', baseUrl: upstreamUrl, enabled: true },
       { id: 'videos', name: 'videos.cpp', kind: 'videos', baseUrl: upstreamUrl, enabled: true },
     ],
     models: [
       { model: 'sd-xl', backend: 'sdiffusion', enabled: true },
+      { model: 'dalle-clone', backend: 'custom-img', enabled: true },
       { model: 'bge-m3', backend: 'embeddings', enabled: true },
       { model: 'omni-mod', backend: 'moderation', enabled: true },
       { model: 'wan-video', backend: 'videos', enabled: true },
@@ -235,14 +237,17 @@ describe('proxy passthrough + usage recording', () => {
     expect(JSON.parse(lastUpstreamBody).model).toBe('qwen');
   });
 
-  it('images route to SD backend with meta captured', async () => {
+  it('images route to a custom image backend with meta captured', async () => {
+    // Raw passthrough path: a `custom` upstream is a real OpenAI image server,
+    // so the body goes through untouched. (`sdiffusion` backends are translated
+    // to native img_gen jobs instead — see sdTranslator.test.ts.)
     const res = await request(app).post('/v1/images/generations')
-      .send({ model: 'sd-xl', prompt: 'a cat', steps: 20, width: 1024, height: 1024 });
+      .send({ model: 'dalle-clone', prompt: 'a cat', steps: 20, width: 1024, height: 1024 });
     expect(res.status).toBe(200);
     expect(res.body.data[0].b64_json).toBe('AA');
     await settle();
     const [row] = db.query({});
-    expect(row.backend).toBe('sdiffusion');
+    expect(row.backend).toBe('custom-img');
     expect(row.inputTokens).toBeNull();
     expect(row.meta).toMatchObject({ steps: 20, width: 1024, promptChars: 5 });
   });
@@ -416,11 +421,11 @@ describe('/v1/images/edits raw passthrough', () => {
 
 describe('upstream idle timeout + client abort (proxy §3.7)', () => {
   it('502s and records when the backend stalls past timeoutMs', async () => {
-    settings.backends.find((b) => b.id === 'sdiffusion')!.timeoutMs = 300;
+    settings.backends.find((b) => b.id === 'custom-img')!.timeoutMs = 300;
     router.rebuild(settings, ['qwen']);
     stallNext = true;
     const res = await request(app).post('/v1/images/generations')
-      .send({ model: 'sd-xl', prompt: 'slow render' });
+      .send({ model: 'dalle-clone', prompt: 'slow render' });
     expect(res.status).toBe(502);
     expect(res.body.error.code).toBe('backend_unreachable');
     expect(res.body.error.message).toContain('timed out');
@@ -431,7 +436,7 @@ describe('upstream idle timeout + client abort (proxy §3.7)', () => {
   });
 
   it('a client abort records one 499 row and kills the upstream request', async () => {
-    settings.backends.find((b) => b.id === 'sdiffusion')!.timeoutMs = 0; // no idle budget: only the abort ends this
+    settings.backends.find((b) => b.id === 'custom-img')!.timeoutMs = 0; // no idle budget: only the abort ends this
     router.rebuild(settings, ['qwen']);
     stallNext = true;
     // supertest always completes its request, so drive the proxy through a real
@@ -444,7 +449,7 @@ describe('upstream idle timeout + client abort (proxy §3.7)', () => {
       () => { /* never expected: the stub stalls */ },
     );
     req.on('error', () => { /* the aborted client sees ECONNRESET */ });
-    req.end(JSON.stringify({ model: 'sd-xl', prompt: 'abandoned' }));
+    req.end(JSON.stringify({ model: 'dalle-clone', prompt: 'abandoned' }));
     await new Promise<void>((resolve) => {
       const check = setInterval(() => {
         if (db.query({}).length > 0) {

@@ -118,6 +118,15 @@ export class RequestRecorder {
     if (scanner.firstContentAt !== null) this.firstContentAt = scanner.firstContentAt;
   }
 
+  /**
+   * Add fields discovered after the request started — an sd.cpp job reports
+   * what it actually ran (seed, effective steps/size, queue/render split) only
+   * once it completes (§4.3.2).
+   */
+  mergeMeta(fields: Record<string, unknown>): void {
+    this.ctx.meta = { ...(this.ctx.meta ?? {}), ...fields };
+  }
+
   build(status: number, errorMessage: string | null = null): UsageRecord {
     const tEnd = Date.now();
     let input = this.usage.input;

@@ -9,6 +9,7 @@ import http from 'http';
 import { URL } from 'url';
 import { ModelRouter } from './router.js';
 import { RequestRecorder, SseUsageScanner, extractJsonUsage, persistRecord } from './recorder.js';
+import { runSdImageJob, translateSdImageRequest } from './sdTranslator.js';
 import { estimateMessagesTokens, estimateTokens } from './tokenCount.js';
 import type { UsageDb } from './usageDb.js';
 import type { ProxyBackend, ProxyBackendKind, ProxySettings, UsageRecord } from './types.js';
@@ -177,8 +178,72 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
         : null;
 
     const rec = makeRecorder(req, model ?? '', route.backend, stream, meta, estimatedInput);
+
+    // sd.cpp speaks its own native job API, not the OpenAI image route (§4.3.1):
+    // translate, submit, poll, then answer with an OpenAI-shaped body.
+    if (req.path === '/v1/images/generations' && backend.kind === 'sdiffusion') {
+      runSdGeneration(req, res, backend, body, rec);
+      return;
+    }
+
     const payload = Buffer.from(JSON.stringify(outBody));
     forward(req, res, backend, req.path, payload, rec, stream);
+  }
+
+  /**
+   * `POST /v1/images/generations` against an `sdiffusion` backend: the request
+   * is rebuilt as a native `img_gen` job and polled to completion (§4.3.2).
+   * One usage row per request, same once-guard as the passthrough path.
+   */
+  async function runSdGeneration(
+    req: Request,
+    res: Response,
+    backend: ProxyBackend,
+    body: Record<string, unknown>,
+    rec: RequestRecorder,
+  ): Promise<void> {
+    res.setHeader('X-Proxy-Request-Id', rec.requestId);
+    const translated = translateSdImageRequest(body);
+    if (!translated.ok) {
+      finalize(rec, 400, translated.error.message);
+      openaiError(res, 400, translated.error.message, translated.error.code);
+      return;
+    }
+
+    // A client that hangs up stops the poll loop and asks the backend to cancel
+    // the job — unlike a passthrough socket, abandoning the loop can free the queue.
+    const abort = new AbortController();
+    let recorded = false;
+    const finalizeOnce = (status: number, error?: string | null): void => {
+      if (recorded) return;
+      recorded = true;
+      finalize(rec, status, error ?? undefined);
+    };
+    res.on('close', () => {
+      if (res.writableEnded) return;
+      abort.abort();
+      finalizeOnce(499, 'client disconnected');
+    });
+
+    let outcome;
+    try {
+      outcome = await runSdImageJob({
+        baseUrl: backend.baseUrl,
+        request: translated.request,
+        timeoutMs: backend.timeoutMs ?? DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS,
+        signal: abort.signal,
+      });
+    } catch (e) {
+      // `runSdImageJob` is written never to throw; this is the belt to the braces.
+      finalizeOnce(502, `translator error: ${(e as Error)?.message ?? String(e)}`);
+      if (!res.headersSent) openaiError(res, 502, `Image generation failed: ${(e as Error)?.message ?? String(e)}`, 'backend_error');
+      return;
+    }
+    if (recorded) return; // the client already went away: the row exists
+    rec.mergeMeta(outcome.meta);
+    rec.markTtfb();
+    finalizeOnce(outcome.status, outcome.errorMessage ?? null);
+    res.status(outcome.status).json(outcome.body);
   }
 
   /** Raw passthrough endpoints (audio, image edits): body is piped unmodified. */

@@ -560,11 +560,13 @@ output, commit only on explicit approval.
     validation. SSE `usage` event emission from the recorder.
 11. Tests: `api.test.ts` additions for settings validation + status endpoint.
 
-### Phase 4 — Stable-diffusion.cpp backend
+### Phase 4 — Stable-diffusion.cpp backend ✅ (done 2026-10-25)
 12. Translator `POST /v1/images/generations` -> native `POST /sdcpp/v1/img_gen` +
     job polling, per the design in §4.3.2 (`src/server/proxy/sdTranslator.ts`);
     `meta` capture (steps/size/seed/queue+render ms); routing rules active.
-    Tests replay the Phase 0 `sd/` fixtures through a stub `sd-server`.
+    Tests replay the Phase 0 `sd/` fixtures through a stub `sd-server`
+    (`sdTranslator.test.ts`, 17 tests) and were verified live against
+    `sd-server` :5458.
 
 ### Phase 5 — audio.ccp backend
 13. Translators for `/v1/audio/speech` and `/v1/audio/transcriptions` (per Phase 0

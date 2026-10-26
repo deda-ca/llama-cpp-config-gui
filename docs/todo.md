@@ -367,15 +367,28 @@ timestamp into SQLite.
       `sd/openai-generations.ignored-fields.json`), so Phase 4 must translate to the native
       `POST /sdcpp/v1/img_gen` job API; **audio.cpp already speaks the OpenAI shape**, so
       Phase 5 is recording only (no `usage` upstream — derive from chars + `timing`).
-- [ ] Phase 4 — stable-diffusion.cpp translator (`/v1/images/generations` is routed and
-      recorded already; upstream translation pending the Phase 0 spike).
+- [x] ~~Phase 4 — stable-diffusion.cpp translator~~ — done 2026-10-25.
+      `src/server/proxy/sdTranslator.ts` rebuilds the request as a native
+      `POST /sdcpp/v1/img_gen` job and polls it to completion (design: spec
+      §4.3.2): `n`→`batch_count`, `size`→`width`/`height`, `steps`/`sampler`/
+      `scheduler`/`guidance`→`sample_params`, `seed` top-level (inside
+      `sample_params` it is silently dropped upstream). `quality`/`style`/
+      `response_format:"url"` are rejected 400 rather than silently ignored;
+      upstream 400s map to OpenAI 400s, a full queue to 503, the total budget
+      (`timeoutMs`, default 5 min) to 504 after a best-effort
+      `POST /jobs/{id}/cancel`, and a client abort to 499 + cancel. Usage rows
+      keep tokens null and gain `jobId`/`queueMs`/`renderMs`/effective
+      `seed`/`steps`/`width`/`height`/`outputFormat`/`count` in `meta`.
+      `default`/`custom` image backends keep the raw passthrough.
+      Tests: `sdTranslator.test.ts` (17) replays the Phase 0 `sd/` fixtures
+      through a stub `sd-server`; verified live against `sd-server` :5458.
 - [ ] Phase 5 — audio.ccp usage recording (`/v1/audio/*` passthrough already works; the
       spike found no translation needed — neither route returns `usage`).
 - [ ] Phase 6 extras — usage export pagination for >1000 rows.
 - [x] ~~Phase 7 — GUI "Proxy & Usage" panel~~ — shipped as the Proxy tab (see above).
 - [ ] Verify `node:sqlite` works in the Bun-compiled release binary (spec §13.4).
 
-**Verification so far:** `npx vitest run` 170/170, `npx tsc -p tsconfig.server.json --noEmit`
+**Verification so far:** `npx vitest run` 508/508 (24 files), `npx tsc -p tsconfig.server.json --noEmit`
 clean, `npx vite build` clean. Shipped in v0.4.0 (proxy feature) and v0.5.0 (cached tokens,
 pricing & cost).
 
@@ -704,15 +717,15 @@ proxy mirror with card aliases, delete removes the mirror);
 were needed — every §4 item-10 bullet maps to an existing test.
 All docs/stable-diffusion.md §4 items (1–10) are now done.
 
-- [ ] **OpenAI → sd.cpp translation (deferred from #21 Phase 4, spec §5 Q3).**
-  Today the proxy forwards `/v1/images/generations` untouched, so only
-  `prompt/n/size/output_format` work and steps/cfg/sampler/seed require the
-  client to embed `<sd_cpp_extra_args>` in `prompt` itself. To design: map
-  `response_format` (sd.cpp always returns `data[].b64_json`, never `url`),
-  `quality`, `style`, `output_compression` and per-route/card defaults onto
-  `<sd_cpp_extra_args>` or the native `POST /sdcpp/v1/img_gen` body; decide
-  whether to decode/re-encode the base64 image; and whether `model` should ever
-  trigger a load (it currently only routes — sd.cpp ignores the field, §3.7).
+- [x] ~~**OpenAI → sd.cpp translation (deferred from #21 Phase 4, spec §5 Q3).**~~
+      Shipped 2026-10-25 (todo #20 Phase 4, spec §4.3.2). The proxy now rebuilds
+      `/v1/images/generations` as a native `POST /sdcpp/v1/img_gen` job for
+      `sdiffusion` backends, so `steps`/`sampler`/`scheduler`/`guidance`/`seed`
+      work without the client embedding `<sd_cpp_extra_args>` in `prompt`.
+      Decisions taken there: the base64 is **copied through, never decoded or
+      re-encoded**; `quality`/`style`/`response_format:"url"` are **rejected 400**
+      rather than silently dropped; and `model` **only routes** — it never
+      triggers a model load (sd.cpp ignores the field, §3.7).
 
 ## 22. Serve the llama.cpp Web UI from the GUI server 🚧
 
