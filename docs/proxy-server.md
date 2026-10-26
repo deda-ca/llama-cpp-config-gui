@@ -135,20 +135,86 @@ set to the backend id), optionally live-merged from llama-server's `/models`.
 
 ### 4.3 Endpoint translation table
 
-| Proxy endpoint | llama.cpp | audio.ccp | stable-diffusion.cpp |
+Confirmed against live engines on 2026-10-25 (Phase 0 spike, §13). Fixtures:
+`src/server/__tests__/fixtures/proxy/` — see its README for versions and provenance.
+
+| Proxy endpoint | llama.cpp | audio.cpp | stable-diffusion.cpp |
 |---|---|---|---|
-| `POST /v1/chat/completions` | passthrough | passthrough if served; else translate `messages[-1]` into its TTS/STT input | reject (400) |
+| `POST /v1/chat/completions` | passthrough | reject (400) — no text-completion route exists | reject (400) |
 | `POST /v1/completions` | passthrough | reject | reject |
 | `POST /v1/embeddings` | passthrough | reject | reject |
-| `POST /v1/audio/speech` | router TTS models if any | passthrough / translate | reject |
-| `POST /v1/audio/transcriptions` | whisper via llama-server if used | passthrough / translate | reject |
-| `POST /v1/images/generations` | reject | reject | translate to SD HTTP API |
+| `POST /v1/audio/speech` | reject (400) — `AUDIO_KINDS` is `audio/default/custom` | passthrough — same OpenAI shape, plus `response_format:"json"` for timing and `stream:true` (pcm only) | reject |
+| `POST /v1/audio/transcriptions` | reject (400) — whisper would need a `custom` backend | passthrough — same OpenAI shape; response has **no `usage`** | reject |
+| `POST /v1/images/generations` | reject | reject | **translate to `POST /sdcpp/v1/img_gen`** (see §4.3.1) |
+| `POST /v1/images/edits` | reject | reject | passthrough (raw multipart, shipped) |
 | `GET /v1/models` | merge `/models` | static | static |
 
-Translation details for audio.ccp and stable-diffusion.cpp depend on their actual HTTP
-APIs — **Phase 0 spike required** (see §11): document each upstream's real request/response
-shape and capture fixtures before writing translators. The contract to clients is always
-OpenAI shape; upstream differences are absorbed by per-backend translators.
+The audio.cpp routes need **no translation** — they already speak the OpenAI shape.
+What they need is *recording*: neither returns `usage`, so audio usage is derived
+from input characters and the `timing.audio_duration_ms` the upstream reports.
+
+sd.cpp is the opposite: the OpenAI route exists but is a **lossy stub**, so the
+translator must target the native API instead.
+
+### 4.3.1 sd.cpp: why the OpenAI route cannot be the target
+
+`POST /v1/images/generations` on `sd-server` reads exactly five fields —
+`prompt`, `n`, `size`, `output_format`, `output_compression` — and nothing else
+(`examples/server/routes_openai.cpp:build_openai_generation_request`). Verified
+live in `sd/openai-generations.ignored-fields.json`: a request with
+`steps:3, seed:777, response_format:"url", quality:"hd", style:"vivid"` came back
+with `generation_info.sample_params.sample_steps = 20`, `seed = "42"`,
+`txt_cfg = 1.0` — the server's startup defaults. `response_format`, `quality`,
+`style` and `user` are never parsed at all, and the response is always
+`data[].b64_json`, never `url`.
+
+The only way to reach the real parameters through that route is the documented
+`<sd_cpp_extra_args>` escape hatch embedded in `prompt`
+(`sd/openai-generations.extra-args.json` proves it works: `sample_steps:7`
+survives, and the block is stripped from the prompt before generation). It is a
+compatibility shim, not an interface: it stringifies the request into the prompt,
+and `seed` placed inside `sample_params` is silently ignored because `seed` is a
+**top-level** field in the native schema.
+
+`POST /sdcpp/v1/img_gen` is the real interface. It honours `sample_steps`, `seed`,
+`sample_method`, `scheduler` and `guidance.txt_cfg` (all echoed back in
+`generation_info`), and it is **asynchronous**: `202` +
+`{id, kind, status:"queued", created, poll_url}`, then poll `GET /sdcpp/v1/jobs/{id}`
+until `completed`/`failed`/`cancelled`. Timestamps are **milliseconds**. The
+completed job carries `result.images[].{index, b64_json, generation_info}` and
+`result.output_format`, and `completed - started` is the generation time excluding
+queue time.
+
+`GET /sdcpp/v1/capabilities` supplies the validation vocabulary for free:
+`samplers` (22 names), `schedulers` (18), `output_formats_by_mode.img_gen`
+(`png|jpeg|webp`), `limits` (`min/max width/height` 64..4096, `max_batch_count` 8,
+`max_queue_size` 64) and `features_by_mode.img_gen` for the loaded context.
+
+Consequences for Phase 4: the translator submits a native job and polls, so it
+owns the queue wait and can report TTFB honestly; `response_format:"url"` cannot
+be honoured (sd.cpp has no image hosting) and must be rejected or served as a
+data URL; `quality`/`style` have no upstream equivalent and are rejected rather
+than silently dropped, which is what the raw passthrough does today.
+
+Requests behind the sd fixtures, for re-capture:
+
+```bash
+# ignored-fields.json — proves steps/seed/response_format/quality/style are dropped
+curl -X POST :5458/v1/images/generations -H 'content-type: application/json' \
+  -d '{"prompt":"a red cube on a table","n":1,"size":"64x64","steps":3,"seed":777,
+       "response_format":"url","quality":"hd","style":"vivid","user":"alice"}'
+# extra-args.json — the escape hatch (note: seed must be top-level, not in sample_params)
+  -d '{"prompt":"a green cone <sd_cpp_extra_args>{\"sample_params\":{\"sample_steps\":7,\"seed\":99}}</sd_cpp_extra_args>",
+       "size":"64x64","steps":3}'
+# img_gen-job-submitted/completed.json — native, honours everything
+curl -X POST :5458/sdcpp/v1/img_gen -H 'content-type: application/json' \
+  -d '{"prompt":"a blue sphere","width":64,"height":64,"batch_count":1,"seed":1234,
+       "sample_params":{"sample_steps":4,"sample_method":"euler","scheduler":"simple",
+                        "guidance":{"txt_cfg":3.5}},"output_format":"png"}'
+curl :5458/sdcpp/v1/jobs/<id>          # poll until completed
+curl :5458/sdcpp/v1/capabilities
+```
+
 
 ## 5. Usage capture (tokens + timing)
 
@@ -344,13 +410,17 @@ Each step follows the `docs/agent.md` workflow: implement + test together, full 
 (`npx vitest run`, `npx vite build`, `npx tsc -p tsconfig.server.json --noEmit`), show
 output, commit only on explicit approval.
 
-### Phase 0 — Upstream API spike (no code in repo)
-1. Run **audio.ccp** and **stable-diffusion.cpp** HTTP servers locally; document their real
-   request/response shapes (curl transcripts).
-2. Capture **real fixtures**: llama-server streaming response with `stream_options`,
-   non-streaming response with `usage`, SD generation response, audio TTS/STT responses.
-   Save under `src/server/__tests__/fixtures/proxy/`.
-   *Exit criteria:* translation table in §4.3 confirmed or corrected in this doc.
+### Phase 0 — Upstream API spike ✅ (done 2026-10-25)
+1. Ran **audio.cpp** and **stable-diffusion.cpp** HTTP servers locally (plus the running
+   llama.cpp router) and documented their real request/response shapes — §4.3.1 and §13.
+2. Captured **real fixtures** under `src/server/__tests__/fixtures/proxy/`:
+   llama streaming with `stream_options` + non-streaming with `usage`; SD OpenAI route
+   (ignored-fields proof + `sd_cpp_extra_args`), native `img_gen` submit/poll, and
+   `capabilities`; audio TTS (wav/json/streaming SSE) and STT. Fixture README records the
+   engine versions and how to re-capture.
+   *Exit criteria met:* §4.3 corrected (audio needs no translation; SD must target the
+   native API), §13 Q1–Q3 answered. Q4 (`node:sqlite` in the Bun binary) stays open —
+   it needs a built release binary, not a live server.
 
 ### Phase 1 — Usage store (`usageDb.ts`)
 3. SQLite open/migrate helper; insert, query, summary, retention-purge functions.
@@ -409,12 +479,34 @@ output, commit only on explicit approval.
 
 ## 13. Open questions (resolve in Phase 0)
 
-1. Exact audio.ccp HTTP API (paths, auth, streaming?) — determines translator scope.
-2. Does the stable-diffusion.cpp build in use expose an HTTP server, or only CLI? If CLI,
-   Phase 4 becomes "spawn per request" or requires an SD server component.
-3. Are the llama.cpp builds in use new enough to always return `usage` in streaming with
-   `stream_options`? (The fallback path covers older builds anyway.)
-4. `node:sqlite` availability in the Bun-compiled release binary — verify in Phase 1; if
-   unavailable, fall back to a JSONL append log + in-memory index behind the same interface.
-5. Is `/v1/responses` (OpenAI Responses API) needed, or is chat/completions sufficient for
-   v1? (This spec assumes chat/completions only.)
+All five answered by the 2026-10-25 spike; fixtures in
+`src/server/__tests__/fixtures/proxy/`.
+
+1. **Exact audio.cpp HTTP API** — answered. `GET /health`, `GET /v1/models`
+   (`owned_by:"engine"`), `POST /v1/audio/speech`,
+   `POST /v1/audio/transcriptions` (+ `/details`, `/live`, `/v1/batches/…`,
+   `/v1/audio/alignments`). No auth on the core API; `--cors-origins` for the UI.
+   Both OpenAI routes already speak the OpenAI shape, so **no translation is
+   needed** — only recording. Two catches: streaming speech accepts
+   **`response_format:"pcm"` only** (any other value is a 500) and emits
+   audio.cpp's own events (`speech.audio.delta` with b64 PCM, then
+   `speech.audio.done` with `timing.ttft_ms`), and neither route returns `usage`,
+   so audio usage must be derived from input characters and
+   `timing.audio_duration_ms`. Scope for Phase 5 is therefore *recording*, not
+   translating.
+2. **Does the sd.cpp build expose HTTP?** — answered: **yes**, `sd-server` serves
+   the OpenAI, `sdapi` and native `sdcpp` families plus a Web UI. No per-request
+   spawn needed. But the OpenAI family is a lossy stub (§4.3.1), so Phase 4
+   translates to `POST /sdcpp/v1/img_gen` and polls the job.
+3. **Are the llama.cpp builds new enough for streaming `usage`?** — answered:
+   **yes**, `b11835` returns the usage chunk with `stream_options.include_usage`
+   (`llama/chat-stream.sse`: final chunk, `"choices":[]`, plus `timings`).
+   Also confirmed the fallback is genuinely needed: **without** `stream_options`
+   the server emits **zero** usage chunks, so the proxy's injection in
+   `handleJson` is load-bearing, not decorative.
+4. **`node:sqlite` in the Bun-compiled binary** — **not resolved by this spike**
+   (needs a built release binary, not a live server). Still open; tracked in
+   `docs/todo.md` #20.
+5. **Is `/v1/responses` needed?** — unchanged for v1: chat/completions only. The
+   spike found no reason to revisit it.
+

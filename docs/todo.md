@@ -358,11 +358,19 @@ timestamp into SQLite.
   byte-identical, usage rows land in SQLite, summary aggregates correctly.
 
 **Remaining:**
-- [ ] Phase 0 — Spike audio.ccp and stable-diffusion.cpp HTTP APIs; capture real fixtures
-      under `src/server/__tests__/fixtures/proxy/` (open questions §13 of the spec).
+- [x] ~~Phase 0 — Spike audio.ccp and stable-diffusion.cpp HTTP APIs; capture real fixtures~~
+      — done 2026-10-25. Fixtures under `src/server/__tests__/fixtures/proxy/`
+      (`llama/`, `sd/`, `audio/` + a README with engine versions and re-capture curls);
+      findings in spec §4.3.1 and §13. Headline: **sd.cpp's OpenAI route is a lossy stub**
+      (it reads only `prompt/n/size/output_format/output_compression` — `steps`, `seed`,
+      `response_format`, `quality`, `style` are dropped, proven by
+      `sd/openai-generations.ignored-fields.json`), so Phase 4 must translate to the native
+      `POST /sdcpp/v1/img_gen` job API; **audio.cpp already speaks the OpenAI shape**, so
+      Phase 5 is recording only (no `usage` upstream — derive from chars + `timing`).
 - [ ] Phase 4 — stable-diffusion.cpp translator (`/v1/images/generations` is routed and
       recorded already; upstream translation pending the Phase 0 spike).
-- [ ] Phase 5 — audio.ccp translators (`/v1/audio/*` passthrough pending spike).
+- [ ] Phase 5 — audio.ccp usage recording (`/v1/audio/*` passthrough already works; the
+      spike found no translation needed — neither route returns `usage`).
 - [ ] Phase 6 extras — usage export pagination for >1000 rows.
 - [x] ~~Phase 7 — GUI "Proxy & Usage" panel~~ — shipped as the Proxy tab (see above).
 - [ ] Verify `node:sqlite` works in the Bun-compiled release binary (spec §13.4).
@@ -532,7 +540,8 @@ kind gets preferential treatment.
 
 ### Phase 4 — real non-llama kinds
 audio.cpp, stable-diffusion.cpp drivers + auto-registration as proxy backends.
-Blocked on the proxy Phase 0 spike (fixtures for their HTTP APIs).
+Blocked on the proxy Phase 0 spike (fixtures for their HTTP APIs) — **unblocked
+2026-10-25**, fixtures captured under `src/server/__tests__/fixtures/proxy/`.
 
 **audio.cpp kind ✅** — driver (`engines/audioDriver.ts`: `--config` spawn plan,
 `--version` banner probe, level-classified logs), typed model cards, generated
@@ -790,7 +799,8 @@ mount per engine kind, plus per-instance API forwarding.
 - For the different internal proxy services create a new url to proxy to the main pages of each UIs such as audio.cpp and stable-diffusion.cpp, llama.cpp or strata. Also show a button for each to jump to the main page of each UI.
 - Keep track of watts used for each active gpu for each request, average, and add a cost to the power including different times of day power and calculate the power usage in real time.
 
-- 
+- Add a date filter to Usage.
+- Make parameter details help popup text to explain more about the parameter.
 
 
 
