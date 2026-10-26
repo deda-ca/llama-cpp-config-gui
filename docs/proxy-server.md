@@ -215,6 +215,119 @@ curl :5458/sdcpp/v1/jobs/<id>          # poll until completed
 curl :5458/sdcpp/v1/capabilities
 ```
 
+### 4.3.2 Phase 4 design: the sd.cpp image translator
+
+Design decided 2026-10-25, grounded in the fixtures above and in
+`examples/server/routes_sdcpp.cpp` / `examples/common/common.cpp`
+(`SDGenerationParams::from_json_str`, `common.cpp:2105`).
+
+**Where it hooks in.** `handleJson` keeps its current shape (resolve → kind gate
+→ recorder) and gains one branch: when `req.path === '/v1/images/generations'`
+**and** `backend.kind === 'sdiffusion'`, the request goes to
+`handleSdImageGeneration()` in a new `src/server/proxy/sdTranslator.ts` instead
+of `forward()`. `default`/`custom` backends keep the existing raw passthrough —
+their upstream is a real OpenAI image server and must receive the body
+untouched. `ENDPOINT_KINDS` is unchanged, so the gate stays
+"kind can serve this endpoint", and the translator is a per-kind behaviour, not
+a new routing rule.
+
+**Why native and not `sd_cpp_extra_args`.** `from_json_str` merges the extra_args
+JSON over the runtime defaults with the *same* schema as `img_gen`, so
+parameter-wise the two paths are equivalent — but the payload has to be
+stringified into the `prompt` string, the route stays synchronous (so the proxy
+cannot distinguish queue wait from render, and the 5-minute idle budget is the
+only ceiling), and `seed` inside `sample_params` is silently dropped because
+`seed` is a top-level field (`common.cpp:2166`). The native route is the real
+interface, is asynchronous, and echoes the effective parameters back in
+`generation_info`. `docs/stable-diffusion.md` §1.5.1 said the opposite; that
+decision is corrected there.
+
+**Request mapping** (OpenAI → `POST /sdcpp/v1/img_gen`). Only fields the client
+actually sent are written — the server starts from its own
+`default_gen_params` (`routes_sdcpp.cpp:439`) and a translator that always
+emitted defaults would override the instance's recipe.
+
+| OpenAI field | Native field | Notes |
+|---|---|---|
+| `prompt` (string, required) | `prompt` | 400 `missing_prompt` when absent/not a string |
+| `n` (int 1..8) | `batch_count` | same clamp upstream applies (`routes_openai.cpp:34`); `>8` → 400 (`limits.max_batch_count`) |
+| `size` (`"WxH"`) | `width`, `height` | parsed like upstream (`find('x')`); malformed → 400 |
+| `width` / `height` (ints) | `width`, `height` | accepted as an extension when `size` is absent; 64..4096 (`limits`) |
+| `response_format` | — | `"b64_json"`/absent ok; `"url"` → 400 (sd.cpp hosts no images, §4.3.1) |
+| `output_format` | `output_format` | `png`/`jpeg`/`webp` (`output_formats_by_mode.img_gen`) |
+| `output_compression` | `output_compression` | passed through, upstream validates |
+| `seed` | `seed` | **top level**, never inside `sample_params` |
+| `steps` | `sample_params.sample_steps` | |
+| `sampler` | `sample_params.sample_method` | validated against `samplers` only if a cached capabilities document exists |
+| `scheduler` | `sample_params.scheduler` | ditto, `schedulers` |
+| `guidance` (number) | `sample_params.guidance.txt_cfg` | |
+| `negative_prompt` | `negative_prompt` | extension, mirrors `img_gen` |
+| `user` | — | ignored (upstream never parses it) |
+| `quality`, `style` | — | **400**, see below |
+| `model` | — | selects the backend/route only; sd.cpp ignores it entirely |
+
+**Rejected rather than dropped.** `quality` and `style` have no upstream
+equivalent at all — silently dropping them would promise an effect that never
+happens, so the translator answers
+`400 invalid_request_error` naming the field. Same for
+`response_format:"url"`. Anything else unknown is passed nowhere (the native
+schema ignores unknown keys) and left unmentioned.
+
+**Job lifecycle.** Submit `POST /sdcpp/v1/img_gen`; a `202` gives
+`{id, poll_url}` (`routes_sdcpp.cpp:714-721`). Then poll `GET <poll_url>` every
+**1 s** with a small backoff to 2 s, until `status` is
+`completed` / `failed` / `cancelled`.
+
+- Upstream `429 job queue is full` → `503` (retryable), `410 job expired` → `500`.
+- Overall budget: `backend.timeoutMs ?? DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS`
+  (5 min) measured from submit, **not** per-poll — a 20-step 2048² render
+  legitimately runs for minutes (`docs/stable-diffusion.md` §3.7). Poll
+  requests themselves get a 10 s connect/response guard, reusing
+  `sdRequest`-style fetch semantics.
+- Budget exceeded → `POST <poll_url>/cancel` (best effort, fire-and-forget) and
+  `504` with `code:"generation_timeout"`. `features_by_mode.img_gen` reports
+  `cancel_generating`/`cancel_queued`, so cancel may be absent on old builds —
+  the cancel result is never surfaced.
+- Client abort (`res.on('close')` before the response is written) → same best-
+  effort cancel, then record `499`. Unlike the passthrough path, abandoning the
+  poll loop *can* free the queue, so asking is worth it even though a running
+  render keeps its mutex.
+- Nothing is streamed: the OpenAI image endpoint is JSON-in/JSON-out, so
+  `rec.markTtfb()` fires when the completed job is written.
+
+**Response mapping.** `result.images[].b64_json` → `data[].b64_json` (never
+decoded or re-encoded — the base64 is copied through), `result.output_format`
+drives the `created`/`revised` shape, and the reply is
+`{created, data:[{b64_json}]}` with `X-Proxy-Request-Id` as on every other
+endpoint. `generation_info` (which carries the *effective* prompt, seed,
+sample_params and model files) is not forwarded to the client — it is
+sd.cpp-specific — but its seed/steps/size go into the usage row.
+
+**Usage recording.** Tokens stay `null` (no token concept); `estimatedInput` is
+not applied to image endpoints, so the row is honest rather than a fake token
+count. `meta` extends the existing image shape with what the job actually
+ran: `{promptChars, steps, width, height, n, seed, outputFormat,
+jobId, queueMs: started-created, renderMs: completed-started}`.
+`totalDurationMs` covers submit→completion including queue wait, which is what
+the client experienced.
+
+**Validation without a capabilities round-trip.** The hot path does **not**
+fetch `capabilities`: `img_gen` already validates and answers
+`400 {"error":"invalid generation parameters"}`, and the translator maps an
+upstream 4xx straight to an OpenAI-shaped `400` carrying the upstream message.
+The local checks above (`size` parse, `n` range, `response_format`,
+`quality`/`style`) are the only pre-flight. A cached capabilities document is a
+**later** GUI concern (parameter picklists), not part of this path.
+
+**Testing.** A stub `sd-server` replays the Phase 0 fixtures byte-for-byte:
+`img_gen-job-submitted.json` on `POST /sdcpp/v1/img_gen`, then
+`img_gen-job-completed.json` on the `poll_url` (queued → completed to exercise
+the loop). Assert the translated body (top-level `seed`, `batch_count`,
+`sample_params.sample_steps`), the OpenAI response shape, the usage row
+(`tokens null`, `meta.renderMs`/`queueMs`), the `quality`/`response_format:"url"`
+rejections, upstream-400 mapping, and the timeout→cancel path with a stub that
+never completes. Poll interval is injected so tests do not sleep for seconds.
+
 
 ## 5. Usage capture (tokens + timing)
 
@@ -448,8 +561,10 @@ output, commit only on explicit approval.
 11. Tests: `api.test.ts` additions for settings validation + status endpoint.
 
 ### Phase 4 — Stable-diffusion.cpp backend
-12. Translator `POST /v1/images/generations` -> SD API; `meta` capture (steps/size); routing
-    rules active. Tests from Phase 0 fixtures.
+12. Translator `POST /v1/images/generations` -> native `POST /sdcpp/v1/img_gen` +
+    job polling, per the design in §4.3.2 (`src/server/proxy/sdTranslator.ts`);
+    `meta` capture (steps/size/seed/queue+render ms); routing rules active.
+    Tests replay the Phase 0 `sd/` fixtures through a stub `sd-server`.
 
 ### Phase 5 — audio.ccp backend
 13. Translators for `/v1/audio/speech` and `/v1/audio/transcriptions` (per Phase 0

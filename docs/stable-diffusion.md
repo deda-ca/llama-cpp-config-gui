@@ -268,12 +268,17 @@ string** (a proxy or client that trims/logs/rewrites prompts can corrupt it),
 and it only extends `img_gen` — `vid_gen` and `upscale` are unreachable through
 an OpenAI-shaped request.
 
-**Consequence for this app (decided):** the **proxy** (todo #20 Phase 4) stays
-OpenAI-in / OpenAI-out and only needs to translate `response_format`, `quality`,
-`style` and per-route defaults into `sd_cpp_extra_args` — `/sdcpp/v1` is not
-required for generation. The **GUI** must use `/sdcpp/v1`, because everything
-*around* generation (model load/unload, load status + elapsed time,
-capabilities) exists only there.
+**Consequence for this app (decided 2026-10-25, supersedes an earlier
+extra_args-only plan):** the proxy (todo #20 Phase 4) translates to **native
+`POST /sdcpp/v1/img_gen` + job polling**, not to OpenAI + `sd_cpp_extra_args`.
+The Phase 0 spike (`docs/proxy-server.md` §4.3.1) settled it: the OpenAI route
+parses five fields and nothing else, so `steps`/`seed`/`response_format`/
+`quality`/`style` are dropped unless the payload is smuggled through the
+`prompt` string, and the route is synchronous, so the proxy cannot separate
+queue wait from render or honour `ProxyBackend.timeoutMs`. Design:
+`docs/proxy-server.md` §4.3.2. The **GUI** must use `/sdcpp/v1` either way,
+because everything *around* generation (model load/unload, load status + elapsed
+time, capabilities) exists only there.
 
 #### 1.5.2 Image editing and multi-reference generation
 
