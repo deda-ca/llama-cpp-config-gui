@@ -10,7 +10,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { configDir } from '../config.js';
+import { configDir, readJsonFile } from '../config.js';
 import type { LlamaConfig } from '../types.js';
 import { splitArgs, tokensToParams } from './args.js';
 import { blankAudioConfig, audioPort, normalizeAudioConfig } from './audio.js';
@@ -261,12 +261,9 @@ export function normalizeEngines(data: unknown): EnginesFile {
 
 /** Load `.config/engines.json`; empty state when missing or corrupt. */
 export function loadEngines(): EnginesFile {
-  try {
-    const raw = fs.readFileSync(enginesFile(), 'utf-8');
-    return normalizeEngines(JSON.parse(raw));
-  } catch {
-    return { ...EMPTY_ENGINES, definitions: [], instances: [] };
-  }
+  const parsed = readJsonFile(enginesFile());
+  if (parsed === undefined) return { ...EMPTY_ENGINES, definitions: [], instances: [] };
+  return normalizeEngines(parsed);
 }
 
 /** True when the engines file exists on disk (migration trigger). */

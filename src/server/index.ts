@@ -419,7 +419,8 @@ function proxyFetchModels(baseUrl: string, apiKey?: string): Promise<string[]> {
     }, (res) => {
       const chunks: Buffer[] = [];
       let size = 0;
-      res.on('data', (c: Buffer) => { chunks.push(c); size += c.length; if (size > 1024 * 1024) req.destroy(); });
+      // Destroying with an error rejects below; a bare destroy() would leave the promise pending forever.
+      res.on('data', (c: Buffer) => { chunks.push(c); size += c.length; if (size > 1024 * 1024) req.destroy(new Error('models response too large')); });
       res.on('end', () => {
         if ((res.statusCode ?? 0) >= 400) return reject(new Error(`HTTP ${res.statusCode}`));
         try {
@@ -1287,6 +1288,7 @@ app.delete('/api/engines/instances/:id', (req, res) => {
   data.instances.splice(idx, 1);
   if (data.defaultInstanceId === id) data.defaultInstanceId = data.instances[0]?.id ?? null;
   engines.saveEngines(data);
+  removeGeneratedFiles(id);
   rebuildProxyRegistry();
   res.json({ status: 'deleted' });
 });
@@ -2225,8 +2227,11 @@ if (embeddedClient.size > 0 || fs.existsSync(clientDist)) {
     const assetPath = (!relPath || (!isAsset && !embeddedClient.has(relPath))) ? 'index.html' : relPath;
     if (await serveClientAsset(res, assetPath)) return;
     if (fs.existsSync(clientDist)) {
-      const filePath = path.join(clientDist, assetPath);
-      if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      // Never serve anything outside dist/client: req.path is not normalized,
+      // so `/../package.json` would otherwise resolve out of the folder.
+      const filePath = path.resolve(clientDist, assetPath);
+      const inside = filePath.startsWith(clientDist + path.sep);
+      if (inside && fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
         res.sendFile(filePath, (err) => { if (err) next(); });
         return;
       }

@@ -109,3 +109,54 @@ describe('checkForUpdate', () => {
     expect(check.assetName).toContain(platformAssetSuffix());
   });
 });
+
+// --- applyUpdate (code review 2026-10-27): the cleanup compared a bare file
+// name with the full backup path, so it always deleted the fresh backup. ---
+import { execFileSync } from 'child_process';
+import fs from 'fs';
+import os from 'os';
+import nodePath from 'path';
+import { applyUpdate } from '../update.js';
+
+function hasTools(): boolean {
+  try {
+    execFileSync('python3', ['--version'], { stdio: 'ignore' });
+    execFileSync('unzip', ['-v'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+describe.skipIf(!hasTools())('applyUpdate', () => {
+  it('keeps the just-made versioned backup and drops older ones', async () => {
+    const dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'apply-update-'));
+    const target = nodePath.join(dir, 'app');
+    fs.writeFileSync(target, 'old-binary');
+    fs.writeFileSync(`${target}.v0.0.1`, 'ancient');
+    // Build the release zip holding the new binary.
+    const staged = nodePath.join(dir, 'stage');
+    fs.mkdirSync(staged);
+    fs.writeFileSync(nodePath.join(staged, 'app'), 'new-binary');
+    const zip = nodePath.join(dir, 'asset.zip');
+    execFileSync('python3', ['-c', 'import sys,zipfile; z=zipfile.ZipFile(sys.argv[1],"w"); z.write(sys.argv[2],"app"); z.close()', zip, nodePath.join(staged, 'app')]);
+    const zipBytes = fs.readFileSync(zip);
+
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(zipBytes)) as typeof fetch;
+    try {
+      const result = await applyUpdate(
+        { current: '0.1.0', latest: '0.2.0', available: true, releaseUrl: '', assetName: 'asset.zip', assetUrl: 'http://x/asset.zip', publishedAt: null },
+        target,
+        'app',
+      );
+      expect(fs.readFileSync(target, 'utf-8')).toBe('new-binary');
+      expect(result.backupPath).toBe(`${target}.v0.1.0`);
+      expect(fs.readFileSync(`${target}.v0.1.0`, 'utf-8')).toBe('old-binary');
+      expect(fs.existsSync(`${target}.v0.0.1`)).toBe(false);
+    } finally {
+      globalThis.fetch = realFetch;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

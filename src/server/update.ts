@@ -198,7 +198,7 @@ export async function applyUpdate(
       const dir = path.dirname(targetPath);
       const base = path.basename(targetPath);
       for (const entry of fs.readdirSync(dir)) {
-        if (entry.startsWith(`${base}.v`) && entry !== backupPath) {
+        if (entry.startsWith(`${base}.v`) && entry !== path.basename(backupPath)) {
           try {
             fs.unlinkSync(path.join(dir, entry));
           } catch {

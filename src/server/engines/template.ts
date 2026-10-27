@@ -14,7 +14,7 @@
 
 import fs from 'fs';
 import path from 'path';
-import { configDir } from '../config.js';
+import { configDir, readJsonFile } from '../config.js';
 import { DEFAULT_PARAMS } from '../params-default.js';
 import { normalizeEngineParams } from './store.js';
 import type { EngineParam } from './types.js';
@@ -68,11 +68,8 @@ const templateOrder = [
 
 /** Load the template for a kind; seeded default when the file is missing. */
 export function loadTemplate(kind: string): EngineParam[] {
-  try {
-    return normalizeEngineParams(JSON.parse(fs.readFileSync(templateFileForKind(kind), 'utf-8')));
-  } catch {
-    return defaultTemplateForKind(kind);
-  }
+  const parsed = readJsonFile(templateFileForKind(kind));
+  return parsed === undefined ? defaultTemplateForKind(kind) : normalizeEngineParams(parsed);
 }
 
 /** Persist the template for a kind (rows normalized before writing). */

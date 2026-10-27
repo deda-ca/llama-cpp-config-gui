@@ -260,3 +260,24 @@ describe('ModelRouter', () => {
     expect(r.resolve('auto', '/v1/chat/completions')!.backend).toBe('audio');
   });
 });
+
+describe('ModelRouter kind fallbacks (code review 2026-10-27)', () => {
+  const backends = [
+    { id: 'audio-old', name: 'old', kind: 'audio' as const, baseUrl: 'http://127.0.0.1:1', enabled: false },
+    { id: 'audio-live', name: 'live', kind: 'audio' as const, baseUrl: 'http://127.0.0.1:2', enabled: true },
+  ];
+
+  it('a disabled backend listed first does not shadow an enabled one of the same kind', () => {
+    const r = new ModelRouter();
+    r.rebuild({ ...DEFAULT_PROXY_SETTINGS, backends, models: [] }, []);
+    expect(r.resolve(undefined, '/v1/audio/speech')?.backend).toBe('audio-live');
+    expect(r.resolve('tts/kokoro', '/v1/audio/speech')).toMatchObject({ backend: 'audio-live', upstreamModel: 'kokoro' });
+  });
+
+  it('every backend of the kind disabled still blocks the fallback', () => {
+    const r = new ModelRouter();
+    r.rebuild({ ...DEFAULT_PROXY_SETTINGS, backends: backends.map((b) => ({ ...b, enabled: false })), models: [] }, []);
+    expect(r.resolve(undefined, '/v1/audio/speech')).toBeNull();
+    expect(r.resolve('tts/kokoro', '/v1/audio/speech')).toBeNull();
+  });
+});

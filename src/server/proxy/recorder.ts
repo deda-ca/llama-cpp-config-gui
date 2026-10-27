@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'crypto';
 import { Transform, type TransformCallback } from 'stream';
+import { StringDecoder } from 'string_decoder';
 import type { UsageRecord } from './types.js';
 import type { UsageDb } from './usageDb.js';
 
@@ -36,6 +37,8 @@ export class SseUsageScanner extends Transform {
   usage: ExtractedUsage = { input: null, output: null, cached: null };
   firstContentAt: number | null = null;
   private buf = '';
+  /** Holds a multi-byte UTF-8 character split across chunk boundaries. */
+  private decoder = new StringDecoder('utf8');
 
   constructor() {
     super();
@@ -50,7 +53,7 @@ export class SseUsageScanner extends Transform {
   }
 
   _transform(chunk: Buffer, _enc: string, cb: TransformCallback): void {
-    const text = chunk.toString('utf8');
+    const text = this.decoder.write(chunk);
     if (this.firstContentAt === null && text.length > 0) this.firstContentAt = Date.now();
     this.buf += text;
     let nl: number;
@@ -72,7 +75,7 @@ export class SseUsageScanner extends Transform {
 
   _flush(cb: TransformCallback): void {
     // Parse any trailing line without a final newline
-    const line = this.buf.trim();
+    const line = (this.buf + this.decoder.end()).trim();
     if (line.startsWith('data:')) {
       try {
         this.applyUsage(JSON.parse(line.slice(5).trim())?.usage);

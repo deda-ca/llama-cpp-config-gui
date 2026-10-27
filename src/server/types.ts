@@ -51,6 +51,13 @@ export interface LlamaConfig {
   apiKey: string;
   extraArgs: string;
   /**
+   * The same parameters as argv tokens, one per flag/value. Set for
+   * engine-instance launches so values carrying quotes (JSON such as
+   * `--chat-template-kwargs {"enable_thinking":false}`) reach the process
+   * untouched — the `extraArgs` string round-trip strips them.
+   */
+  extraArgv?: string[];
+  /**
    * Engine-instance launch: `extraArgs` is the complete, user-authored param
    * list, so the llama.cpp driver must not inject its own defaults
    * (-c/-ngl/-b/-ub/-t/-ts/--host/--port/--api-key) for flags the instance

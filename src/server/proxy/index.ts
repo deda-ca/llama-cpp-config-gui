@@ -21,6 +21,8 @@ export interface ProxyAppDeps {
   db: UsageDb;
   onUsage?: (rec: UsageRecord) => void;
   onRecordError?: (e: unknown) => void;
+  /** Connect timeout override (tests); defaults to CONNECT_TIMEOUT_MS. */
+  connectTimeoutMs?: number;
 }
 
 const JSON_BODY_LIMIT = '10mb';
@@ -49,6 +51,8 @@ const IMAGE_KINDS: ProxyBackendKind[] = ['sdiffusion', 'default', 'custom'];
 const DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS = 5 * 60_000;
 /** Connect timeout: a dead instance should fail fast, not sit for minutes. */
 const CONNECT_TIMEOUT_MS = 5_000;
+/** JSON responses larger than this still pass through, but are not parsed for `usage`. */
+const MAX_USAGE_SCAN_BYTES = 5 * 1024 * 1024;
 
 /** Endpoints whose `prompt` string feeds the estimated-token fallback. */
 const TEXT_ENDPOINTS = ['/v1/completions', '/v1/embeddings'];
@@ -300,6 +304,15 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
       recorded = true;
       finalize(rec, status, error ?? undefined);
     };
+    // An upstream read failure after headers were sent: the status line is gone,
+    // so cut the client connection rather than leave it waiting forever.
+    const abortClient = (): void => {
+      if (!res.writableEnded) res.destroy();
+    };
+
+    const connectMs = deps.connectTimeoutMs ?? CONNECT_TIMEOUT_MS;
+    const idleMs = backend.timeoutMs === 0 ? 0 : (backend.timeoutMs ?? DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS);
+    let connected = false;
 
     const upstream = http.request(
       {
@@ -310,11 +323,9 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
         method: req.method,
         headers,
         // Socket idle timeout from the start, covering the connect phase (§3.7).
-        timeout: CONNECT_TIMEOUT_MS,
+        timeout: connectMs,
       },
       (upRes) => {
-        // Connected: swap the fast connect timeout for the idle budget (§3.7).
-        upstream.setTimeout(backend.timeoutMs === 0 ? 0 : (backend.timeoutMs ?? DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS));
         rec.markTtfb();
         const statusCode = upRes.statusCode ?? 502;
         const contentType = String(upRes.headers['content-type'] ?? '');
@@ -330,33 +341,46 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
         if (isSse) {
           const scanner = new SseUsageScanner();
           scanner.on('error', () => { /* passthrough continues below */ });
-          upRes.on('end', () => {
+          // The scanner's own 'end' runs after its flush, so a trailing usage
+          // line without a final newline is still counted.
+          scanner.on('end', () => {
             rec.adoptScanner(scanner);
             finalizeOnce(statusCode);
           });
-          upRes.on('error', () => finalizeOnce(statusCode, 'upstream stream error'));
+          upRes.on('error', () => {
+            finalizeOnce(statusCode, 'upstream stream error');
+            abortClient();
+          });
           upRes.pipe(scanner).pipe(res);
         } else if (contentType.includes('application/json')) {
+          // Stream the body straight through (large embedding batches are
+          // legitimately many MB) and keep a bounded copy only for usage.
           const chunks: Buffer[] = [];
           let size = 0;
           upRes.on('data', (c: Buffer) => {
-            chunks.push(c);
             size += c.length;
-            if (size > 5 * 1024 * 1024) upRes.destroy(); // cap buffered JSON
+            if (size <= MAX_USAGE_SCAN_BYTES) chunks.push(c);
           });
           upRes.on('end', () => {
-            const buf = Buffer.concat(chunks);
-            try {
-              const usage = extractJsonUsage(JSON.parse(buf.toString('utf8')));
-              rec.setUsage(usage.input, usage.output, usage.cached);
-            } catch { /* non-parseable JSON: leave usage null */ }
+            if (size <= MAX_USAGE_SCAN_BYTES) {
+              try {
+                const usage = extractJsonUsage(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+                rec.setUsage(usage.input, usage.output, usage.cached);
+              } catch { /* non-parseable JSON: leave usage null */ }
+            }
             finalizeOnce(statusCode);
-            res.end(buf);
           });
-          upRes.on('error', () => finalizeOnce(statusCode, 'upstream read error'));
+          upRes.on('error', () => {
+            finalizeOnce(statusCode, 'upstream read error');
+            abortClient();
+          });
+          upRes.pipe(res);
         } else {
           upRes.on('end', () => finalizeOnce(statusCode));
-          upRes.on('error', () => finalizeOnce(statusCode, 'upstream stream error'));
+          upRes.on('error', () => {
+            finalizeOnce(statusCode, 'upstream stream error');
+            abortClient();
+          });
           upRes.pipe(res);
         }
       },
@@ -371,11 +395,23 @@ export function createProxyApp(deps: ProxyAppDeps): express.Express {
       }
     });
 
+    // Connected: swap the fast connect timeout for the idle budget (§3.7). This
+    // must happen at connect, not at response headers — a non-streamed
+    // completion sends nothing until it is done, which easily exceeds 5 s.
+    // A pooled keep-alive socket is already connected.
+    upstream.on('socket', (socket) => {
+      const onConnect = (): void => {
+        connected = true;
+        upstream.setTimeout(idleMs);
+      };
+      if (socket.connecting) socket.once('connect', onConnect);
+      else onConnect();
+    });
+
     // Node only *emits* `timeout` on an idle socket — destroying the request is
     // on us. The message distinguishes a stalled/dead backend from a reset.
     upstream.on('timeout', () => {
-      const budget = backend.timeoutMs === 0 ? CONNECT_TIMEOUT_MS : (backend.timeoutMs ?? DEFAULT_UPSTREAM_IDLE_TIMEOUT_MS);
-      upstream.destroy(new Error(`timed out after ${res.headersSent ? budget : CONNECT_TIMEOUT_MS}ms without data`));
+      upstream.destroy(new Error(`timed out after ${connected ? idleMs : connectMs}ms without data`));
     });
 
     // Propagate client aborts (§3.7): an abandoned client must not keep the

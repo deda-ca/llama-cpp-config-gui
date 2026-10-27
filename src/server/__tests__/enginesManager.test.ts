@@ -36,6 +36,8 @@ function fakeChild() {
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
   child.kill = vi.fn();
+  child.exitCode = null;
+  child.signalCode = null;
   return child;
 }
 
@@ -371,3 +373,87 @@ describe('passthrough driver launch', () => {
     expect(lines[0]).toContain('[ERROR] Binary not found: /opt/tool/my-tool');
   });
 });
+
+describe('ProcessWorker lifecycle (code review 2026-10-27)', () => {
+  const spec = { ...DEFAULT_CONFIG, llamaCppPath: '/opt/llama' };
+
+  it('reports running once the process has spawned', () => {
+    const mgr = new EngineManager();
+    const child = fakeChild();
+    spawn.mockReturnValueOnce(child);
+    mgr.launch('a', spec);
+    expect(mgr.getStatus('a')).toBe('starting');
+    child.emit('spawn');
+    expect(mgr.getStatus('a')).toBe('running');
+  });
+
+  it('a user stop stays "stopped" when the killed process then closes', () => {
+    const mgr = new EngineManager();
+    const child = fakeChild();
+    spawn.mockReturnValueOnce(child);
+    mgr.launch('a', spec);
+    child.emit('spawn');
+    mgr.stop('a');
+    child.emit('close', null, 'SIGTERM');
+    expect(mgr.getStatus('a')).toBe('stopped');
+  });
+
+  it('SIGKILLs the old process (not the new one) when it ignores SIGTERM across a relaunch', () => {
+    vi.useFakeTimers();
+    try {
+      const mgr = new EngineManager();
+      const oldChild = fakeChild();
+      const newChild = fakeChild();
+      spawn.mockReturnValueOnce(oldChild).mockReturnValueOnce(newChild);
+      mgr.launch('a', spec);
+      mgr.launch('a', spec); // relaunch: stops oldChild, spawns newChild
+      expect(oldChild.kill).toHaveBeenCalledWith('SIGTERM');
+      vi.advanceTimersByTime(3500);
+      expect(oldChild.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(newChild.kill).not.toHaveBeenCalled();
+      // The old child's late close must not clobber the new child's status.
+      newChild.emit('spawn');
+      oldChild.emit('close', null, 'SIGKILL');
+      expect(mgr.getStatus('a')).toBe('running');
+      mgr.stop('a');
+      expect(newChild.kill).toHaveBeenCalledWith('SIGTERM');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not SIGKILL a process that exited after SIGTERM', () => {
+    vi.useFakeTimers();
+    try {
+      const mgr = new EngineManager();
+      const child = fakeChild();
+      spawn.mockReturnValueOnce(child);
+      mgr.launch('a', spec);
+      mgr.stop('a');
+      child.signalCode = 'SIGTERM';
+      child.emit('close', null, 'SIGTERM');
+      vi.advanceTimersByTime(3500);
+      expect(child.kill).not.toHaveBeenCalledWith('SIGKILL');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps stdout and stderr partial lines separate and flushes the tail on exit', () => {
+    const mgr = new EngineManager();
+    const lines: string[] = [];
+    (mgr as any).events.onLogLine = (_id: string, line: string) => lines.push(line);
+    const child = fakeChild();
+    spawn.mockReturnValueOnce(child);
+    mgr.launch('a', spec);
+    child.stdout.emit('data', Buffer.from('out-he'));
+    child.stderr.emit('data', Buffer.from('err-line\n'));
+    child.stdout.emit('data', Buffer.from('llo\nout-tail'));
+    child.emit('close', 0, null);
+    expect(lines).toContain('err-line');
+    expect(lines).toContain('out-hello');
+    expect(lines).toContain('out-tail');
+    expect(mgr.getStatus('a')).toBe('exited');
+  });
+});
+

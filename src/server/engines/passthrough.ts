@@ -9,12 +9,12 @@
  */
 
 import type { LlamaConfig } from '../types.js';
-import { splitArgs } from './args.js';
+import { extraTokens } from './llama.js';
 import type { EngineDriver } from './driver.js';
 
 export const passthroughDriver: EngineDriver = {
   kind: 'custom',
   // The instance's `binary` field is the executable name, verbatim.
   binaryName: (spec) => spec.binary,
-  buildArgs: (spec) => (spec.extraArgs.trim() ? splitArgs(spec.extraArgs) : []),
+  buildArgs: (spec) => extraTokens(spec),
 };

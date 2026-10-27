@@ -25,8 +25,10 @@ function instanceTag(line: LogEntry): string | null {
 const containerRef = ref<HTMLElement | null>(null);
 const autoScroll = ref(true);
 
+// Watch the newest line, not just the count: once the parent caps the list at
+// its limit, every push is paired with a shift and the length stops changing.
 watch(
-  () => props.lines.length,
+  () => [props.lines.length, props.lines[props.lines.length - 1]] as const,
   async () => {
     if (autoScroll.value) {
       await nextTick();

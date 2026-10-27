@@ -38,6 +38,10 @@ let lastUpstreamContentType = '';
  *  timeout is the only thing that can end it. */
 let stallNext = false;
 const stalledRequests: http.IncomingMessage[] = [];
+/** Delay (ms) before the stub sends any response headers to the next request. */
+let delayNextMs = 0;
+/** When set, the next image request answers with this JSON body instead. */
+let bigBodyNext: string | null = null;
 
 beforeAll(async () => {
   upstream = http.createServer((req, res) => {
@@ -51,6 +55,22 @@ beforeAll(async () => {
         stallNext = false;
         stalledRequests.push(req);
         return; // deliberately never respond
+      }
+      if (delayNextMs > 0) {
+        const ms = delayNextMs;
+        delayNextMs = 0;
+        setTimeout(() => {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(CHAT_JSON);
+        }, ms);
+        return;
+      }
+      if (bigBodyNext !== null) {
+        const big = bigBodyNext;
+        bigBodyNext = null;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(big);
+        return;
       }
       if (req.url === '/v1/chat/completions') {
         const wantsStream = JSON.parse(body).stream === true;
@@ -471,3 +491,34 @@ describe('upstream idle timeout + client abort (proxy §3.7)', () => {
     await new Promise<void>((r) => server.close(() => r()));
   });
 });
+
+describe('proxy regressions (code review 2026-10-27)', () => {
+  it('a non-streamed response slower than the connect timeout still succeeds', async () => {
+    // Bug: the 5 s connect timeout stayed armed until response headers, so any
+    // non-streamed completion taking longer came back as a 502.
+    app = createProxyApp({ getSettings: () => settings, router, db, connectTimeoutMs: 150 });
+    delayNextMs = 500;
+    const res = await request(app).post('/v1/chat/completions')
+      .send({ model: 'qwen', messages: [{ role: 'user', content: 'hi' }] });
+    expect(res.status).toBe(200);
+    expect(res.body.usage.prompt_tokens).toBe(123);
+    await settle();
+    expect(db.query({})[0].status).toBe(200);
+  });
+
+  it('a JSON response over the usage-scan cap passes through intact', async () => {
+    // Bug: bodies over 5 MB were destroyed mid-read and the client hung forever.
+    const embedding = Array.from({ length: 400_000 }, (_, i) => i / 7);
+    bigBodyNext = JSON.stringify({ data: [{ b64_json: 'AA', embedding }] });
+    expect(bigBodyNext.length).toBeGreaterThan(5 * 1024 * 1024);
+    const res = await request(app).post('/v1/images/generations')
+      .send({ model: 'dalle-clone', prompt: 'big' });
+    expect(res.status).toBe(200);
+    expect(res.body.data[0].embedding).toHaveLength(400_000);
+    await settle();
+    const [row] = db.query({});
+    expect(row.status).toBe(200);
+    expect(row.inputTokens).toBeNull();
+  });
+});
+

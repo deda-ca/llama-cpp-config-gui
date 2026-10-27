@@ -98,38 +98,53 @@ export class ProcessWorker {
     });
 
     this.child = child;
-
-    let buffer = '';
+    // Events from a child that has since been stopped or replaced (relaunch)
+    // must not touch the current child's status.
+    const isCurrent = () => this.child === child;
 
     const emit = (line: string) => {
       if (line.trim()) this.handleLine(line);
     };
 
-    child.stdout?.on('data', (chunk: Uint8Array) => {
-      buffer += chunk.toString();
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-      for (const line of lines) emit(line);
-    });
+    // One line buffer per stream: stdout and stderr interleave, and a shared
+    // buffer would splice a partial line from one into the other.
+    const pipeLines = (stream: NodeJS.ReadableStream | null | undefined) => {
+      if (!stream) return () => {};
+      let buffer = '';
+      stream.setEncoding?.('utf8');
+      stream.on('data', (chunk: string | Uint8Array) => {
+        buffer += chunk.toString();
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+        for (const line of lines) emit(line);
+      });
+      return () => {
+        emit(buffer);
+        buffer = '';
+      };
+    };
+    const flushStdout = pipeLines(child.stdout);
+    // llama.cpp writes most output to stderr
+    const flushStderr = pipeLines(child.stderr);
 
-    child.stderr?.on('data', (chunk: Uint8Array) => {
-      const text = chunk.toString();
-      // llama.cpp writes most output to stderr
-      buffer += text;
-      const lines = buffer.split('\n');
-      buffer = lines.pop() ?? '';
-      for (const line of lines) emit(line);
+    child.on('spawn', () => {
+      if (isCurrent() && this.status === 'starting') this.setStatus('running');
     });
 
     child.on('error', (err: Error) => {
+      if (!isCurrent()) return;
+      this.child = null;
       this.setStatus('error');
       this.onLogLine?.(`[ERROR] ${err.message}`);
     });
 
-    child.on('close', (code: number) => {
+    child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+      flushStdout();
+      flushStderr();
+      if (!isCurrent()) return; // stopped or replaced: stop() already set the status
       this.child = null;
       this.setStatus(code === 0 ? 'exited' : 'error');
-      this.onLogLine?.(`[EXIT] Process exited with code ${code}`);
+      this.onLogLine?.(`[EXIT] Process exited with ${signal ? `signal ${signal}` : `code ${code}`}`);
     });
   }
 
@@ -147,13 +162,18 @@ export class ProcessWorker {
   }
 
   stop(): void {
-    if (this.child) {
-      this.child.kill('SIGTERM');
-      // Force kill after 3s if still alive
-      setTimeout(() => {
-        if (this.child) this.child.kill('SIGKILL');
-      }, 3000);
+    const child = this.child;
+    if (child) {
       this.child = null;
+      child.kill('SIGTERM');
+      // Force kill after 3s if *this* child is still alive. The timer must hold
+      // its own reference: `this.child` is already cleared (or is a relaunched
+      // process that must not be killed).
+      const force = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+      }, 3000);
+      force.unref?.();
+      child.once?.('close', () => clearTimeout(force));
     }
     this.setStatus('stopped');
   }

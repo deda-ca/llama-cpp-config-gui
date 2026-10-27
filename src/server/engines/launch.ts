@@ -11,7 +11,7 @@
 import path from 'path';
 import { configDir, DEFAULT_CONFIG } from '../config.js';
 import type { LlamaConfig } from '../types.js';
-import { paramsToArgs } from './args.js';
+import { paramsToArgs, paramsToArgv } from './args.js';
 import { strataPort, strataRepoRoot } from './strata.js';
 import { audioPort, audioRunDir } from './audio.js';
 import { sdPort, sdRunDir } from './sd.js';
@@ -86,6 +86,7 @@ export function instanceToLlamaConfig(
       : (strataPort(strata) ?? audioPort(audio) ?? sdPort(sd) ?? DEFAULT_CONFIG.port),
     apiKey: paramValue(instance.params, '--api-key') ?? '',
     extraArgs: paramsToArgs(instance.params),
+    extraArgv: paramsToArgv(instance.params),
     paramsOnly: true,
   };
 }

@@ -34,13 +34,47 @@ export const DEFAULT_CONFIG: LlamaConfig = {
   gpuOrder: [],
 };
 
-export function loadConfig(): LlamaConfig {
+/** Corrupt files already copied aside, by path -> mtime, so repeated loads of
+ *  the same broken file do not pile up backups. */
+const backedUp = new Map<string, number>();
+
+/**
+ * Parse a JSON config file; `undefined` when it is missing or unreadable.
+ * A file that exists but does not parse (a hand-edit typo, a write cut short
+ * by a crash) is first copied aside to `<file>.corrupt-<timestamp>`: callers
+ * fall back to defaults, and the next save would otherwise overwrite the
+ * user's only copy with an empty one.
+ */
+export function readJsonFile(file: string): unknown {
+  let raw: string;
   try {
-    const raw = fs.readFileSync(configFile(), 'utf-8');
-    return { ...DEFAULT_CONFIG, ...JSON.parse(raw) };
+    raw = fs.readFileSync(file, 'utf-8');
   } catch {
-    return { ...DEFAULT_CONFIG };
+    return undefined;
   }
+  try {
+    return JSON.parse(raw);
+  } catch (e) {
+    try {
+      const mtime = fs.statSync(file).mtimeMs;
+      if (backedUp.get(file) !== mtime) {
+        const backup = `${file}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+        fs.copyFileSync(file, backup);
+        backedUp.set(file, mtime);
+        console.warn(`[config] ${file} is not valid JSON (${(e as Error).message}); saved a copy to ${backup}`);
+      }
+    } catch {
+      /* a failed backup must not stop the app from starting */
+    }
+    return undefined;
+  }
+}
+
+export function loadConfig(): LlamaConfig {
+  const parsed = readJsonFile(configFile());
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? { ...DEFAULT_CONFIG, ...(parsed as Partial<LlamaConfig>) }
+    : { ...DEFAULT_CONFIG };
 }
 
 export function saveConfig(config: LlamaConfig): void {
