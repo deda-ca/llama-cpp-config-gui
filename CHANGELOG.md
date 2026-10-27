@@ -1,3 +1,10 @@
+## [0.22.1](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.22.0...v0.22.1) (2026-10-27)
+
+
+### Bug Fixes
+
+* bugs from full code review (proxy, engines, launch args, config safety) ([#2](https://github.com/deda-ca/llama-cpp-config-gui/issues/2)) ([8df1a96](https://github.com/deda-ca/llama-cpp-config-gui/commit/8df1a96048c28d4d8c45cf1391b0e99f2dce8fc3))
+
 # [0.22.0](https://github.com/deda-ca/llama-cpp-config-gui/compare/v0.21.0...v0.22.0) (2026-10-26)
 
 
