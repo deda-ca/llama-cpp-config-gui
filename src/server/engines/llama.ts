@@ -423,6 +423,13 @@ export function extractMetrics(line: string, current: PerfMetrics): PerfMetrics 
 
 // --- Arg builder (llama-server / llama-cli flags) ---
 
+/** The user's extra parameters as argv tokens: the structured list when the
+ *  launch carries one (no quoting round-trip), else the legacy string split. */
+export function extraTokens(spec: LlamaConfig): string[] {
+  if (spec.extraArgv) return [...spec.extraArgv];
+  return spec.extraArgs.trim() ? splitArgs(spec.extraArgs) : [];
+}
+
 /**
  * Build the CLI argument list for a llama.cpp launch. `spec` is the legacy
  * LlamaConfig shape: `llamaCppPath` carries the build folder, `extraArgs`
@@ -440,7 +447,7 @@ export function extractMetrics(line: string, current: PerfMetrics): PerfMetrics 
  */
 export function buildLlamaArgs(spec: LlamaConfig): string[] {
   const args: string[] = [];
-  const extra = spec.extraArgs.trim() ? splitArgs(spec.extraArgs) : [];
+  const extra = extraTokens(spec);
   const hasExtraFlag = (flag: string) => extra.includes(flag);
   const paramsOnly = spec.paramsOnly === true;
 
@@ -453,7 +460,7 @@ export function buildLlamaArgs(spec: LlamaConfig): string[] {
       if (!hasExtraFlag('--host')) args.push('--host', spec.host || '127.0.0.1');
       // Enable the Prometheus /metrics endpoint so the GUI can poll per-model speeds
       if (METRICS_PARSING_ENABLED) args.push('--metrics');
-      if (spec.apiKey && !hasExtraFlag('--api-key')) args.push('--api-key', `"${spec.apiKey}"`);
+      if (spec.apiKey && !hasExtraFlag('--api-key')) args.push('--api-key', spec.apiKey);
     }
     args.push(...extra);
     return args;
@@ -478,7 +485,7 @@ export function buildLlamaArgs(spec: LlamaConfig): string[] {
     if (spec.binary === 'llama-server') {
       if (!hasExtraFlag('--port')) args.push('--port', String(spec.port));
       if (!hasExtraFlag('--host')) args.push('--host', spec.host || '127.0.0.1');
-      if (spec.apiKey && !hasExtraFlag('--api-key')) args.push('--api-key', `"${spec.apiKey}"`);
+      if (spec.apiKey && !hasExtraFlag('--api-key')) args.push('--api-key', spec.apiKey);
     }
   }
 

@@ -130,3 +130,18 @@ describe('token estimation', () => {
     expect(t).toBe(10 + 4 + 10 + 4);
   });
 });
+
+describe('SseUsageScanner UTF-8 boundaries (code review 2026-10-27)', () => {
+  it('parses a usage line whose multi-byte character is split across chunks', async () => {
+    const line = Buffer.from('data: {"choices":[],"note":"héllo","usage":{"prompt_tokens":9,"completion_tokens":4}}\n\n');
+    const cut = line.indexOf(0xc3) + 1; // inside the 2-byte "é"
+    const scanner = new SseUsageScanner();
+    const out: Buffer[] = [];
+    scanner.on('data', (c: Buffer) => out.push(c));
+    const done = new Promise((r) => scanner.on('end', r));
+    Readable.from([line.subarray(0, cut), line.subarray(cut)], { objectMode: false }).pipe(scanner);
+    await done;
+    expect(scanner.usage).toEqual({ input: 9, output: 4, cached: null });
+    expect(Buffer.concat(out).equals(line)).toBe(true); // passthrough bytes untouched
+  });
+});

@@ -9,6 +9,7 @@
 
 import { describe, it, expect } from 'vitest';
 import path from 'path';
+import os from 'os';
 import {
   AUDIO_MODEL_KEYS,
   AUDIO_OPTION_PREFIXES,
@@ -26,6 +27,7 @@ import {
   serverParamsToConfig,
 } from '../engines/audio.js';
 import { audioDriver, audioLevel, getAudioVersion } from '../engines/audioDriver.js';
+import type { ModelConfig } from '../modelConfig.js';
 
 /** The user's real audio-cpp.json (relative paths, a task array, an `options`
  * map the upstream parser ignores, and a streaming model). */
@@ -351,5 +353,37 @@ describe('key sets', () => {
     expect(AUDIO_MODEL_KEYS.has('family')).toBe(true);
     expect(AUDIO_OPTION_PREFIXES).toContain('load_options');
     expect(path.basename(audioConfigPath('x'))).toBe('audio-x.json');
+  });
+});
+
+describe('audioModelToEntry fixes (code review 2026-10-27)', () => {
+  const card = (extra: Partial<ModelConfig>): ModelConfig => ({
+    id: 'c', alias: 'Breeze', displayName: 'Breeze', notes: '', modelPath: 'models/b.gguf',
+    params: { family: 'breeze_tts' }, paramOrder: ['family'], isDefault: false, type: 'audio', ...extra,
+  });
+
+  it('a disabled default_request_options.<key> row is not written', () => {
+    const entry = audioModelToEntry(card({
+      params: { family: 'breeze_tts', 'default_request_options.seed': '1', 'default_request_options.instruct': 'x' },
+      paramOrder: ['family', 'default_request_options.seed', 'default_request_options.instruct'],
+      disabledParams: ['default_request_options.instruct'],
+    }), '/run');
+    expect(entry.default_request_options).toEqual({ seed: '1' });
+  });
+
+  it('resolves voice_ref inside voice presets and expands ~', () => {
+    const entry = audioModelToEntry(card({
+      audioExtras: {
+        voice_presets: { male: { voice_ref: 'voices/male.wav', reference_text: 'hi' }, abs: { voice_ref: '/v/a.wav' } },
+        default_voice_preset: 'male',
+        voice_ref: '~/v.wav',
+      },
+    }), '/run');
+    expect(entry.voice_presets).toEqual({
+      male: { voice_ref: '/run/voices/male.wav', reference_text: 'hi' },
+      abs: { voice_ref: '/v/a.wav' },
+    });
+    expect(entry.default_voice_preset).toBe('male');
+    expect(entry.voice_ref).toBe(path.join(os.homedir(), 'v.wav'));
   });
 });

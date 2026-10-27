@@ -295,3 +295,20 @@ ctx-size = 4096
     expect(parsed[0].params['flash-attn']).toBe('on');
   });
 });
+
+describe('exportRouterIni custom categories (code review 2026-10-27)', () => {
+  it('writes params whose catalog category is not one of the built-in groups', () => {
+    const params = [
+      { flag: '--ctx-size', key: 'ctx-size', label: 'ctx', description: '', category: 'context', inputType: 'number' as const },
+      { flag: '--slot-save-path', key: 'slot-save-path', label: 'slots', description: '', category: 'server', inputType: 'path' as const },
+    ];
+    const ini = exportRouterIni([{
+      id: 'x', alias: 'm', displayName: 'm', notes: '', modelPath: '/m.gguf', isDefault: false,
+      params: { 'ctx-size': '4096', 'slot-save-path': '/tmp/slots' },
+      paramOrder: ['ctx-size', 'slot-save-path'],
+    }], params);
+    expect(ini).toContain('ctx-size = 4096');
+    expect(ini).toContain('## server');
+    expect(ini).toContain('slot-save-path = /tmp/slots');
+  });
+});

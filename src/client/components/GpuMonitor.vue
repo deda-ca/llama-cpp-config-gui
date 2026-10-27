@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, onMounted, onUnmounted } from 'vue';
 
 const props = defineProps<{
   gpus: any[];
@@ -41,11 +41,14 @@ const sortedGpus = computed(() => {
   return gpus;
 });
 
+// Release drag eligibility if the user clicks the handle without dragging
+function onGlobalMouseup() {
+  if (draggingIndex.value === null) handlePressed.value = null;
+}
+onUnmounted(() => window.removeEventListener('mouseup', onGlobalMouseup));
+
 onMounted(async () => {
-  // Release drag eligibility if the user clicks the handle without dragging
-  window.addEventListener('mouseup', () => {
-    if (draggingIndex.value === null) handlePressed.value = null;
-  });
+  window.addEventListener('mouseup', onGlobalMouseup);
 
   try {
     const res = await fetch('/api/gpu-interval');

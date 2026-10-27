@@ -403,8 +403,9 @@ function toggleLogsCollapsed() {
   logsCollapsed.value = !logsCollapsed.value;
   localStorage.setItem('llama-gui:proxy-logs-collapsed', logsCollapsed.value ? '1' : '0');
 }
+// Newest line, not the count: the capped list stops changing length.
 watch(
-  () => props.lines.length,
+  () => [props.lines.length, props.lines[props.lines.length - 1]] as const,
   async () => {
     if (!autoScroll.value || logsCollapsed.value) return;
     await nextTick();

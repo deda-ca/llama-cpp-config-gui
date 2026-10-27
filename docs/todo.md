@@ -792,6 +792,29 @@ C++ embedding step. `adapter-static` with `bundleStrategy: 'single'` means the a
 mount per engine kind, plus per-instance API forwarding.
 
 
+## 23. Full code review — bugs fixed (2026-10-27) ✅
+
+- Proxy: non-streamed requests slower than 5 s were cut off with a 502 (connect
+  timeout stayed armed until response headers); JSON replies over 5 MB hung the
+  client; an upstream read error left the client waiting; a disabled backend
+  shadowed an enabled one of the same kind in prefix/path fallbacks.
+- Engines: status never left `starting`; Stop ended as `error`; the 3 s SIGKILL
+  never fired (and a quick relaunch lost track of the new process); stdout/stderr
+  shared one line buffer.
+- Launch args: quotes inside param values were stripped (`--chat-template-kwargs
+  {"enable_thinking":false}` arrived as broken JSON); the legacy launch passed
+  the API key wrapped in literal quotes.
+- Config files: an unparseable settings/models/engines file read as empty and the
+  next save wiped it — now copied aside as `<file>.corrupt-<timestamp>` first.
+- audio.cpp: disabled `default_request_options.*` rows were still written;
+  `voice_ref` inside `voice_presets` was not absolutized; `~/` paths not expanded.
+- Self-update deleted the backup it had just made; router INI dropped params
+  from catalog categories outside the built-in six; static file serving allowed
+  `/../` path traversal (node mode); log views stopped auto-scrolling after 2000
+  lines; GPU monitor leaked a window listener.
+- Not changed (design): the GUI server listens on all interfaces with no auth and
+  can spawn executables — bind to localhost or add auth if it is LAN-reachable.
+
 # Next Phase
 
 - ~~Ability to to map model names so I don't have to keep changing them in apps.~~

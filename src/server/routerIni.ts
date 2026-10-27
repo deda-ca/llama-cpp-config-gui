@@ -186,7 +186,10 @@ export function exportRouterIni(configs: ModelConfig[], params: ParamDef[]): str
       }
     }
 
-    for (const cat of categoryOrder) {
+    // Catalogs are user-editable, so a category outside the known list must
+    // still be written (after the known ones) — never silently dropped.
+    const extraCategories = Object.keys(grouped).filter((c) => !categoryOrder.includes(c));
+    for (const cat of [...categoryOrder, ...extraCategories]) {
       const keys = grouped[cat];
       if (!keys || !keys.length) continue;
       writeHeader(cat);

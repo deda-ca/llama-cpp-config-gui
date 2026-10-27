@@ -30,6 +30,7 @@
  * — the folder holding its executable (docs/audio.md §1.5).
  */
 
+import os from 'os';
 import path from 'path';
 import { configDir } from '../config.js';
 import { parseConfigValue, formatConfigValue } from './strata.js';
@@ -199,6 +200,9 @@ export function audioModelToEntry(
   for (const key of orderedModelKeys(cfg)) {
     const value = cfg.params[key];
     if (value === undefined) continue;
+    // A disabled row is excluded whatever its shape — including an
+    // `options.<key>`-style row, which is folded into a nested map below.
+    if (disabled.has(key)) continue;
     const prefix = AUDIO_OPTION_PREFIXES.find((p) => key.startsWith(`${p}.`));
     if (prefix) {
       const optKey = key.slice(prefix.length + 1);
@@ -206,7 +210,6 @@ export function audioModelToEntry(
       (options[prefix] ??= {})[optKey] = value;
       continue;
     }
-    if (disabled.has(key)) continue;
     // `slots` without `--parallel-jobs` is exactly what upstream rejects at
     // parse time; drop the row so the file stays loadable (the editor warns
     // about it instead of the server dying at startup).
@@ -218,14 +221,30 @@ export function audioModelToEntry(
     if (Object.keys(map).length) out[prefix] = map;
   }
 
-  // Extras ride verbatim, except a relative path in a known path key.
+  // Extras ride verbatim, except a relative path in a known path key —
+  // including the `voice_ref` of each voice preset (a preset name or an
+  // inline object for `default_voice_preset`).
   const extras = cfg.audioExtras ?? {};
   for (const [key, value] of Object.entries(extras)) {
-    out[key] = key === 'model_spec_override' || key === 'voice_ref'
-      ? resolveFrom(String(value), baseDir)
-      : value;
+    if (key === 'model_spec_override' || key === 'voice_ref') out[key] = resolveFrom(String(value), baseDir);
+    else if (key === 'voice_presets' && isPlainObject(value)) {
+      out[key] = Object.fromEntries(
+        Object.entries(value).map(([name, preset]) => [name, resolvePresetPaths(preset, baseDir)]),
+      );
+    } else if (key === 'default_voice_preset') out[key] = resolvePresetPaths(value, baseDir);
+    else out[key] = value;
   }
   return out;
+}
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** A voice preset object with its `voice_ref` absolutized; anything else verbatim. */
+function resolvePresetPaths(preset: unknown, baseDir: string): unknown {
+  if (!isPlainObject(preset) || typeof preset.voice_ref !== 'string') return preset;
+  return { ...preset, voice_ref: resolveFrom(preset.voice_ref, baseDir) };
 }
 
 /** `paramOrder` first (the user's order), then any params it forgot. */
@@ -248,7 +267,9 @@ function modelValueOf(key: string, value: string): unknown {
 function resolveFrom(p: string, baseDir: string): string {
   const trimmed = (p ?? '').trim();
   if (!trimmed) return trimmed;
-  if (trimmed.startsWith('/') || trimmed.startsWith('~')) return trimmed;
+  if (trimmed.startsWith('/')) return trimmed;
+  // audio.cpp does no shell expansion, so `~/` must be expanded here.
+  if (trimmed === '~' || trimmed.startsWith('~/')) return path.join(os.homedir(), trimmed.slice(1));
   return baseDir ? path.resolve(baseDir, trimmed) : trimmed;
 }
 

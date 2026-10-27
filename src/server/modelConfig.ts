@@ -117,7 +117,7 @@ export interface ModelsFile {
 
 import fs from 'fs';
 import path from 'path';
-import { configDir } from './config.js';
+import { configDir, readJsonFile } from './config.js';
 
 // Paths resolve at call time so tests can isolate .config by changing cwd.
 function modelsFile(): string {
@@ -184,12 +184,9 @@ export function normalizeModelsFile(data: any): ModelsFile {
 }
 
 export function loadModels(): ModelsFile {
-  try {
-    const raw = fs.readFileSync(modelsFile(), 'utf-8');
-    return normalizeModelsFile(JSON.parse(raw));
-  } catch {
-    return { configs: [], templates: [], defaultConfigId: null, configOrder: [] };
-  }
+  const parsed = readJsonFile(modelsFile());
+  if (parsed === undefined) return { configs: [], templates: [], defaultConfigId: null, configOrder: [] };
+  return normalizeModelsFile(parsed);
 }
 
 export function saveModels(data: ModelsFile): void {

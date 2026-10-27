@@ -27,6 +27,15 @@ const PREFIX_KINDS: Record<string, ProxyBackendKind> = {
   'video/': 'videos',
 };
 
+/** Path fallback: namespaced endpoints map onto backend kinds. */
+const PATH_KINDS: [string, ProxyBackendKind][] = [
+  ['/v1/audio/', 'audio'],
+  ['/v1/images/', 'sdiffusion'],
+  ['/v1/embeddings', 'embeddings'],
+  ['/v1/moderations', 'moderation'],
+  ['/v1/videos', 'videos'],
+];
+
 export class ModelRouter {
   private byModel = new Map<string, ProxyModelRoute[]>();
   private backends: ProxyBackend[] = [];
@@ -125,41 +134,36 @@ export class ModelRouter {
       }
       for (const [prefix, kind] of Object.entries(PREFIX_KINDS)) {
         if (model.startsWith(prefix)) {
-          const backend = this.backends.find((b) => b.kind === kind);
-          if (!backend) {
+          const target = this.kindTarget(kind);
+          if (target === undefined) {
             prefixStripped = model.slice(prefix.length); // kind not configured -> 'default' catch-all
             break;
           }
-          return backend.enabled
-            ? { backend: backend.id, upstreamModel: model.slice(prefix.length) }
+          return target
+            ? { backend: target.id, upstreamModel: model.slice(prefix.length) }
             : null; // explicitly disabled -> not rescued by 'default'
         }
       }
     }
     // Path fallback for namespaced endpoints
-    if (path.startsWith('/v1/audio/')) {
-      const backend = this.backends.find((b) => b.kind === 'audio');
-      if (backend) return backend.enabled ? { backend: backend.id, upstreamModel: model ?? '' } : null;
-    }
-    if (path.startsWith('/v1/images/')) {
-      const backend = this.backends.find((b) => b.kind === 'sdiffusion');
-      if (backend) return backend.enabled ? { backend: backend.id, upstreamModel: model ?? '' } : null;
-    }
-    if (path.startsWith('/v1/embeddings')) {
-      const backend = this.backends.find((b) => b.kind === 'embeddings');
-      if (backend) return backend.enabled ? { backend: backend.id, upstreamModel: model ?? '' } : null;
-    }
-    if (path.startsWith('/v1/moderations')) {
-      const backend = this.backends.find((b) => b.kind === 'moderation');
-      if (backend) return backend.enabled ? { backend: backend.id, upstreamModel: model ?? '' } : null;
-    }
-    if (path.startsWith('/v1/videos')) {
-      const backend = this.backends.find((b) => b.kind === 'videos');
-      if (backend) return backend.enabled ? { backend: backend.id, upstreamModel: model ?? '' } : null;
+    for (const [prefix, kind] of PATH_KINDS) {
+      if (!path.startsWith(prefix)) continue;
+      const target = this.kindTarget(kind);
+      if (target !== undefined) return target ? { backend: target.id, upstreamModel: model ?? '' } : null;
     }
     // Catch-all: a backend of kind 'default' receives anything not routed elsewhere.
     const fallback = backendOfKind(this.backends, 'default');
     if (fallback) return { backend: fallback.id, upstreamModel: prefixStripped ?? model ?? '' };
     return null;
+  }
+
+  /** Fallback target for a kind: the first *enabled* backend of it, `null` when
+   *  every backend of that kind is disabled (blocked, not rescued by 'default'),
+   *  `undefined` when the kind is not configured at all. A disabled backend
+   *  listed first must not shadow an enabled one of the same kind. */
+  private kindTarget(kind: ProxyBackendKind): ProxyBackend | null | undefined {
+    const ofKind = this.backends.filter((b) => b.kind === kind);
+    if (ofKind.length === 0) return undefined;
+    return ofKind.find((b) => b.enabled) ?? null;
   }
 }
